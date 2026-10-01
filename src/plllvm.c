@@ -198,7 +198,11 @@ plllvm_call_handler(PG_FUNCTION_ARGS)
 	}
 	PG_END_TRY();
 
-	/* not in PG_FINALLY: PG_END_TRY restores the stack PG_TRY saw */
+	/*
+	 * Only the normal return needs this: PG_END_TRY restores the stack PG_TRY
+	 * saw, which still has errcallback.  On ERROR, the catching caller
+	 * restores its own.
+	 */
 	error_context_stack = errcallback.previous;
 
 	return retval;

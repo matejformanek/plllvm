@@ -82,18 +82,19 @@ compile_callback(FunctionCallInfo fcinfo, HeapTuple procTup,
 
 	Assert(!forValidator);
 
-	/* the validator checked it, but pg_proc may have been edited directly */
-	plllvm_compile_check_scope(procTup);
-
-	src = TextDatumGetCString(SysCacheGetAttrNotNull(PROCOID, procTup,
-													 Anum_pg_proc_prosrc));
-
 	cbarg.proname = NameStr(procStruct->proname);
 	cbarg.src = NULL;
 	errcallback.callback = compile_error_callback;
 	errcallback.arg = &cbarg;
 	errcallback.previous = error_context_stack;
 	error_context_stack = &errcallback;
+
+	/* the validator checked it, but pg_proc may have been edited directly */
+	plllvm_compile_check_scope(procTup);
+
+	/* on ERROR, src goes with the memory context of the call */
+	src = TextDatumGetCString(SysCacheGetAttrNotNull(PROCOID, procTup,
+													 Anum_pg_proc_prosrc));
 
 	if (!plllvm_jit_compile(fcinfo->flinfo->fn_oid, src, plllvm_opt_level, &r))
 		report_jit_error(&r, src);
