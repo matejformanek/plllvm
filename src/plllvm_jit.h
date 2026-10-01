@@ -109,10 +109,11 @@ typedef struct plllvm_jit_session_info
 extern void plllvm_jit_session_ensure(void);
 extern void plllvm_jit_get_session_info(plllvm_jit_session_info *info);
 extern bool plllvm_jit_compile(Oid owner_oid, Oid collation,
-							   const char *search_path, const char *ir,
-							   int opt_level, plllvm_jit_result *result);
+							   const char *search_path, int nargs,
+							   const char *ir, int opt_level,
+							   plllvm_jit_result *result);
 extern bool plllvm_jit_check(const char *ir, const char *search_path,
-							 plllvm_jit_result *result);
+							 int nargs, plllvm_jit_result *result);
 extern void plllvm_jit_retire(plllvm_jit_module *mod);
 extern void plllvm_jit_owner_inval(uint32 hashvalue);
 extern void plllvm_jit_retire_dropped(void);

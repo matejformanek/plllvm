@@ -80,11 +80,15 @@ static void array_check(ArrayType *a, Oid elemtype);
 pg_noreturn static void array_elemtype_error(ArrayType *a, Oid elemtype);
 
 /*
- * Raise an ERROR with the given SQLSTATE (packed by MAKE_SQLSTATE)
+ * Raise an ERROR with the given SQLSTATE (packed by MAKE_SQLSTATE); 0 means
+ * P0001, as for RAISE without ERRCODE (exec_stmt_raise)
  */
 void
 plllvm_error(int32 sqlstate, const char *msg)
 {
+	if (sqlstate == 0)
+		sqlstate = ERRCODE_RAISE_EXCEPTION;
+
 	ereport(ERROR,
 			(errcode(sqlstate),
 			 errmsg_internal("%s", msg)));

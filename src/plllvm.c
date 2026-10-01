@@ -30,6 +30,7 @@
 #include "executor/spi.h"
 #include "fmgr.h"
 #include "miscadmin.h"
+#include "utils/datum.h"
 #include "utils/guc.h"
 #include "utils/syscache.h"
 
@@ -67,6 +68,7 @@ static const struct config_enum_entry debug_inject_options[] = {
 	{NULL, 0, false}
 };
 
+static void call_end(plllvm_function *func, plllvm_frame *frame);
 static void exec_error_callback(void *arg);
 static void plllvm_xact_callback(XactEvent event, void *arg);
 static void plllvm_subxact_callback(SubXactEvent event,
@@ -182,8 +184,11 @@ plllvm_subxact_callback(SubXactEvent event, SubTransactionId mySubid,
  *   for PL/pgSQL;
  * - the frame is pushed before the pin, so that a failed push leaks no pin;
  * - the result is copied out inside the TRY, while what it points into
- *   still exists, and the frame is popped before the unpin, so that
- *   nothing runs in a context about to be deleted.
+ *   still exists (a frame's scratch, or the module data of a constant),
+ *   and the frame is popped before the unpin, so that nothing runs in a
+ *   context about to be deleted;
+ * - an ERROR under another call of the code may leave busy sites behind,
+ *   which the errcontext of that call must not name.
  */
 Datum
 plllvm_call_handler(PG_FUNCTION_ARGS)
@@ -217,16 +222,22 @@ plllvm_call_handler(PG_FUNCTION_ARGS)
 	PG_TRY();
 	{
 		retval = func->addr(fcinfo);
-		if (func->needs_frame && !func->rettypbyval && !fcinfo->isnull)
-			retval = plllvm_frame_copy_out(&frame, retval, func->rettyplen);
+		if (!func->rettypbyval && !fcinfo->isnull)
+			retval = func->needs_frame ?
+				plllvm_frame_copy_out(&frame, retval, func->rettyplen) :
+				datumCopy(retval, false, func->rettyplen);
 	}
-	PG_FINALLY();
+	PG_CATCH();
 	{
-		if (func->needs_frame)
-			plllvm_frame_pop(&frame);
-		plllvm_compile_unpin(func);
+		if (func->cfunc.use_count > 1 && func->mod != NULL &&
+			func->mod->refs != NULL)
+			plllvm_sites_unsure(func->mod->refs);
+		call_end(func, &frame);
+		PG_RE_THROW();
 	}
 	PG_END_TRY();
+
+	call_end(func, &frame);
 
 	/*
 	 * Only the normal return needs this: PG_END_TRY restores the stack PG_TRY
@@ -241,11 +252,25 @@ plllvm_call_handler(PG_FUNCTION_ARGS)
 	return retval;
 }
 
+/* on success and on ERROR */
+static void
+call_end(plllvm_function *func, plllvm_frame *frame)
+{
+	if (func->needs_frame)
+		plllvm_frame_pop(frame);
+	plllvm_compile_unpin(func);
+}
+
 static void
 exec_error_callback(void *arg)
 {
 	plllvm_function *func = (plllvm_function *) arg;
+	const char *site = NULL;
 
+	if (func->mod != NULL && func->mod->refs != NULL)
+		site = plllvm_sites_running(func->mod->refs, func->cfunc.use_count);
+	if (site != NULL)
+		errcontext("PL/LLVM call site \"%s\"", site);
 	errcontext("PL/LLVM function \"%s\"", NameStr(func->proname));
 }
 

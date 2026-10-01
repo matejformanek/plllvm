@@ -28,6 +28,12 @@
  * 4) Sites are released with their code, which deletes their contexts.  The
  *    records themselves stay, like the code.
  *
+ * 5) The errcontext of a call costs the fast path nothing: on ERROR, the
+ *    busy site is the running call.  That holds only while one call of the
+ *    code runs and no ERROR has left a flag behind (note 3): an ERROR
+ *    leaving a call under another one drops the line until the code is
+ *    idle.  The slow path pushes a callback of its own.
+ *
  */
 #include "postgres.h"
 
@@ -59,6 +65,7 @@ struct plllvm_refs
 	int			guc_level;
 	bool		check_only;		/* true, when nothing is kept (validator) */
 	bool		published;		/* true, while the sites are in the list */
+	bool		unsure;			/* true, when a busy flag may be stale */
 	int			nsites;
 	plllvm_site *sites;
 };
@@ -140,6 +147,7 @@ plllvm_sites_path(HeapTuple procTup)
 	Form_pg_proc procStruct = (Form_pg_proc) GETSTRUCT(procTup);
 	Datum		proconfig;
 	bool		isnull;
+	char	   *nspname;
 
 	proconfig = SysCacheGetAttr(PROCOID, procTup, Anum_pg_proc_proconfig,
 								&isnull);
@@ -159,8 +167,12 @@ plllvm_sites_path(HeapTuple procTup)
 		}
 	}
 
-	return psprintf("pg_catalog, %s, pg_temp",
-					quote_identifier(get_namespace_name(procStruct->pronamespace)));
+	nspname = get_namespace_name(procStruct->pronamespace);
+	if (nspname == NULL)
+		elog(ERROR, "cache lookup failed for namespace %u",
+			 procStruct->pronamespace);
+
+	return psprintf("pg_catalog, %s, pg_temp", quote_identifier(nspname));
 }
 
 /*
@@ -440,6 +452,42 @@ plllvm_sites_idle(plllvm_refs *refs)
 {
 	for (int i = 0; i < refs->nsites; i++)
 		refs->sites[i].busy = false;
+	refs->unsure = false;
+}
+
+/*
+ * An ERROR leaves a call while other calls of the code run: its busy flags
+ * stay (note 5)
+ */
+void
+plllvm_sites_unsure(plllvm_refs *refs)
+{
+	refs->unsure = true;
+}
+
+/*
+ * For errcontext: the signature of the site whose call is running, or NULL
+ * when that is not certain.  ncalls is the number of running calls of the
+ * code.
+ */
+const char *
+plllvm_sites_running(plllvm_refs *refs, int ncalls)
+{
+	const char *signature = NULL;
+
+	if (ncalls > 1 || refs->unsure)
+		return NULL;
+
+	for (int i = 0; i < refs->nsites; i++)
+	{
+		if (!refs->sites[i].busy)
+			continue;
+		if (signature != NULL)
+			return NULL;
+		signature = refs->sites[i].signature;
+	}
+
+	return signature;
 }
 
 /*
@@ -471,18 +519,43 @@ plllvm_sites_release(plllvm_refs *refs)
 Datum
 plllvm_rt_site_call(plllvm_site *site, NullableDatum *args, bool *isnull)
 {
+	ErrorContextCallback errcallback;
+	Datum		result;
+
+	errcallback.callback = ref_error_callback;
+	errcallback.arg = unconstify(char *, site->signature);
+	errcallback.previous = error_context_stack;
+	error_context_stack = &errcallback;
+
 	if (site->busy)
-		return call_reentrant(site, args, isnull);
+	{
+		result = call_reentrant(site, args, isnull);
+		error_context_stack = errcallback.previous;
+		return result;
+	}
 
 	if (!site->ready)
 		rebuild(site);
 
+	/* set before the check, so that an invalidation during it wins */
 	if (site->userid != GetUserId())
 	{
-		execute_check(site->fn_oid);
 		site->userid = GetUserId();
+		PG_TRY();
+		{
+			execute_check(site->fn_oid);
+		}
+		PG_CATCH();
+		{
+			site->userid = InvalidOid;
+			PG_RE_THROW();
+		}
+		PG_END_TRY();
 		site->checks++;
 	}
+
+	/* the busy site names itself (note 5) */
+	error_context_stack = errcallback.previous;
 
 	return call(site, site->fcinfo, args, isnull);
 }

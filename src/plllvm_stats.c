@@ -174,9 +174,9 @@ plllvm_jit_test(PG_FUNCTION_ARGS)
 	/* there is no function whose path or collation would apply */
 	if (codegen)
 		ok = plllvm_jit_compile(InvalidOid, InvalidOid, "pg_catalog, pg_temp",
-								ir, opt_level, &result);
+								-1, ir, opt_level, &result);
 	else
-		ok = plllvm_jit_check(ir, "pg_catalog, pg_temp", &result);
+		ok = plllvm_jit_check(ir, "pg_catalog, pg_temp", -1, &result);
 
 	values[0] = BoolGetDatum(ok);
 	if (ok)

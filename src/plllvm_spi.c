@@ -22,6 +22,9 @@
  *    columns go to the frame's caller context, like PL/pgSQL's SELECT INTO
  *    targets.
  *
+ * 4) SPI names the statement in the context of its own errors; the errors
+ *    raised here name it too, in the same words.
+ *
  */
 #include "postgres.h"
 
@@ -38,6 +41,7 @@
 typedef struct plllvm_spi_stmt
 {
 	SPIPlanPtr	plan;			/* SPI_keepplan'd, never freed in v0.1 */
+	const char *sql;			/* for errcontext */
 	int			nargs;
 	List	   *coltypes;		/* OIDs */
 } plllvm_spi_stmt;
@@ -45,9 +49,10 @@ typedef struct plllvm_spi_stmt
 static MemoryContext spi_cxt = NULL;
 static int64 n_statements = 0;
 
+static void stmt_error_callback(void *arg);
 static List *type_list(const char *types);
 static void check_plain_select(SPIPlanPtr plan, const char *sql);
-static void check_result(List *coltypes, TupleDesc tupdesc);
+static void check_result(List *coltypes, TupleDesc tupdesc, const char *sql);
 
 /*
  * The statement of a slot, prepared on first use.  argtypes and coltypes
@@ -64,6 +69,7 @@ plllvm_spi_prepare(void **slot, const char *sql, const char *argtypes,
 	SPIPlanPtr	plan;
 	plllvm_spi_stmt *stmt;
 	MemoryContext oldcxt;
+	ErrorContextCallback errcallback;
 	ListCell   *lc;
 	int			i;
 
@@ -71,6 +77,11 @@ plllvm_spi_prepare(void **slot, const char *sql, const char *argtypes,
 		return *slot;
 
 	Assert(plllvm_cur_frame != NULL);
+
+	errcallback.callback = stmt_error_callback;
+	errcallback.arg = unconstify(char *, sql);
+	errcallback.previous = error_context_stack;
+	error_context_stack = &errcallback;
 
 	args = type_list(argtypes);
 	if (list_length(args) > FUNC_MAX_ARGS)
@@ -81,6 +92,9 @@ plllvm_spi_prepare(void **slot, const char *sql, const char *argtypes,
 	i = 0;
 	foreach(lc, args)
 		argoids[i++] = lfirst_oid(lc);
+	cols = type_list(coltypes);
+
+	error_context_stack = errcallback.previous;
 
 	plan = SPI_prepare_cursor(sql, list_length(args), argoids,
 							  CURSOR_OPT_PARALLEL_OK);
@@ -91,9 +105,8 @@ plllvm_spi_prepare(void **slot, const char *sql, const char *argtypes,
 
 	/* until SPI_keepplan, an ERROR leaves the plan to SPI_finish */
 	check_plain_select(plan, sql);
-
-	cols = type_list(coltypes);
-	check_result(cols, ((CachedPlanSource *) linitial(SPI_plan_get_plan_sources(plan)))->resultDesc);
+	check_result(cols, ((CachedPlanSource *) linitial(SPI_plan_get_plan_sources(plan)))->resultDesc,
+				 sql);
 
 	if (spi_cxt == NULL)
 		spi_cxt = AllocSetContextCreate(TopMemoryContext,
@@ -101,6 +114,7 @@ plllvm_spi_prepare(void **slot, const char *sql, const char *argtypes,
 										ALLOCSET_SMALL_SIZES);
 	oldcxt = MemoryContextSwitchTo(spi_cxt);
 	stmt = palloc(sizeof(plllvm_spi_stmt));
+	stmt->sql = pstrdup(sql);
 	stmt->nargs = list_length(args);
 	stmt->coltypes = list_copy(cols);
 	MemoryContextSwitchTo(oldcxt);
@@ -150,7 +164,7 @@ plllvm_spi_select_into(FunctionCallInfo fcinfo, void *stmtp,
 	processed = SPI_processed;
 
 	/* a saved plan revalidates itself, its result may change */
-	check_result(stmt->coltypes, tuptable->tupdesc);
+	check_result(stmt->coltypes, tuptable->tupdesc, stmt->sql);
 
 	for (int i = 0; i < list_length(stmt->coltypes); i++)
 	{
@@ -187,6 +201,12 @@ int64
 plllvm_spi_statements(void)
 {
 	return n_statements;
+}
+
+static void
+stmt_error_callback(void *arg)
+{
+	errcontext("SQL statement \"%s\"", (const char *) arg);
 }
 
 /*
@@ -263,19 +283,20 @@ refuse:
 	ereport(ERROR,
 			(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
 			 errmsg("PL/LLVM supports only plain SELECT statements"),
-			 errdetail("The statement is \"%s\".", sql)));
+			 errcontext("SQL statement \"%s\"", sql)));
 }
 
 /* so that IR never reads a Datum as another type than it declared */
 static void
-check_result(List *coltypes, TupleDesc tupdesc)
+check_result(List *coltypes, TupleDesc tupdesc, const char *sql)
 {
 	if (tupdesc->natts != list_length(coltypes))
 		ereport(ERROR,
 				(errcode(ERRCODE_DATATYPE_MISMATCH),
 				 errmsg("PL/LLVM statement result does not match its declaration"),
 				 errdetail("The statement returns %d columns, its declaration has %d.",
-						   tupdesc->natts, list_length(coltypes))));
+						   tupdesc->natts, list_length(coltypes)),
+				 errcontext("SQL statement \"%s\"", sql)));
 
 	for (int i = 0; i < tupdesc->natts; i++)
 	{
@@ -287,6 +308,7 @@ check_result(List *coltypes, TupleDesc tupdesc)
 					 errmsg("PL/LLVM statement result does not match its declaration"),
 					 errdetail("Column %d has type %s, %s was declared.",
 							   i + 1, format_type_be(atttypid),
-							   format_type_be(list_nth_oid(coltypes, i)))));
+							   format_type_be(list_nth_oid(coltypes, i))),
+					 errcontext("SQL statement \"%s\"", sql)));
 	}
 }
