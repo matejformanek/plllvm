@@ -8,8 +8,8 @@ changes to PostgreSQL.
 
 **Status: v0.1 in progress.** Functions in `LANGUAGE plllvm` are checked at
 `CREATE FUNCTION`, compiled with plllvm's own LLJIT at their first call in a
-session, and run. `examples/kernels/` has six benchmark kernels written by
-hand in IR.
+session, and run. `examples/kernels/` has seven benchmark kernels written by
+hand in IR and two compiled from C (`make kernels`).
 
 ## Features
 
@@ -18,7 +18,8 @@ v0.1:
 * `LANGUAGE plllvm`: the body is an LLVM IR module with an entry
   `define i64 @f(ptr %fcinfo)`, called as a version 1 function.
 * A small host API (argument and NULL access, errors, interrupts, calls of
-  other functions, constants, text, memory) that the IR declares and the
+  other functions, constants, text, memory, read-only SQL, arrays) that the
+  IR declares and the
   validator checks against the extension's helper bitcode
   (`docs/host-api.ll`).
 * Compile time reported per stage, next to the code it produced.
@@ -89,6 +90,58 @@ next call. A dropped callee is looked up again by its signature. A body
 that uses calls, text or memory helpers runs in a scratch context; a
 by-reference result is copied out of it.
 
+A body that declares `plllvm_spi_prepare` runs SQL. A statement lives in a
+slot, an `internal global ptr null` of the body, and is prepared at its
+first use in a backend; its argument and column types are type names. It
+must be one plain SELECT, without `FOR UPDATE` or data-modifying `WITH` at
+the top level; the functions it calls are not restricted. It runs
+read-only unless the function is VOLATILE, as in PL/pgSQL.
+`plllvm_spi_select_into` runs it as a non-STRICT `SELECT INTO`: the first
+row, or NULLs. A result of other column types than declared is an ERROR.
+By-reference columns are copies as from `plllvm_keep`; free them with
+`plllvm_free`:
+
+```sql
+CREATE FUNCTION name_of(i int) RETURNS text LANGUAGE plllvm STABLE AS $$
+@q.sql = private constant [33 x i8] c"SELECT s FROM spi_t WHERE i = $1\00"
+@q.args = private constant [5 x i8] c"int4\00"
+@q.cols = private constant [5 x i8] c"text\00"
+@q = internal global ptr null
+declare ptr @plllvm_spi_prepare(ptr, ptr, ptr, ptr)
+declare i32 @plllvm_spi_select_into(ptr, ptr, ptr, ptr)
+declare i64 @plllvm_arg_i64(ptr, i32)
+declare i64 @plllvm_return_null(ptr)
+
+define i64 @f(ptr %fcinfo) {
+  %args = alloca { i64, i8 }        ; NullableDatum
+  %out = alloca { i64, i8 }
+  %i = call i64 @plllvm_arg_i64(ptr %fcinfo, i32 0)
+  store { i64, i8 } zeroinitializer, ptr %args
+  store i64 %i, ptr %args
+  %stmt = call ptr @plllvm_spi_prepare(ptr @q, ptr @q.sql, ptr @q.args, ptr @q.cols)
+  %rows = call i32 @plllvm_spi_select_into(ptr %fcinfo, ptr %stmt, ptr %args, ptr %out)
+  %np = getelementptr { i64, i8 }, ptr %out, i32 0, i32 1
+  %n = load i8, ptr %np
+  %null = icmp ne i8 %n, 0
+  br i1 %null, label %none, label %some
+none:
+  %z = call i64 @plllvm_return_null(ptr %fcinfo)
+  ret i64 %z
+some:
+  %v = load i64, ptr %out
+  ret i64 %v
+}
+$$;
+```
+
+Arrays are flat, one-dimensional (or empty) arrays of `int4`, `int8` or
+`float8` without NULL elements. `plllvm_array_arg` gives an argument as a
+private copy, made at each call, so call it once per argument and call;
+`plllvm_array_new` makes one of zeros, `plllvm_array_copy` copies one, and
+the inline `plllvm_array_get_*`/`_set_*` index it from its lower bound. An
+out-of-range subscript or another element type is an ERROR. Arrays are
+allocated in the current context, the scratch in a frame.
+
 `plllvm_function_status(fn regprocedure)` (superuser) gives the `state` of
 a function's code in this backend, `not_compiled`, `live`, `stale` (the
 definition changed since the compile), `retired` (replaced) or `dropped`,
@@ -129,6 +182,10 @@ how often each was prepared, checked and re-entered.
   execute hook runs once per user and invalidation, not per query, and an
   fmgr hook's decision (`FmgrHookIsNeeded`, e.g. after `SECURITY LABEL`) is
   taken only when a site is rebuilt.
+* SQL: only `SELECT INTO` of one row; no cursors, no other commands, no
+  dynamic SQL. Prepared statements are never freed during a session, not
+  even when the function is replaced.
+* Arrays: one dimension, no NULL elements, `int4`, `int8` and `float8` only.
 * Every backend compiles its own copy; status and counters are per backend.
 
 Built and tested only with PostgreSQL 20devel at commit `9510a826e4a`,
@@ -162,7 +219,8 @@ The prefix `plllvm.` is reserved.
 `plllvm_session_info()` (superuser) shows the LLVM version, target triple and
 data layout of the session, the libLLVM and `plllvm_types.bc` it loaded, how
 long the setup took, the numbers of compiles, failed compiles and retired
-code, and the resident size of the backend (`rss_bytes`, macOS only). It sets
+code, the resident size of the backend (`rss_bytes`, macOS only) and the
+number of SQL statements prepared (`spi_statements`). It sets
 the session up if needed, so it also checks the installation.
 
 ## Compilation
@@ -189,7 +247,9 @@ make PG_CONFIG=.../code/install-jit/bin/pg_config stage cluster-start installche
 `make pgindent` formats the C sources (`docs/style.md`). `make check-host-api`
 (part of `installcheck`) checks that `docs/host-api.ll` declares the whole
 host API; `make installcheck-discard` runs the call-site tests under
-`debug_discard_caches`.
+`debug_discard_caches`. `make kernels` compiles `examples/kernels/src/*.c`
+to IR with the install-perf headers, and `make check-kernels` checks that
+the committed `.ll` files are up to date.
 
 ## Checked on
 

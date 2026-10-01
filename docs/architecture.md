@@ -15,6 +15,7 @@ language only; everything else depends on the thesis plan.
 | `src/plllvm_runtime.c` | out-of-line host functions and the JIT symbol table |
 | `src/plllvm_jit.c` | LLVM session (checks `plllvm_types.bc`, target machine); LLJIT, compile pipeline, symbols, timings |
 | `src/plllvm_compile.c` | funccache callbacks, signature and scope checks (PR 3) |
+| `src/plllvm_spi.c` | read-only prepared statements: prepare into a slot, SELECT INTO, result checks |
 | `src/plllvm_sites.c` | call sites and constants: resolution, rebuild, EXECUTE checks, invalidation callbacks |
 | `src/plllvm_stats.c` | `plllvm_session_info()`, `plllvm_code_cache()`, `plllvm_jit_test()`, `plllvm_function_status()` (PR 3) |
 
@@ -57,12 +58,22 @@ Only `plllvm_jit.c` and `plllvm_error.cpp` include LLVM headers.
 * Memory: a body that declares a call, text or memory helper runs in a
   scratch context under the caller's context. Values kept with
   `plllvm_keep` live in the caller's context, as PL/pgSQL's datums.
-* Handler order: take the caller's context; compile; (SPI connect, later);
-  push the frame; pin; run; copy a by-reference result out; pop; unpin.
+* Handler order: take the caller's context; compile; SPI connect (a body
+  that declares a `plllvm_spi_` function); push the frame; pin; run; copy
+  a by-reference result out; pop; unpin; SPI finish. After an ERROR the
+  abort pops the SPI level, as for PL/pgSQL.
+* SQL: a statement is prepared on first use into a slot of the module and
+  kept (`SPI_keepplan`), never freed in v0.1. It runs read-only unless the
+  function is VOLATILE; the result types are checked at every execution,
+  as a saved plan may be replanned. Columns go to the caller's context.
+* Arrays: `arg`, `new` and `copy` check the shape (flat, one dimension, no
+  NULLs) once; the inline accessors check the element type and the
+  subscript.
 * The handler goes through core's funccache (`cached_function_compile`) and
   pins the entry during the call.
 * The validator checks access, signature and scope, and (with
   `check_function_bodies`) parses, links and verifies the body without code
   generation.
-* Out of scope for v0.1: sets, OUT parameters, records, polymorphic types,
+* Out of scope for v0.1: other SQL than SELECT INTO, multi-dimensional
+  arrays, sets, OUT parameters, records, polymorphic types,
   triggers, procedures, `DO`, trusted mode.
