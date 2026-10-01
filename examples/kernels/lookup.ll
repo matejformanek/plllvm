@@ -77,22 +77,21 @@ declare { i32, i1 } @llvm.sadd.with.overflow.i32(i32, i32)
 declare { i64, i1 } @llvm.sadd.with.overflow.i64(i64, i64)
 declare { i64, i1 } @llvm.smul.with.overflow.i64(i64, i64)
 
-; NullableDatum
-%nd = type { i64, i8 }
+%struct.NullableDatum = type { i64, i8 }
 
 define i64 @f(ptr %fcinfo) {
 entry:
   %seed = alloca i64
-  %acc = alloca %nd
+  %acc = alloca %struct.NullableDatum
   %low = alloca i32
   %vowel = alloca i32
   %isnull = alloca i1
   ; $1 = v_i_id; v_price, v_name; v_qty
-  %args = alloca [1 x %nd]
-  %item.out = alloca [2 x %nd]
-  %stock.out = alloca [1 x %nd]
-  %v_price = getelementptr %nd, ptr %item.out, i32 0
-  %v_name = getelementptr %nd, ptr %item.out, i32 1
+  %args = alloca [1 x %struct.NullableDatum]
+  %item.out = alloca [2 x %struct.NullableDatum]
+  %stock.out = alloca [1 x %struct.NullableDatum]
+  %v_price = getelementptr %struct.NullableDatum, ptr %item.out, i32 0
+  %v_name = getelementptr %struct.NullableDatum, ptr %item.out, i32 1
   call void @set_null(ptr %v_price)
   call void @set_null(ptr %v_name)
   call void @set_null(ptr %stock.out)
@@ -131,7 +130,7 @@ k.body:
   %id.1 = call i32 @int84(i64 %id.0)
   %id = call i32 @int4pl(i32 1, i32 %id.1)
   %id.d = sext i32 %id to i64
-  store %nd { i64 0, i8 0 }, ptr %args
+  store %struct.NullableDatum { i64 0, i8 0 }, ptr %args
   store i64 %id.d, ptr %args
 
   ; SELECT i_price, i_name INTO v_price, v_name FROM item WHERE i_id = v_i_id
@@ -239,12 +238,12 @@ null_bound:
 }
 
 define internal void @set_null(ptr %v) alwaysinline {
-  store %nd { i64 0, i8 1 }, ptr %v
+  store %struct.NullableDatum { i64 0, i8 1 }, ptr %v
   ret void
 }
 
 define internal i1 @is_null(ptr %v) alwaysinline {
-  %p = getelementptr %nd, ptr %v, i32 0, i32 1
+  %p = getelementptr %struct.NullableDatum, ptr %v, i32 0, i32 1
   %b = load i8, ptr %p
   %r = icmp ne i8 %b, 0
   ret i1 %r
@@ -270,7 +269,7 @@ entry:
   br i1 %isnull, label %null, label %keep
 keep:
   %new = call i64 @plllvm_keep(i64 %v)
-  store %nd { i64 0, i8 0 }, ptr %var
+  store %struct.NullableDatum { i64 0, i8 0 }, ptr %var
   store i64 %new, ptr %var
   br label %reset
 null:

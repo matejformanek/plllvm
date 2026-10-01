@@ -169,10 +169,15 @@ declare ptr @plllvm_spi_prepare(ptr, ptr, ptr, ptr)
 declare i32 @plllvm_spi_select_into(ptr, ptr, ptr, ptr)
 declare ptr @plllvm_array_copy(ptr)
 declare void @plllvm_array_set_i32(ptr, i32, i32)
+declare i1 @plllvm_arg_bool(ptr, i32)
+%struct.NullableDatum = type { i64, i8 }
 define i64 @f(ptr %fcinfo) {
-  ; fcinfo->args
-  %args = getelementptr i8, ptr %fcinfo, i64 32
-  %out = alloca { i64, i8 }
+  %args = alloca %struct.NullableDatum
+  %out = alloca %struct.NullableDatum
+  %nulls = call i1 @plllvm_arg_bool(ptr %fcinfo, i32 0)
+  %d = zext i1 %nulls to i64
+  store %struct.NullableDatum zeroinitializer, ptr %args
+  store i64 %d, ptr %args
   %stmt = call ptr @plllvm_spi_prepare(ptr @q, ptr @q.sql, ptr @q.args, ptr @q.cols)
   %rows = call i32 @plllvm_spi_select_into(ptr %fcinfo, ptr %stmt, ptr %args, ptr %out)
   %v = load ptr, ptr %out

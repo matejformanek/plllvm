@@ -93,8 +93,8 @@ declare void @plllvm_scratch_reset()
 ; PL/pgSQL.  The slot is an internal global ptr, null at first:
 ; @plllvm_spi_prepare fills it on the first call in a backend.  The types
 ; are comma-separated names, as in "numeric(5,2), int4"; the result must
-; have the declared column types.  NullableDatum is { i64, i8 }
-; (16 bytes).
+; have the declared column types.  NullableDatum is { i64, i8 },
+; %struct.NullableDatum of plllvm_types.bc.
 
 ; (slot, sql, argtypes, coltypes) -> statement
 declare ptr @plllvm_spi_prepare(ptr %slot, ptr %sql, ptr %argtypes, ptr %coltypes)

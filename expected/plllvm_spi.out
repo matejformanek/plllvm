@@ -25,6 +25,7 @@ BEGIN
              || E'declare i64 @plllvm_call1(ptr, i64, i1, ptr)\n';
   END IF;
   ir := ir || $ir$@q = internal global ptr null
+%struct.NullableDatum = type { i64, i8 }
 declare ptr @plllvm_spi_prepare(ptr, ptr, ptr, ptr)
 declare i32 @plllvm_spi_select_into(ptr, ptr, ptr, ptr)
 declare i32 @plllvm_nargs(ptr)
@@ -34,8 +35,8 @@ declare i64 @plllvm_return_null(ptr)
 declare void @plllvm_scratch_reset()
 define i64 @f(ptr %fcinfo) {
 entry:
-  %args = alloca [100 x { i64, i8 }]
-  %out = alloca [4 x { i64, i8 }]
+  %args = alloca [100 x %struct.NullableDatum]
+  %out = alloca [4 x %struct.NullableDatum]
   %n = call i32 @plllvm_nargs(ptr %fcinfo)
   br label %loop
 loop:
@@ -45,9 +46,9 @@ loop:
 arg:
   %v = call i64 @plllvm_arg_i64(ptr %fcinfo, i32 %i)
   %vn = call i1 @plllvm_arg_isnull(ptr %fcinfo, i32 %i)
-  %p = getelementptr { i64, i8 }, ptr %args, i32 %i
+  %p = getelementptr %struct.NullableDatum, ptr %args, i32 %i
   store i64 %v, ptr %p
-  %pn = getelementptr { i64, i8 }, ptr %p, i32 0, i32 1
+  %pn = getelementptr %struct.NullableDatum, ptr %p, i32 0, i32 1
   %vn8 = zext i1 %vn to i8
   store i8 %vn8, ptr %pn
   %i.next = add i32 %i, 1
@@ -62,7 +63,7 @@ $ir$;
   IF ret = 'rows' THEN
     ir := ir || E'  %r = sext i32 %rows to i64\n  ret i64 %r\n}\n';
   ELSE
-    ir := ir || $ir$  %on = getelementptr { i64, i8 }, ptr %out, i32 0, i32 1
+    ir := ir || $ir$  %on = getelementptr %struct.NullableDatum, ptr %out, i32 0, i32 1
   %on8 = load i8, ptr %on
   %isnull = icmp ne i8 %on8, 0
   br i1 %isnull, label %null, label %value

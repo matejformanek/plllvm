@@ -107,20 +107,21 @@ CREATE FUNCTION name_of(i int) RETURNS text LANGUAGE plllvm STABLE AS $$
 @q.args = private constant [5 x i8] c"int4\00"
 @q.cols = private constant [5 x i8] c"text\00"
 @q = internal global ptr null
+%struct.NullableDatum = type { i64, i8 }
 declare ptr @plllvm_spi_prepare(ptr, ptr, ptr, ptr)
 declare i32 @plllvm_spi_select_into(ptr, ptr, ptr, ptr)
 declare i64 @plllvm_arg_i64(ptr, i32)
 declare i64 @plllvm_return_null(ptr)
 
 define i64 @f(ptr %fcinfo) {
-  %args = alloca { i64, i8 }        ; NullableDatum
-  %out = alloca { i64, i8 }
+  %args = alloca %struct.NullableDatum
+  %out = alloca %struct.NullableDatum
   %i = call i64 @plllvm_arg_i64(ptr %fcinfo, i32 0)
-  store { i64, i8 } zeroinitializer, ptr %args
+  store %struct.NullableDatum zeroinitializer, ptr %args
   store i64 %i, ptr %args
   %stmt = call ptr @plllvm_spi_prepare(ptr @q, ptr @q.sql, ptr @q.args, ptr @q.cols)
   %rows = call i32 @plllvm_spi_select_into(ptr %fcinfo, ptr %stmt, ptr %args, ptr %out)
-  %np = getelementptr { i64, i8 }, ptr %out, i32 0, i32 1
+  %np = getelementptr %struct.NullableDatum, ptr %out, i32 0, i32 1
   %n = load i8, ptr %np
   %null = icmp ne i8 %n, 0
   br i1 %null, label %none, label %some
@@ -182,6 +183,9 @@ how often each was prepared, checked and re-entered.
   execute hook runs once per user and invalidation, not per query, and an
   fmgr hook's decision (`FmgrHookIsNeeded`, e.g. after `SECURITY LABEL`) is
   taken only when a site is rebuilt.
+* SQL: "plain SELECT" is checked at the top level only, so a VOLATILE
+  function may run a `FOR UPDATE` inside a subquery (a STABLE one is
+  refused by SPI's read-only check).
 * SQL: only `SELECT INTO` of one row; no cursors, no other commands, no
   dynamic SQL. Prepared statements are never freed during a session, not
   even when the function is replaced.
