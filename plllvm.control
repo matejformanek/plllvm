@@ -1,0 +1,7 @@
+# plllvm extension
+comment = 'PL/LLVM untrusted procedural language'
+default_version = '0.1'
+module_pathname = '$libdir/plllvm'
+relocatable = false
+schema = pg_catalog
+superuser = true

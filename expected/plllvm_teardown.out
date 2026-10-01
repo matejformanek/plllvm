@@ -1,0 +1,10 @@
+--
+-- Drop the plllvm extension
+--
+DROP EXTENSION plllvm;
+SELECT count(*) FROM pg_language WHERE lanname = 'plllvm';
+ count 
+-------
+     0
+(1 row)
+
