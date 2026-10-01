@@ -18,6 +18,10 @@ REGRESS = plllvm_setup \
 		plllvm_cache \
 		plllvm_queryjit \
 		plllvm_memory \
+		kernel_loop \
+		kernel_fib \
+		kernel_is_prime \
+		kernel_mandelbrot \
 		plllvm_fatal \
 		plllvm_teardown
 
