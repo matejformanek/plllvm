@@ -42,8 +42,16 @@ extension links the same shared `libLLVM` as the server's `llvmjit`.
 
 * `plllvm.regress_test_mode` (bool, default off, any user): reduces volatile
   output in regression tests.
+* `plllvm.types_bc_path` (string, default empty, superuser): the
+  `plllvm_types.bc` to use. Empty means `plllvm/plllvm_types.bc` next to the
+  loaded library. A session reads it once, when it first needs LLVM.
 
 The prefix `plllvm.` is reserved.
+
+`plllvm_session_info()` (superuser) shows the LLVM version, target triple and
+data layout of the session, the libLLVM and `plllvm_types.bc` it loaded, and
+how long the setup took. It sets the session up if needed, so it also checks
+the installation.
 
 ## Compilation
 

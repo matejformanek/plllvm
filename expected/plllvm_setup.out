@@ -42,9 +42,10 @@ SELECT pg_describe_object(classid, objid, objsubid) AS member
              member             
 --------------------------------
  function plllvm_call_handler()
+ function plllvm_session_info()
  function plllvm_validator(oid)
  language plllvm
-(3 rows)
+(4 rows)
 
 DROP LANGUAGE plllvm;  -- fail
 ERROR:  cannot drop language plllvm because extension plllvm requires it

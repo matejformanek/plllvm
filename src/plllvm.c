@@ -18,10 +18,12 @@
  */
 #include "postgres.h"
 
+#include "access/xact.h"
 #include "fmgr.h"
 #include "utils/guc.h"
 
 #include "plllvm.h"
+#include "plllvm_jit.h"
 
 #ifdef PG_MODULE_MAGIC_EXT
 
@@ -40,6 +42,13 @@ PG_FUNCTION_INFO_V1(plllvm_call_handler);
 PG_FUNCTION_INFO_V1(plllvm_validator);
 
 bool		plllvm_regress_test_mode = false;
+char	   *plllvm_types_bc_path = NULL;
+
+static void plllvm_xact_callback(XactEvent event, void *arg);
+static void plllvm_subxact_callback(SubXactEvent event,
+									SubTransactionId mySubid,
+									SubTransactionId parentSubid,
+									void *arg);
 
 /*
  * Module initialization
@@ -60,9 +69,40 @@ _PG_init(void)
 							 PGC_USERSET, 0,
 							 NULL, NULL, NULL);
 
+	DefineCustomStringVariable("plllvm.types_bc_path",
+							   gettext_noop("Sets the path of plllvm_types.bc."),
+							   gettext_noop("Read when a session first uses LLVM. Empty means plllvm/plllvm_types.bc next to the plllvm library."),
+							   &plllvm_types_bc_path,
+							   "",
+							   PGC_SUSET, GUC_NOT_IN_SAMPLE,
+							   NULL, NULL, NULL);
+
 	MarkGUCPrefixReserved("plllvm");
 
+	RegisterXactCallback(plllvm_xact_callback, NULL);
+	RegisterSubXactCallback(plllvm_subxact_callback, NULL);
+
 	inited = true;
+}
+
+/*
+ * An ERROR (e.g. out of memory in palloc) can leave a fatal-on-OOM section
+ * open.  Core resets its own in PostgresMain(); an extension has to do it
+ * at (sub)transaction abort.
+ */
+static void
+plllvm_xact_callback(XactEvent event, void *arg)
+{
+	if (event == XACT_EVENT_ABORT || event == XACT_EVENT_PARALLEL_ABORT)
+		plllvm_reset_after_error();
+}
+
+static void
+plllvm_subxact_callback(SubXactEvent event, SubTransactionId mySubid,
+						SubTransactionId parentSubid, void *arg)
+{
+	if (event == SUBXACT_EVENT_ABORT_SUB)
+		plllvm_reset_after_error();
 }
 
 /*
@@ -97,4 +137,17 @@ plllvm_validator(PG_FUNCTION_ARGS)
 			 errmsg("PL/LLVM functions are not implemented yet")));
 
 	PG_RETURN_VOID();			/* keep compiler quiet */
+}
+
+/*
+ * Path for messages: only its last component in regression tests
+ */
+const char *
+plllvm_display_path(const char *path)
+{
+	const char *sep = last_dir_separator(path);
+
+	if (plllvm_regress_test_mode && sep != NULL)
+		return sep + 1;
+	return path;
 }

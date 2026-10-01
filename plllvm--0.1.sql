@@ -15,3 +15,10 @@ CREATE LANGUAGE plllvm
   VALIDATOR plllvm_validator;
 
 COMMENT ON LANGUAGE plllvm IS 'PL/LLVM untrusted procedural language';
+
+CREATE FUNCTION plllvm_session_info()
+  RETURNS TABLE(llvm_version text, triple text, data_layout text,
+                libllvm text, types_bc text, init_ms float8)
+  LANGUAGE c AS 'MODULE_PATHNAME';
+
+REVOKE ALL ON FUNCTION plllvm_session_info() FROM PUBLIC;

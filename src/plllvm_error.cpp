@@ -96,7 +96,7 @@ plllvm_in_fatal_on_oom(void)
  *
  * Core calls llvm_reset_after_error() from PostgresMain()'s error recovery.
  * An extension has no such hook, so this is called at (sub)transaction
- * abort instead.
+ * abort instead (plllvm.c), and before each section (plllvm_jit.c).
  */
 void
 plllvm_reset_after_error(void)
