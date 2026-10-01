@@ -39,7 +39,9 @@ top_builddir = ../..
 include $(top_builddir)/src/Makefile.global
 include $(top_srcdir)/contrib/contrib-global.mk
 else
-PG_CONFIG ?= pg_config
+# in the thesis workspace, default to its PG 20devel build, not the first pg_config on PATH
+THESIS_ROOT ?= $(abspath $(dir $(shell git rev-parse --path-format=absolute --git-common-dir 2>/dev/null))/..)
+PG_CONFIG ?= $(firstword $(wildcard $(THESIS_ROOT)/code/install-jit/bin/pg_config) pg_config)
 PGXS := $(shell $(PG_CONFIG) --pgxs)
 include $(PGXS)
 endif
@@ -108,7 +110,6 @@ ifndef NO_PGXS
 # Development in the thesis workspace: a cluster on PLLLVM_PORT that loads
 # the extension from ./stage, so the PostgreSQL installation stays clean.
 #
-THESIS_ROOT ?= $(abspath $(dir $(shell git rev-parse --path-format=absolute --git-common-dir 2>/dev/null))/..)
 PLLLVM_PORT ?= 5447
 PLLLVM_DATA ?= $(THESIS_ROOT)/scratch/plllvm/data-$(PLLLVM_PORT)
 STAGE = $(CURDIR)/stage
