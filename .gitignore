@@ -1,10 +1,25 @@
+# Build artefacts
 *.o
 *.so
+*.so.[0-9]
 *.dylib
-*.bc
 *.dSYM/
-results/
+*.bc
+*.a
+objfiles.txt
+.deps/
+*.gcno
+*.gcda
+*.gcov
+*.gcov.out
+lcov.info
+
+# make stage (development install, see Makefile)
+/stage/
+
+# pg_regress
+/results/
+/log/
+/tmp_check/
 regression.diffs
 regression.out
-log/
-tmp_check/

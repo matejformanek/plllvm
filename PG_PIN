@@ -1,0 +1,7 @@
+# What plllvm is built and tested against; read by `make doctor`.
+# The commit is not visible through pg_config, the catalog version is.
+PG_VERSION="PostgreSQL 20devel"
+PG_COMMIT=9510a826e4a
+PG_CATVERSION=202609152
+LLVM_MAJOR=22
+LLVM_BREW=llvm@22

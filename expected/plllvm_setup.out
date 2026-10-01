@@ -1,0 +1,79 @@
+--
+-- Install the plllvm extension
+--
+-- PL/LLVM is untrusted: a non-superuser cannot install it, not even with
+-- CREATE on the database (compare plperl_setup).
+CREATE USER regress_plllvm_user1;
+DO $$
+begin
+  execute format('grant create on database %I to regress_plllvm_user1',
+                 current_database());
+end;
+$$;
+SET ROLE regress_plllvm_user1;
+CREATE EXTENSION plllvm;  -- fail
+ERROR:  permission denied to create extension "plllvm"
+HINT:  Must be superuser to create this extension.
+RESET ROLE;
+CREATE EXTENSION plllvm;
+SET plllvm.regress_test_mode = on;
+SELECT extversion, extrelocatable, extnamespace::regnamespace
+  FROM pg_extension WHERE extname = 'plllvm';
+ extversion | extrelocatable | extnamespace 
+------------+----------------+--------------
+ 0.1        | f              | pg_catalog
+(1 row)
+
+SELECT lanpltrusted, lanplcallfoid::regprocedure, laninline,
+       lanvalidator::regprocedure
+  FROM pg_language WHERE lanname = 'plllvm';
+ lanpltrusted |     lanplcallfoid     | laninline |     lanvalidator      
+--------------+-----------------------+-----------+-----------------------
+ f            | plllvm_call_handler() |         0 | plllvm_validator(oid)
+(1 row)
+
+-- the extension owns the language and its support functions
+SELECT pg_describe_object(classid, objid, objsubid) AS member
+  FROM pg_depend
+ WHERE refclassid = 'pg_extension'::regclass
+   AND refobjid = (SELECT oid FROM pg_extension WHERE extname = 'plllvm')
+   AND deptype = 'e'
+ ORDER BY 1;
+             member             
+--------------------------------
+ function plllvm_call_handler()
+ function plllvm_validator(oid)
+ language plllvm
+(3 rows)
+
+DROP LANGUAGE plllvm;  -- fail
+ERROR:  cannot drop language plllvm because extension plllvm requires it
+HINT:  You can drop extension plllvm instead.
+-- the prefix is reserved once the library is loaded
+SET plllvm.no_such_setting = on;  -- fail
+ERROR:  invalid configuration parameter name "plllvm.no_such_setting"
+DETAIL:  "plllvm" is a reserved prefix.
+-- a non-superuser cannot use the language
+SET ROLE regress_plllvm_user1;
+CREATE SCHEMA plllvm_setup_scratch;
+SET search_path = plllvm_setup_scratch;
+CREATE FUNCTION plllvm_user_fn() RETURNS int LANGUAGE plllvm
+AS $$ define i64 @plllvm_user_fn(ptr %fcinfo) { ret i64 0 } $$;  -- fail
+ERROR:  permission denied for language plllvm
+RESET ROLE;
+RESET search_path;
+-- not implemented yet: the validator rejects every function
+CREATE FUNCTION plllvm_fn() RETURNS int LANGUAGE plllvm
+AS $$ define i64 @plllvm_fn(ptr %fcinfo) { ret i64 0 } $$;  -- fail
+ERROR:  PL/LLVM functions are not implemented yet
+SET check_function_bodies = off;
+CREATE FUNCTION plllvm_fn() RETURNS int LANGUAGE plllvm
+AS $$ define i64 @plllvm_fn(ptr %fcinfo) { ret i64 0 } $$;  -- fail
+ERROR:  PL/LLVM functions are not implemented yet
+RESET check_function_bodies;
+-- no inline handler
+DO LANGUAGE plllvm $$ $$;  -- fail
+ERROR:  language "plllvm" does not support inline code execution
+-- Clean up
+DROP OWNED BY regress_plllvm_user1;
+DROP USER regress_plllvm_user1;
