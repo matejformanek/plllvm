@@ -182,6 +182,7 @@ extern void plllvm_refs_resolved(plllvm_refs *refs);
 extern void plllvm_refs_end(plllvm_refs *refs, bool publish);
 extern int	plllvm_refs_sites(plllvm_refs *refs, plllvm_site **sites);
 extern void plllvm_sites_idle(plllvm_refs *refs);
+extern void plllvm_sites_unsure(plllvm_refs *refs);
 extern const char *plllvm_sites_running(plllvm_refs *refs, int ncalls);
 extern void plllvm_sites_release(plllvm_refs *refs);
 

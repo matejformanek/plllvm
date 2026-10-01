@@ -30,9 +30,9 @@
  *
  * 5) The errcontext of a call costs the fast path nothing: on ERROR, the
  *    busy site is the running call.  That holds only while one call of the
- *    code runs and no ERROR has left a flag behind (note 3), so an ERROR
- *    under more calls drops the line until the code is idle.  The slow
- *    path pushes a callback of its own.
+ *    code runs and no ERROR has left a flag behind (note 3): an ERROR
+ *    leaving a call under another one drops the line until the code is
+ *    idle.  The slow path pushes a callback of its own.
  *
  */
 #include "postgres.h"
@@ -147,6 +147,7 @@ plllvm_sites_path(HeapTuple procTup)
 	Form_pg_proc procStruct = (Form_pg_proc) GETSTRUCT(procTup);
 	Datum		proconfig;
 	bool		isnull;
+	char	   *nspname;
 
 	proconfig = SysCacheGetAttr(PROCOID, procTup, Anum_pg_proc_proconfig,
 								&isnull);
@@ -166,8 +167,12 @@ plllvm_sites_path(HeapTuple procTup)
 		}
 	}
 
-	return psprintf("pg_catalog, %s, pg_temp",
-					quote_identifier(get_namespace_name(procStruct->pronamespace)));
+	nspname = get_namespace_name(procStruct->pronamespace);
+	if (nspname == NULL)
+		elog(ERROR, "cache lookup failed for namespace %u",
+			 procStruct->pronamespace);
+
+	return psprintf("pg_catalog, %s, pg_temp", quote_identifier(nspname));
 }
 
 /*
@@ -451,6 +456,16 @@ plllvm_sites_idle(plllvm_refs *refs)
 }
 
 /*
+ * An ERROR leaves a call while other calls of the code run: its busy flags
+ * stay (note 5)
+ */
+void
+plllvm_sites_unsure(plllvm_refs *refs)
+{
+	refs->unsure = true;
+}
+
+/*
  * For errcontext: the signature of the site whose call is running, or NULL
  * when that is not certain.  ncalls is the number of running calls of the
  * code.
@@ -460,10 +475,7 @@ plllvm_sites_running(plllvm_refs *refs, int ncalls)
 {
 	const char *signature = NULL;
 
-	/* the ERROR may leave the outer calls' flags behind */
-	if (ncalls > 1)
-		refs->unsure = true;
-	if (refs->unsure)
+	if (ncalls > 1 || refs->unsure)
 		return NULL;
 
 	for (int i = 0; i < refs->nsites; i++)
@@ -525,10 +537,20 @@ plllvm_rt_site_call(plllvm_site *site, NullableDatum *args, bool *isnull)
 	if (!site->ready)
 		rebuild(site);
 
+	/* set before the check, so that an invalidation during it wins */
 	if (site->userid != GetUserId())
 	{
-		execute_check(site->fn_oid);
 		site->userid = GetUserId();
+		PG_TRY();
+		{
+			execute_check(site->fn_oid);
+		}
+		PG_CATCH();
+		{
+			site->userid = InvalidOid;
+			PG_RE_THROW();
+		}
+		PG_END_TRY();
 		site->checks++;
 	}
 

@@ -617,6 +617,45 @@ ERROR:  division by zero
 CONTEXT:  SQL function "sqlrec" statement 1
 PL/LLVM call site "sqlrec(integer)"
 PL/LLVM function "via_site"
+-- an ERROR caught under a nested call leaves a busy flag behind, which
+-- an ERROR of the outer call must not name
+CREATE FUNCTION g_stale(n int) RETURNS int LANGUAGE plpgsql AS $$
+BEGIN
+  PERFORM c_stale(n - 1);
+  RETURN 1;
+EXCEPTION WHEN division_by_zero THEN
+  RETURN NULL;
+END
+$$;
+CREATE FUNCTION c_stale(n int) RETURNS int LANGUAGE plllvm AS $$
+@"g_stale(integer)" = external global i8
+@"int4div(integer,integer)" = external global i8
+declare i64 @plllvm_call1(ptr, i64, i1, ptr)
+declare i64 @plllvm_call2(ptr, i64, i1, i64, i1, ptr)
+declare i32 @plllvm_arg_i32(ptr, i32)
+
+define i64 @f(ptr %fcinfo) {
+entry:
+  %n = call i32 @plllvm_arg_i32(ptr %fcinfo, i32 0)
+  %n64 = sext i32 %n to i64
+  %pos = icmp sgt i32 %n, 0
+  br i1 %pos, label %outer, label %inner
+outer:
+  %r = call i64 @plllvm_call1(ptr @"g_stale(integer)", i64 %n64, i1 false, ptr null)
+  ret i64 %r
+inner:
+  %q = call i64 @plllvm_call2(ptr @"int4div(integer,integer)", i64 1, i1 false, i64 0, i1 false, ptr null)
+  ret i64 %q
+}
+$$;
+SELECT c_stale(1);
+ERROR:  function g_stale(integer) returned NULL
+HINT:  Pass a pointer for the NULL flag.
+CONTEXT:  PL/LLVM function "c_stale"
+SELECT c_stale(0);  -- named again: the code was idle
+ERROR:  division by zero
+CONTEXT:  PL/LLVM call site "int4div(integer,integer)"
+PL/LLVM function "c_stale"
 -- 14. collation: the input collation, else the argument type's
 SELECT mk_ll('lower_ll(t text)', 'text', 'lower(text)', 1);
  mk_ll 
@@ -707,7 +746,7 @@ DROP FUNCTION c_add(int, int), c_nadd(numeric, numeric), c_point(),
   c_who(), c_wm(), c_rp(int), c_priv(int), c_rn(int), c_dr(int), div0(int, int),
   via_site(int), lower_ll(text), lower_const(), c_seven(), c_kint();
 DROP FUNCTION n_strict(int), n_lax(int), who(), wm(), rp(int), priv(int),
-  rn2(int), dr(int), sqlrec(int), c_rec();
+  rn2(int), dr(int), sqlrec(int), c_rec(), c_stale(int), g_stale(int);
 DROP PROCEDURE c_proc();
 DROP DOMAIN c_posint;
 DROP SCHEMA s1, s2 CASCADE;

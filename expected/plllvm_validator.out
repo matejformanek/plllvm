@@ -277,6 +277,13 @@ SELECT v_argno(1);
 ERROR:  "plllvm_arg_i64" reads argument -1
 DETAIL:  Arguments are numbered from 0; the function has 1.
 CONTEXT:  compilation of PL/LLVM function "v_argno"
+-- fcinfo->nargs is pronargs: VARIADIC is refused
+CREATE FUNCTION v_variadic(VARIADIC "any") RETURNS int8 LANGUAGE plllvm
+AS $$ define i64 @f(ptr %fcinfo) { ret i64 0 } $$;
+ERROR:  PL/LLVM functions support only IN parameters
+CREATE FUNCTION v_variadic(VARIADIC int[]) RETURNS int8 LANGUAGE plllvm
+AS $$ define i64 @f(ptr %fcinfo) { ret i64 0 } $$;
+ERROR:  PL/LLVM functions support only IN parameters
 DROP FUNCTION v_late();
 DROP FUNCTION v_strict(int8);
 DROP FUNCTION v_argno(int8);

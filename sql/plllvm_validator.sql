@@ -185,6 +185,11 @@ define i64 @f(ptr %fcinfo) {
 $$;
 RESET check_function_bodies;
 SELECT v_argno(1);
+-- fcinfo->nargs is pronargs: VARIADIC is refused
+CREATE FUNCTION v_variadic(VARIADIC "any") RETURNS int8 LANGUAGE plllvm
+AS $$ define i64 @f(ptr %fcinfo) { ret i64 0 } $$;
+CREATE FUNCTION v_variadic(VARIADIC int[]) RETURNS int8 LANGUAGE plllvm
+AS $$ define i64 @f(ptr %fcinfo) { ret i64 0 } $$;
 
 DROP FUNCTION v_late();
 DROP FUNCTION v_strict(int8);
