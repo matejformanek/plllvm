@@ -517,6 +517,8 @@ site_lookup(plllvm_site *site)
 			memcmp(proc->proargtypes.values, site->argtypes,
 				   site->nargs * sizeof(Oid)) == 0)
 		{
+			/* a reused OID may now be a procedure or return a set */
+			callee_check(fn_oid, proc);
 			ReleaseSysCache(tup);
 			return fn_oid;
 		}

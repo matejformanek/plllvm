@@ -219,4 +219,7 @@ uint_least64_t
 uint_least8_t
 uintmax_t
 uintptr_t
+varattrib_1b
+varattrib_1b_e
 varlena
+vartag_external

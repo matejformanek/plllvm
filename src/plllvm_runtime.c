@@ -25,8 +25,10 @@
  */
 #include "postgres.h"
 
+#include "access/detoast.h"
 #include "utils/datum.h"
 #include "utils/memutils.h"
+#include "varatt.h"
 
 #include "plllvm.h"
 
@@ -144,7 +146,8 @@ plllvm_frame_pop(plllvm_frame *frame)
 
 /*
  * Copy of a varlena in the caller's context, where it survives
- * plllvm_scratch_reset() and the call
+ * plllvm_scratch_reset() and the call.  A toast pointer is fetched, as
+ * PL/pgSQL does on assignment: the row it points into may go meanwhile.
  */
 Datum
 plllvm_keep(Datum value)
@@ -153,7 +156,10 @@ plllvm_keep(Datum value)
 
 	Assert(plllvm_cur_frame != NULL);
 	oldcxt = MemoryContextSwitchTo(plllvm_cur_frame->caller_cxt);
-	value = datumCopy(value, false, -1);
+	if (VARATT_IS_EXTERNAL_NON_EXPANDED(DatumGetPointer(value)))
+		value = PointerGetDatum(detoast_external_attr((struct varlena *) DatumGetPointer(value)));
+	else
+		value = datumCopy(value, false, -1);
 	MemoryContextSwitchTo(oldcxt);
 
 	return value;

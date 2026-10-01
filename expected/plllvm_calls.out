@@ -655,6 +655,27 @@ ORDER BY owner_oid::text;
  c_seven()              | f     | t
 (3 rows)
 
+-- 16. plllvm_keep fetches a toast pointer instead of copying it
+CREATE TABLE c_toast (t text STORAGE EXTERNAL);
+INSERT INTO c_toast SELECT string_agg(md5(i::text), '') FROM generate_series(1, 2000) i;
+CREATE FUNCTION c_keep(t text) RETURNS text LANGUAGE plllvm STRICT AS $$
+declare i64 @plllvm_arg_i64(ptr, i32)
+declare i64 @plllvm_keep(i64)
+define i64 @f(ptr %fcinfo) {
+  %t = call i64 @plllvm_arg_i64(ptr %fcinfo, i32 0)
+  %k = call i64 @plllvm_keep(i64 %t)
+  ret i64 %k
+}
+$$;
+SELECT c_keep(t) = t AS same, pg_column_size(c_keep(t)) > 60000 AS fetched
+FROM c_toast;
+ same | fetched 
+------+---------
+ t    | t
+(1 row)
+
+DROP TABLE c_toast;
+DROP FUNCTION c_keep(text);
 DROP FUNCTION mk_ll(text, text, text, int, bool, text), mk_k(text, text, text);
 DROP FUNCTION c_add(int, int), c_nadd(numeric, numeric), c_point(),
   c_ktext(), c_knum(), c_unknown(int), c_strict(int), c_lax(int), c_nonull(int),
