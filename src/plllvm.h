@@ -62,6 +62,11 @@ extern const plllvm_host_symbol plllvm_host_symbols[];
 /* GUCs (plllvm.c) */
 extern bool plllvm_regress_test_mode;
 extern char *plllvm_types_bc_path;
+extern int	plllvm_opt_level;
+extern bool plllvm_dump_ir;
+extern int	plllvm_max_resident_compiles;
+extern int	plllvm_max_ir_instructions;
+extern int	plllvm_debug_inject;
 
 /* plllvm.c */
 extern const char *plllvm_display_path(const char *path);

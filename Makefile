@@ -10,6 +10,8 @@ PGFILEDESC = "plllvm - PL/LLVM procedural language"
 
 REGRESS = plllvm_setup \
 		plllvm_types \
+		plllvm_jit \
+		plllvm_fatal \
 		plllvm_teardown
 
 REGRESS_OPTS = --dbname=$(PL_TESTDB)
@@ -30,6 +32,8 @@ SHLIB_LINK += -L$(LLVM)/lib -lLLVM -Wl,-rpath,$(LLVM)/lib
 override with_llvm := no
 
 ifdef NO_PGXS
+# plllvm_fatal provokes FATAL errors in a second session
+EXTRA_INSTALL = contrib/dblink
 subdir = contrib/plllvm
 top_builddir = ../..
 include $(top_builddir)/src/Makefile.global

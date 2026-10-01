@@ -18,6 +18,8 @@
  */
 #include "postgres.h"
 
+#include <limits.h>
+
 #include "access/xact.h"
 #include "fmgr.h"
 #include "utils/guc.h"
@@ -43,6 +45,18 @@ PG_FUNCTION_INFO_V1(plllvm_validator);
 
 bool		plllvm_regress_test_mode = false;
 char	   *plllvm_types_bc_path = NULL;
+int			plllvm_opt_level = 2;
+bool		plllvm_dump_ir = false;
+int			plllvm_max_resident_compiles = 2000;
+int			plllvm_max_ir_instructions = 100000;
+int			plllvm_debug_inject = PLLLVM_INJECT_NONE;
+
+static const struct config_enum_entry debug_inject_options[] = {
+	{"none", PLLLVM_INJECT_NONE, false},
+	{"llvm_fatal", PLLLVM_INJECT_LLVM_FATAL, false},
+	{"bad_alloc", PLLLVM_INJECT_BAD_ALLOC, false},
+	{NULL, 0, false}
+};
 
 static void plllvm_xact_callback(XactEvent event, void *arg);
 static void plllvm_subxact_callback(SubXactEvent event,
@@ -76,6 +90,47 @@ _PG_init(void)
 							   "",
 							   PGC_SUSET, GUC_NOT_IN_SAMPLE,
 							   NULL, NULL, NULL);
+
+	DefineCustomIntVariable("plllvm.opt_level",
+							gettext_noop("Sets the LLVM optimization level of compiled functions."),
+							NULL,
+							&plllvm_opt_level,
+							2, 0, 3,
+							PGC_SUSET, 0,
+							NULL, NULL, NULL);
+
+	DefineCustomBoolVariable("plllvm.dump_ir",
+							 gettext_noop("Logs the optimized IR of every compiled function."),
+							 NULL,
+							 &plllvm_dump_ir,
+							 false,
+							 PGC_SUSET, 0,
+							 NULL, NULL, NULL);
+
+	DefineCustomIntVariable("plllvm.max_resident_compiles",
+							gettext_noop("Sets the maximum number of compiles kept in a session."),
+							gettext_noop("Compiled code stays in memory until the session ends, also after the function was replaced."),
+							&plllvm_max_resident_compiles,
+							2000, 1, 1000000,
+							PGC_SUSET, 0,
+							NULL, NULL, NULL);
+
+	DefineCustomIntVariable("plllvm.max_ir_instructions",
+							gettext_noop("Sets the maximum number of IR instructions of a function body."),
+							gettext_noop("Zero turns the limit off."),
+							&plllvm_max_ir_instructions,
+							100000, 0, INT_MAX,
+							PGC_SUSET, 0,
+							NULL, NULL, NULL);
+
+	DefineCustomEnumVariable("plllvm.debug_inject",
+							 gettext_noop("Raises an LLVM error in the next compile, for testing."),
+							 NULL,
+							 &plllvm_debug_inject,
+							 PLLLVM_INJECT_NONE,
+							 debug_inject_options,
+							 PGC_SUSET, GUC_NO_SHOW_ALL | GUC_NOT_IN_SAMPLE,
+							 NULL, NULL, NULL);
 
 	MarkGUCPrefixReserved("plllvm");
 

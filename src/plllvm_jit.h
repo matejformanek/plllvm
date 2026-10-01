@@ -29,11 +29,58 @@ extern bool plllvm_in_fatal_on_oom(void);
 extern void plllvm_reset_after_error(void);
 extern void plllvm_assert_in_fatal_section(void);
 
+/* values of plllvm.debug_inject */
+#define PLLLVM_INJECT_NONE			0
+#define PLLLVM_INJECT_LLVM_FATAL	1
+#define PLLLVM_INJECT_BAD_ALLOC		2
+
+extern void plllvm_inject_fault(int kind);
+
 #ifdef __cplusplus
 }								/* extern "C" */
 #endif
 
 #ifndef __cplusplus
+
+#include "storage/itemptr.h"
+
+/* compiled code, owned by plllvm_jit.c and never freed in v0.1 */
+typedef struct plllvm_jit_module
+{
+	Oid			owner_oid;		/* function, InvalidOid for plllvm_jit_test() */
+	TransactionId owner_xmin;	/* pg_proc row compiled, set by the caller */
+	ItemPointerData owner_tid;	/* likewise */
+	uint64		gen;			/* backend-wide compile number */
+	char		symbol[NAMEDATALEN];	/* plllvm_<owner_oid>_<gen> */
+	int			opt_level;
+	int			ir_instructions;	/* of the user IR, before linking */
+	int			helpers_linked; /* host helper definitions pulled in */
+	int			cfi_left;		/* calls of plllvm_cfi after optimisation */
+	double		parse_bc_ms;
+	double		parse_ms;
+	double		link_ms;
+	double		verify_ms;
+	double		optimize_ms;
+	double		emit_ms;
+	void	   *addr;			/* entry point */
+	bool		retired;		/* true, when the owner's code was replaced or
+								 * dropped; the code itself stays */
+	struct plllvm_jit_module *next;
+} plllvm_jit_module;
+
+typedef struct plllvm_jit_result
+{
+	plllvm_jit_module *mod;		/* NULL unless code was emitted */
+	int			sqlerrcode;		/* 0 on success */
+	char	   *errmsg;			/* palloc'd in the caller's context */
+	char	   *errdetail;
+	char	   *errhint;
+	int			errline;		/* position in the IR, 0 if unknown */
+	int			errcol;
+	int			ir_instructions;
+	int			helpers_linked;
+	int			cfi_left;		/* -1 when not optimised */
+} plllvm_jit_result;
 
 typedef struct plllvm_jit_session_info
 {
@@ -43,11 +90,19 @@ typedef struct plllvm_jit_session_info
 	char	   *libllvm;		/* file of the loaded libLLVM */
 	char	   *types_bc;		/* file the session was set up from */
 	double		init_ms;
+	int64		compiles;
+	int64		compile_failures;
+	int64		retired;
 } plllvm_jit_session_info;
 
 /* plllvm_jit.c */
 extern void plllvm_jit_session_ensure(void);
 extern void plllvm_jit_get_session_info(plllvm_jit_session_info *info);
+extern bool plllvm_jit_compile(Oid owner_oid, const char *ir, int opt_level,
+							   plllvm_jit_result *result);
+extern bool plllvm_jit_check(const char *ir, plllvm_jit_result *result);
+extern void plllvm_jit_retire(plllvm_jit_module *mod);
+extern plllvm_jit_module *plllvm_jit_modules(void);
 
 #endif							/* !__cplusplus */
 
