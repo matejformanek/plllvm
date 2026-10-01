@@ -7,17 +7,8 @@ SET plllvm.regress_test_mode = on;
 \getenv abs_srcdir PG_ABS_SRCDIR
 \set ir `cat :'abs_srcdir'/examples/kernels/mandelbrot.ll`
 
--- v0.1a has no text helpers: the kernel returns (cnt << 32) | h and a SQL
--- wrapper formats it as the original does
-CREATE FUNCTION mandelbrot_ll_raw(sz integer) RETURNS bigint
-LANGUAGE plllvm IMMUTABLE AS :'ir';
-
 CREATE FUNCTION mandelbrot_ll(sz integer) RETURNS text
-LANGUAGE sql IMMUTABLE
-BEGIN ATOMIC
-  SELECT (r >> 32)::text || '/' || (r & 4294967295)::text
-  FROM mandelbrot_ll_raw(sz) AS r;
-END;
+LANGUAGE plllvm IMMUTABLE AS :'ir';
 
 CREATE FUNCTION mandelbrot_pl(sz integer) RETURNS text
 LANGUAGE plpgsql IMMUTABLE AS $$
@@ -83,9 +74,8 @@ FROM (VALUES (NULL::int), (-2147483648)) s(n);
 -- the size of EXP-001
 SELECT mandelbrot_ll(440);
 
-SELECT state FROM plllvm_function_status('mandelbrot_ll_raw(integer)');
+SELECT state FROM plllvm_function_status('mandelbrot_ll(integer)');
 
 DROP FUNCTION sqlstate_of(text);
 DROP FUNCTION mandelbrot_ll(integer);
-DROP FUNCTION mandelbrot_ll_raw(integer);
 DROP FUNCTION mandelbrot_pl(integer);

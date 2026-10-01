@@ -68,9 +68,10 @@ typedef struct plllvm_jit_module
 	bool		retired;		/* true, when the owner's code was replaced or
 								 * dropped; the code itself stays */
 	uint32		owner_hash;		/* of owner_oid in PROCOID, set by the caller */
-	LocalTransactionId owner_inval_lxid;	/* transaction of an
-											 * invalidation of the owner, or
-											 * invalid */
+	bool		owner_inval;	/* true, when the owner's row was invalidated
+								 * since the last check */
+	LocalTransactionId owner_inval_lxid;	/* transaction that may have
+											 * dropped the owner, or invalid */
 	struct plllvm_refs *refs;	/* call sites and constants, or NULL */
 	struct plllvm_jit_module *next;
 } plllvm_jit_module;

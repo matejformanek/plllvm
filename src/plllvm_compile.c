@@ -79,6 +79,10 @@ compile_callback(FunctionCallInfo fcinfo, HeapTuple procTup,
 	compile_error_arg cbarg;
 	ErrorContextCallback errcallback;
 	char	   *src;
+	char	   *path;
+	uint32		hash;
+	int16		rettyplen;
+	bool		rettypbyval;
 
 	Assert(!forValidator);
 
@@ -92,11 +96,16 @@ compile_callback(FunctionCallInfo fcinfo, HeapTuple procTup,
 	/* the validator checked it, but pg_proc may have been edited directly */
 	plllvm_compile_check_scope(procTup);
 
-	/* on ERROR, src goes with the memory context of the call */
+	/* on ERROR, these go with the memory context of the call */
 	src = TextDatumGetCString(SysCacheGetAttrNotNull(PROCOID, procTup,
 													 Anum_pg_proc_prosrc));
+	path = plllvm_sites_path(procTup);
+	hash = GetSysCacheHashValue1(PROCOID,
+								 ObjectIdGetDatum(fcinfo->flinfo->fn_oid));
+	get_typlenbyval(procStruct->prorettype, &rettyplen, &rettypbyval);
 
-	if (!plllvm_jit_compile(fcinfo->flinfo->fn_oid, src, plllvm_opt_level, &r))
+	if (!plllvm_jit_compile(fcinfo->flinfo->fn_oid, hashkey->inputCollation,
+							path, src, plllvm_opt_level, &r))
 		report_jit_error(&r, src);
 
 	error_context_stack = errcallback.previous;
@@ -107,9 +116,13 @@ compile_callback(FunctionCallInfo fcinfo, HeapTuple procTup,
 	 */
 	r.mod->owner_xmin = HeapTupleHeaderGetRawXmin(procTup->t_data);
 	r.mod->owner_tid = procTup->t_self;
+	r.mod->owner_hash = hash;
 	func->magic = PLLLVM_FN_MAGIC;
 	namestrcpy(&func->proname, NameStr(procStruct->proname));
 	func->addr = (PGFunction) r.mod->addr;
+	func->needs_frame = r.mod->needs_frame;
+	func->rettypbyval = rettypbyval;
+	func->rettyplen = rettyplen;
 	func->mod = r.mod;
 
 	pfree(src);
@@ -126,6 +139,8 @@ delete_callback(CachedFunction *cfunc)
 
 	if (func->mod != NULL)
 	{
+		if (func->mod->refs != NULL)
+			plllvm_sites_release(func->mod->refs);
 		plllvm_jit_retire(func->mod);
 		func->mod = NULL;
 	}
@@ -144,6 +159,10 @@ plllvm_compile_unpin(plllvm_function *func)
 {
 	Assert(func->cfunc.use_count > 0);
 	func->cfunc.use_count--;
+
+	if (func->cfunc.use_count == 0 && func->mod != NULL &&
+		func->mod->refs != NULL)
+		plllvm_sites_idle(func->mod->refs);
 
 	if (func->cfunc.use_count == 0 && func->cfunc.fn_hashkey == NULL)
 	{
@@ -226,7 +245,7 @@ plllvm_compile_check_body(HeapTuple procTup)
 	errcallback.previous = error_context_stack;
 	error_context_stack = &errcallback;
 
-	if (!plllvm_jit_check(src, &r))
+	if (!plllvm_jit_check(src, plllvm_sites_path(procTup), &r))
 		report_jit_error(&r, src);
 
 	error_context_stack = errcallback.previous;

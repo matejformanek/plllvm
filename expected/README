@@ -1,10 +1,13 @@
 Alternative expected outputs (*_N.out) and the reason for each:
 
-(none yet)
+plllvm_cache_1.out: under debug_discard_caches every call rebuilds a call
+site, so the counters of prepares read f (make installcheck-discard).
 
 Messages of LLVM itself (parser, verifier) appear only in plllvm_jit and
 plllvm_validator; another LLVM major may need _1.out files for these two.
 
-plllvm registers no syscache callbacks: an entry is revalidated by the xmin
-and ctid of its pg_proc row alone, so debug_discard_caches does not change
-any output.
+A function's entry is revalidated by the xmin and ctid of its pg_proc row
+alone.  Call sites are invalidated by PROCOID, AUTHMEMROLEMEM, AUTHOID and
+DATABASEOID callbacks; under debug_discard_caches only the site counters
+of plllvm_cache change, and make installcheck-discard checks that
+plllvm_calls does not.

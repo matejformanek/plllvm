@@ -30,10 +30,18 @@ CREATE FUNCTION plllvm_code_cache()
                 ir_instructions int4, helpers_linked int4, cfi_left int4,
                 parse_bc_ms float8, parse_ms float8, link_ms float8,
                 verify_ms float8, optimize_ms float8, emit_ms float8,
-                total_ms float8, retired bool, code_addr text)
+                total_ms float8, retired bool, code_addr text,
+                resolve_ms float8, frame bool)
   LANGUAGE c AS 'MODULE_PATHNAME';
 
 REVOKE ALL ON FUNCTION plllvm_code_cache() FROM PUBLIC;
+
+CREATE FUNCTION plllvm_call_sites()
+  RETURNS TABLE(owner regprocedure, callee text, ready bool, busy bool,
+                prepares int8, checks int8, reentries int8)
+  LANGUAGE c AS 'MODULE_PATHNAME';
+
+REVOKE ALL ON FUNCTION plllvm_call_sites() FROM PUBLIC;
 
 -- of this backend: not_compiled, live, stale, retired or dropped
 CREATE FUNCTION plllvm_function_status(fn regprocedure, OUT state text,

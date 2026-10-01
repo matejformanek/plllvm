@@ -30,15 +30,23 @@
  *    the JITDylib's default tracker, which plllvm never touches.  A failed
  *    add or lookup removes its tracker at once.
  *
+ * 5) Call sites and constants are resolved between verify and symbol
+ *    resolution, outside the section, with PostgreSQL's own errors
+ *    (plllvm_sites.c).  Their globals then become addresses and Datums.
+ *
  */
 #include "postgres.h"
 
 #include <dlfcn.h>
 
+#include "access/xact.h"
 #include "jit/jit.h"
+#include "nodes/pg_list.h"
 #include "portability/instr_time.h"
 #include "storage/ipc.h"
+#include "storage/proc.h"
 #include "utils/memutils.h"
+#include "utils/syscache.h"
 
 #include "plllvm.h"
 #include "plllvm_jit.h"
@@ -90,6 +98,13 @@ typedef struct JitCode
 	LLVMOrcResourceTrackerRef rt;
 } JitCode;
 
+/* a call site or constant of the user IR */
+typedef struct IrRef
+{
+	char	   *name;
+	int			nargs;			/* of a site's calls, -1 if it has none */
+} IrRef;
+
 /* newest first */
 static plllvm_jit_module *modules = NULL;
 
@@ -114,14 +129,19 @@ static LLVMOrcObjectLayerRef object_layer_create(void *ctx,
 static LLVMErrorRef host_symbols_define(void);
 static void log_jit_error(void *ctx, LLVMErrorRef error);
 static void plllvm_jit_shutdown(int code, Datum arg);
-static bool build(const char *ir, bool codegen, plllvm_jit_module *mod,
-				  LLVMOrcResourceTrackerRef *rt, char **optimized_ir,
-				  plllvm_jit_result *result);
+static bool build(const char *ir, bool codegen, Oid collation,
+				  const char *search_path, plllvm_jit_module *mod,
+				  LLVMOrcResourceTrackerRef *rt, plllvm_refs **refs,
+				  char **optimized_ir, plllvm_jit_result *result);
 static bool helpers_load(LLVMContextRef ctx, LLVMModuleRef *hmod,
 						 LLVMAttributeRef *attrs);
 static void parse_error_set(char *msg, plllvm_jit_result *result);
 static bool user_ir_check(LLVMContextRef ctx, LLVMModuleRef umod,
-						  LLVMModuleRef hmod, plllvm_jit_result *result);
+						  LLVMModuleRef hmod, List **irrefs,
+						  plllvm_jit_result *result);
+static bool ir_ref_check(LLVMValueRef gv, const char *name, int *nargs,
+						 plllvm_jit_result *result);
+static bool is_frame_helper(const char *name);
 static const char *unresolved_symbol(LLVMModuleRef mod);
 static bool host_symbol_exists(const char *name);
 static const char *value_name(LLVMValueRef v);
@@ -313,11 +333,12 @@ plllvm_jit_get_session_info(plllvm_jit_session_info *info)
  * ERROR right here, before anything is built.
  */
 bool
-plllvm_jit_compile(Oid owner_oid, const char *ir, int opt_level,
-				   plllvm_jit_result *result)
+plllvm_jit_compile(Oid owner_oid, Oid collation, const char *search_path,
+				   const char *ir, int opt_level, plllvm_jit_result *result)
 {
 	plllvm_jit_module mod = {0};
 	LLVMOrcResourceTrackerRef rt;
+	plllvm_refs *refs = NULL;
 	char	   *optimized_ir = NULL;
 	JitCode    *code;
 
@@ -342,11 +363,18 @@ plllvm_jit_compile(Oid owner_oid, const char *ir, int opt_level,
 			 owner_oid, mod.gen);
 	mod.opt_level = opt_level;
 
-	if (!build(ir, true, &mod, &rt, &optimized_ir, result))
+	if (!build(ir, true, collation, search_path, &mod, &rt, &refs,
+			   &optimized_ir, result))
 	{
+		if (refs != NULL)
+			plllvm_refs_end(refs, false);
 		n_failures++;
 		return false;
 	}
+
+	if (refs != NULL)
+		plllvm_refs_end(refs, true);
+	mod.refs = refs;
 
 	code = MemoryContextAllocZero(plllvm_jit_cxt, sizeof(JitCode));
 	code->mod = mod;
@@ -358,12 +386,14 @@ plllvm_jit_compile(Oid owner_oid, const char *ir, int opt_level,
 	result->mod = &code->mod;
 
 	ereport(DEBUG1,
-			(errmsg_internal("plllvm: %s compiled in %.3f ms (parse_bc %.3f, parse %.3f, link %.3f, verify %.3f, optimize %.3f, emit %.3f)",
+			(errmsg_internal("plllvm: %s compiled in %.3f ms (parse_bc %.3f, parse %.3f, link %.3f, verify %.3f, resolve %.3f, optimize %.3f, emit %.3f)",
 							 mod.symbol,
 							 mod.parse_bc_ms + mod.parse_ms + mod.link_ms +
-							 mod.verify_ms + mod.optimize_ms + mod.emit_ms,
+							 mod.verify_ms + mod.resolve_ms +
+							 mod.optimize_ms + mod.emit_ms,
 							 mod.parse_bc_ms, mod.parse_ms, mod.link_ms,
-							 mod.verify_ms, mod.optimize_ms, mod.emit_ms),
+							 mod.verify_ms, mod.resolve_ms, mod.optimize_ms,
+							 mod.emit_ms),
 			 errhidestmt(true),
 			 errhidecontext(true)));
 
@@ -379,15 +409,23 @@ plllvm_jit_compile(Oid owner_oid, const char *ir, int opt_level,
  * Check the IR as plllvm_jit_compile() would, without generating code
  */
 bool
-plllvm_jit_check(const char *ir, plllvm_jit_result *result)
+plllvm_jit_check(const char *ir, const char *search_path,
+				 plllvm_jit_result *result)
 {
 	plllvm_jit_module mod = {0};
+	plllvm_refs *refs = NULL;
+	bool		ok;
 
 	memset(result, 0, sizeof(*result));
 
 	plllvm_jit_session_ensure();
 
-	return build(ir, false, &mod, NULL, NULL, result);
+	ok = build(ir, false, InvalidOid, search_path, &mod, NULL, &refs, NULL,
+			   result);
+	if (refs != NULL)
+		plllvm_refs_end(refs, false);
+
+	return ok;
 }
 
 /*
@@ -402,6 +440,61 @@ plllvm_jit_retire(plllvm_jit_module *mod)
 
 	mod->retired = true;
 	n_retired++;
+}
+
+/*
+ * Note an invalidation of the owner with this PROCOID hash (0: of all).
+ * Called from an invalidation callback, so it allocates nothing.
+ *
+ * Only a transaction that changed catalogs can have dropped the owner
+ * without committing yet.  Its mark holds until it ends; any other mark
+ * counts at once (the dropping backend reads its own committed DROP back at
+ * the start of its next transaction).
+ */
+void
+plllvm_jit_owner_inval(uint32 hashvalue)
+{
+	LocalTransactionId lxid = InvalidLocalTransactionId;
+
+	if (TransactionIdIsValid(GetTopTransactionIdIfAny()))
+		lxid = MyProc->vxid.lxid;
+
+	for (plllvm_jit_module *mod = modules; mod; mod = mod->next)
+	{
+		if (OidIsValid(mod->owner_oid) && !mod->retired &&
+			(hashvalue == 0 || mod->owner_hash == hashvalue) &&
+			!(mod->owner_inval && mod->owner_inval_lxid == MyProc->vxid.lxid))
+		{
+			mod->owner_inval = true;
+			mod->owner_inval_lxid = lxid;
+		}
+	}
+}
+
+/*
+ * Retire the code of dropped functions, which funccache never deletes.  A
+ * mark of this transaction does not count: its DROP may still roll back.
+ * The sites stay, an old activation may still run.
+ */
+void
+plllvm_jit_retire_dropped(void)
+{
+	for (plllvm_jit_module *mod = modules; mod; mod = mod->next)
+	{
+		HeapTuple	tuple;
+
+		if (!mod->owner_inval || mod->owner_inval_lxid == MyProc->vxid.lxid)
+			continue;
+
+		/* before the lookup, which may mark it again */
+		mod->owner_inval = false;
+
+		tuple = SearchSysCache1(PROCOID, ObjectIdGetDatum(mod->owner_oid));
+		if (HeapTupleIsValid(tuple))
+			ReleaseSysCache(tuple);
+		else
+			plllvm_jit_retire(mod);
+	}
 }
 
 /*
@@ -689,16 +782,20 @@ plllvm_jit_shutdown(int code, Datum arg)
 
 /*
  * The compile pipeline: load the helpers, parse and check the user IR,
- * link, verify, resolve symbols, and with codegen also optimize, add the
- * module under its own tracker and look up the entry point.
+ * link, verify, resolve call sites, constants and symbols, and with codegen
+ * also optimize, add the module under its own tracker and look up the
+ * entry point.
  *
  * Runs in one section and never raises an ERROR there: a failure fills
- * result, disposes what is still ours and returns false.
+ * result, disposes what is still ours and returns false.  Only resolving
+ * call sites and constants leaves the section; an ERROR there disposes the
+ * LLVM objects and is rethrown.  *refs is set once they are resolved, and
+ * the caller ends it.
  */
 static bool
-build(const char *ir, bool codegen, plllvm_jit_module *mod,
-	  LLVMOrcResourceTrackerRef *rt, char **optimized_ir,
-	  plllvm_jit_result *result)
+build(const char *ir, bool codegen, Oid collation, const char *search_path,
+	  plllvm_jit_module *mod, LLVMOrcResourceTrackerRef *rt,
+	  plllvm_refs **refs, char **optimized_ir, plllvm_jit_result *result)
 {
 	LLVMContextRef ctx;
 	LLVMModuleRef hmod = NULL;
@@ -711,6 +808,7 @@ build(const char *ir, bool codegen, plllvm_jit_module *mod,
 	const char *name;
 	char	   *msg;
 	int			ndefs;
+	List	   *irrefs = NIL;
 
 	plllvm_reset_after_error();
 	plllvm_enter_fatal_on_oom();
@@ -741,7 +839,7 @@ build(const char *ir, bool codegen, plllvm_jit_module *mod,
 		parse_error_set(msg, result);
 	}
 	LLVMDisposeMemoryBuffer(buf);
-	if (umod == NULL || !user_ir_check(ctx, umod, hmod, result))
+	if (umod == NULL || !user_ir_check(ctx, umod, hmod, &irrefs, result))
 		goto out;
 	mod->parse_ms = elapsed_ms(&since);
 
@@ -804,6 +902,72 @@ build(const char *ir, bool codegen, plllvm_jit_module *mod,
 	LLVMDisposeMessage(msg);
 	if (result->sqlerrcode != 0)
 		goto out;
+	mod->verify_ms = elapsed_ms(&since);
+
+	if (irrefs != NIL)
+	{
+		Datum	   *values = palloc(list_length(irrefs) * sizeof(Datum));
+		plllvm_refs *volatile vrefs = NULL;
+		LLVMTypeRef i64 = LLVMInt64TypeInContext(ctx);
+
+		plllvm_leave_fatal_on_oom();
+
+		PG_TRY();
+		{
+			int			i = 0;
+
+			vrefs = plllvm_refs_begin(list_length(irrefs), collation,
+									  search_path, !codegen);
+			foreach_ptr(IrRef, ref, irrefs)
+				values[i++] = plllvm_refs_add(vrefs, ref->name, ref->nargs);
+			plllvm_refs_resolved(vrefs);
+		}
+		PG_CATCH();
+		{
+			if (vrefs != NULL)
+				plllvm_refs_end(vrefs, false);
+
+			plllvm_enter_fatal_on_oom();
+			LLVMDisposeModule(umod);
+			LLVMContextDispose(ctx);
+			diag_error_clear();
+			plllvm_leave_fatal_on_oom();
+
+			if (codegen)
+				n_failures++;
+			PG_RE_THROW();
+		}
+		PG_END_TRY();
+
+		*refs = vrefs;
+
+		plllvm_enter_fatal_on_oom();
+
+		/* a site becomes its record's address, a constant its Datum */
+		for (int i = 0; i < list_length(irrefs); i++)
+		{
+			IrRef	   *ref = list_nth(irrefs, i);
+			LLVMValueRef gv = LLVMGetNamedGlobal(umod, ref->name);
+			LLVMValueRef value = LLVMConstInt(i64, values[i], false);
+
+			if (ref->name[0] == '\'')
+			{
+				LLVMUseRef	use;
+
+				while ((use = LLVMGetFirstUse(gv)) != NULL)
+				{
+					LLVMValueRef call = LLVMGetUser(use);
+
+					LLVMReplaceAllUsesWith(call, value);
+					LLVMInstructionEraseFromParent(call);
+				}
+			}
+			else
+				LLVMReplaceAllUsesWith(gv, LLVMConstIntToPtr(value,
+															 LLVMTypeOf(gv)));
+			LLVMDeleteGlobal(gv);
+		}
+	}
 
 	/* ORC would fail the lookup too, but only with an error string */
 	if ((name = unresolved_symbol(umod)) != NULL)
@@ -812,7 +976,7 @@ build(const char *ir, bool codegen, plllvm_jit_module *mod,
 					psprintf("undefined symbol \"%s\"", name), NULL);
 		goto out;
 	}
-	mod->verify_ms = elapsed_ms(&since);
+	mod->resolve_ms = elapsed_ms(&since);
 
 	if (!codegen)
 	{
@@ -907,6 +1071,7 @@ out:
 	mod->ir_instructions = result->ir_instructions;
 	mod->helpers_linked = result->helpers_linked;
 	mod->cfi_left = result->cfi_left;
+	mod->needs_frame = result->needs_frame;
 
 	return result->sqlerrcode == 0;
 }
@@ -982,11 +1147,12 @@ parse_error_set(char *msg, plllvm_jit_result *result)
  * The checks the IR must pass before it is linked with the helpers: the
  * entry point, the size, and the names it defines and declares.  A
  * declaration of a host API function is not type-checked by the linker,
- * hence the explicit comparison.
+ * hence the explicit comparison.  Call sites and constants are collected
+ * into *irrefs.
  */
 static bool
 user_ir_check(LLVMContextRef ctx, LLVMModuleRef umod, LLVMModuleRef hmod,
-			  plllvm_jit_result *result)
+			  List **irrefs, plllvm_jit_result *result)
 {
 	LLVMTypeRef ptr = LLVMPointerTypeInContext(ctx, 0);
 	LLVMTypeRef entry_type;
@@ -1075,6 +1241,17 @@ user_ir_check(LLVMContextRef ctx, LLVMModuleRef umod, LLVMModuleRef hmod,
 										 llvm_message(LLVMPrintTypeToString(found))));
 					return false;
 				}
+				if (is_frame_helper(name))
+					result->needs_frame = true;
+			}
+			else if (pass == 1 && (name[0] == '\'' || strchr(name, '(') != NULL))
+			{
+				IrRef	   *ref = palloc(sizeof(IrRef));
+
+				if (!ir_ref_check(gv, name, &ref->nargs, result))
+					return false;
+				ref->name = pstrdup(name);
+				*irrefs = lappend(*irrefs, ref);
 			}
 			else if (strncmp(name, "plllvm_", 7) == 0)
 			{
@@ -1087,6 +1264,79 @@ user_ir_check(LLVMContextRef ctx, LLVMModuleRef umod, LLVMModuleRef hmod,
 	}
 
 	return true;
+}
+
+/*
+ * A constant ('...::type) may only be the argument of plllvm_const, a call
+ * site only the first argument of plllvm_call0..3, always of the same one
+ */
+static bool
+ir_ref_check(LLVMValueRef gv, const char *name, int *nargs,
+			 plllvm_jit_result *result)
+{
+	bool		is_const = (name[0] == '\'');
+
+	*nargs = -1;
+
+	for (LLVMUseRef use = LLVMGetFirstUse(gv); use; use = LLVMGetNextUse(use))
+	{
+		LLVMValueRef user = LLVMGetUser(use);
+		LLVMValueRef callee;
+		const char *cname;
+		int			n;
+
+		if (!LLVMIsACallInst(user) || LLVMGetOperandUse(user, 0) != use)
+			goto misused;
+
+		callee = LLVMGetCalledValue(user);
+		cname = LLVMIsAFunction(callee) ? value_name(callee) : "";
+
+		if (is_const)
+		{
+			if (strcmp(cname, "plllvm_const") != 0)
+				goto misused;
+			continue;
+		}
+
+		if (strncmp(cname, "plllvm_call", 11) != 0 ||
+			cname[11] < '0' || cname[11] > '3' || cname[12] != '\0')
+			goto misused;
+
+		n = cname[11] - '0';
+		if (*nargs >= 0 && *nargs != n)
+		{
+			build_error(result, ERRCODE_INVALID_FUNCTION_DEFINITION,
+						psprintf("call site \"%s\" is called with %d and %d arguments",
+								 name, *nargs, n),
+						NULL);
+			return false;
+		}
+		*nargs = n;
+	}
+
+	return true;
+
+misused:
+	build_error(result, ERRCODE_INVALID_FUNCTION_DEFINITION,
+				is_const ?
+				psprintf("constant \"%s\" must be the argument of plllvm_const",
+						 name) :
+				psprintf("call site \"%s\" must be the first argument of plllvm_call0 to plllvm_call3",
+						 name),
+				NULL);
+	return false;
+}
+
+static bool
+is_frame_helper(const char *name)
+{
+	for (int i = 0; plllvm_frame_helpers[i] != NULL; i++)
+	{
+		if (strcmp(plllvm_frame_helpers[i], name) == 0)
+			return true;
+	}
+
+	return false;
 }
 
 /*

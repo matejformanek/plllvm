@@ -1,0 +1,98 @@
+--
+-- kernel_ledger: examples/kernels/ledger.ll against the PL/pgSQL original
+-- (bench/kernels/20_ledger.sql, ledger_imm)
+--
+SET plllvm.regress_test_mode = on;
+
+\getenv abs_srcdir PG_ABS_SRCDIR
+\set ir `cat :'abs_srcdir'/examples/kernels/ledger.ll`
+
+CREATE FUNCTION ledger_ll(nloans integer, months integer) RETURNS text
+LANGUAGE plllvm IMMUTABLE AS :'ir';
+
+CREATE FUNCTION ledger_pl(nloans integer, months integer) RETURNS text
+LANGUAGE plpgsql IMMUTABLE AS $$
+DECLARE
+  k integer; mth integer;
+  seed bigint := 42;
+  principal numeric(12,2);
+  balance numeric(12,2);
+  payment numeric(12,2);
+  interest numeric(12,2);
+  princ_part numeric(12,2);
+  fee numeric(12,2);
+  rate numeric(10,6);
+  mrate numeric(14,10);
+  f numeric(24,12);
+  total_interest numeric(18,2) := 0;
+  total_paid numeric(18,2) := 0;
+  nfees integer := 0;
+BEGIN
+  FOR k IN 1..nloans LOOP
+    seed := (seed * 1103515245 + 12345) % 2147483648;
+    principal := 5000 + (seed % 495001);
+    rate := 0.02 + (seed % 800) / 10000.0;
+    mrate := rate / 12;
+    f := 1;
+    FOR mth IN 1..months LOOP
+      f := round(f * (1 + mrate), 12);
+    END LOOP;
+    payment := round(principal * mrate * f / (f - 1), 2);
+    balance := principal;
+    FOR mth IN 1..months LOOP
+      interest := round(balance * mrate, 2);
+      IF mth = months OR payment - interest > balance THEN
+        princ_part := balance;
+      ELSE
+        princ_part := payment - interest;
+      END IF;
+      IF (k + mth) % 13 = 0 THEN
+        fee := round(balance * 0.0015, 2) + 5.00;
+        nfees := nfees + 1;
+      ELSE
+        fee := 0;
+      END IF;
+      balance := balance - princ_part;
+      total_interest := total_interest + interest + fee;
+      total_paid := total_paid + princ_part + interest + fee;
+      EXIT WHEN balance <= 0;
+    END LOOP;
+  END LOOP;
+  RETURN total_interest::text || '/' || total_paid::text || '/' || nfees::text;
+END
+$$;
+
+CREATE FUNCTION sqlstate_of(q text) RETURNS text
+LANGUAGE plpgsql AS $$
+BEGIN
+  EXECUTE q;
+  RETURN NULL;
+EXCEPTION WHEN OTHERS THEN
+  RETURN SQLSTATE;
+END
+$$;
+
+SELECT s.n, s.m, ledger_ll(s.n, s.m) AS ll, ledger_ll(s.n, s.m) = ledger_pl(s.n, s.m) AS ok
+FROM (SELECT n, m FROM (VALUES (0, 12), (1, 13), (3, 12), (10, 24), (25, 360), (0, NULL)) v(n, m)
+      OFFSET 0) s
+ORDER BY s.n, s.m;
+
+-- NULL nloans fails at once, NULL months at the first inner FOR (22004);
+-- months = 0 leaves f = 1 and divides by f - 1 (22012)
+SELECT s.n, s.m,
+       sqlstate_of(format('SELECT ledger_ll(n, m) FROM (SELECT %L::int AS n, %L::int AS m OFFSET 0) s', s.n, s.m)) AS ll,
+       sqlstate_of(format('SELECT ledger_pl(n, m) FROM (SELECT %L::int AS n, %L::int AS m OFFSET 0) s', s.n, s.m)) AS pl
+FROM (VALUES (NULL::int, 12), (1, NULL::int), (NULL::int, NULL::int), (1, 0)) s(n, m);
+
+-- the size of EXP-001
+SELECT ledger_ll(2400, 360);
+
+SELECT bool_and(ready) AS ready, bool_and(NOT busy) AS idle
+FROM plllvm_call_sites()
+WHERE owner = 'ledger_ll(integer,integer)'::regprocedure;
+
+SELECT state FROM plllvm_function_status('ledger_ll(integer,integer)');
+
+DROP FUNCTION sqlstate_of(text);
+DROP FUNCTION ledger_ll(integer, integer);
+DROP FUNCTION ledger_pl(integer, integer);

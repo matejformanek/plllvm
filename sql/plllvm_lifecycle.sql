@@ -201,6 +201,40 @@ $$;
 SELECT lc_f(i) FROM generate_series(1, 3) i;
 SELECT * FROM plllvm_function_status('lc_f(int4)');
 
+-- a function that drops itself while it runs: its code is retired in the
+-- next transaction
+CREATE FUNCTION lc_dropper() RETURNS int8 LANGUAGE plpgsql AS $$
+BEGIN
+  DROP FUNCTION lc_drop_self();
+  RETURN 1;
+END
+$$;
+
+CREATE FUNCTION lc_drop_self() RETURNS int8 LANGUAGE plllvm AS $$
+@"lc_dropper()" = external global i8
+declare i64 @plllvm_call0(ptr, ptr)
+define i64 @f(ptr %fcinfo) {
+  %r = call i64 @plllvm_call0(ptr @"lc_dropper()", ptr null)
+  ret i64 %r
+}
+$$;
+
+SELECT 'lc_drop_self()'::regprocedure::oid AS oid \gset
+SELECT lc_drop_self();
+SELECT * FROM plllvm_function_status(:'oid');
+
+-- not while the DROP may still roll back
+CREATE FUNCTION lc_rb() RETURNS int8 LANGUAGE plllvm
+AS $$ define i64 @f(ptr %fcinfo) { ret i64 1 } $$;
+SELECT lc_rb();
+SELECT 'lc_rb()'::regprocedure::oid AS oid \gset
+BEGIN;
+DROP FUNCTION lc_rb();
+SELECT * FROM plllvm_function_status(:'oid');
+ROLLBACK;
+SELECT * FROM plllvm_function_status(:'oid');
+SELECT lc_rb();
+
 DROP FUNCTION lc_cyc(), lc_lang(), lc_prep(), lc_rec(int4), lc_rec2(int4),
-  lc_f(int4);
+  lc_f(int4), lc_rb(), lc_dropper();
 DROP FUNCTION lc_replace_and_call(), lc_replace_and_undo(), lc_replace();

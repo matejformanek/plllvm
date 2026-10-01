@@ -15,7 +15,7 @@ language only; everything else depends on the thesis plan.
 | `src/plllvm_runtime.c` | out-of-line host functions and the JIT symbol table |
 | `src/plllvm_jit.c` | LLVM session (checks `plllvm_types.bc`, target machine); LLJIT, compile pipeline, symbols, timings |
 | `src/plllvm_compile.c` | funccache callbacks, signature and scope checks (PR 3) |
-| `src/plllvm_sites.c` | calls to other functions (PR 4) |
+| `src/plllvm_sites.c` | call sites and constants: resolution, rebuild, EXECUTE checks, invalidation callbacks |
 | `src/plllvm_stats.c` | `plllvm_session_info()`, `plllvm_code_cache()`, `plllvm_jit_test()`, `plllvm_function_status()` (PR 3) |
 
 Only `plllvm_jit.c` and `plllvm_error.cpp` include LLVM headers.
@@ -42,7 +42,23 @@ Only `plllvm_jit.c` and `plllvm_error.cpp` include LLVM headers.
 ## Language
 
 * V1 entry `define i64 @f(ptr %fcinfo)`; the IR declares the host helpers it
-  uses.
+  uses (`docs/host-api.ll`).
+* Calls: a declared global named by `regprocedure` text is a call site, one
+  named `'literal'::type` a constant. After verify, `build()` leaves its
+  section and resolves them with PostgreSQL's own errors, under the
+  function's `SET search_path` or `pg_catalog, <schema>, pg_temp`. A site
+  global becomes the address of its record (FmgrInfo and fcinfo), each
+  `plllvm_const` call the constant's Datum.
+* A site is bound by OID for the session. PROCOID invalidations make it
+  rebuild (re-resolving a dropped callee), role and database invalidations
+  repeat the EXECUTE check. The executor's protocol is inline; recursion
+  through a busy site gets a fresh FmgrInfo. Sites are released with their
+  code.
+* Memory: a body that declares a call, text or memory helper runs in a
+  scratch context under the caller's context. Values kept with
+  `plllvm_keep` live in the caller's context, as PL/pgSQL's datums.
+* Handler order: take the caller's context; compile; (SPI connect, later);
+  push the frame; pin; run; copy a by-reference result out; pop; unpin.
 * The handler goes through core's funccache (`cached_function_compile`) and
   pins the entry during the call.
 * The validator checks access, signature and scope, and (with
