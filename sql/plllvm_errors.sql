@@ -197,6 +197,21 @@ SELECT q, err_of(format(q, 'll')) AS ll,
                ('SELECT f8div_%s(''nan'', 0)'),
                ('SELECT raise_%s()')) v(q);
 
+-- SQLSTATE 0 is P0001, as RAISE without ERRCODE
+CREATE FUNCTION raise0_ll() RETURNS int8
+LANGUAGE plllvm AS $$
+declare void @plllvm_error(i32, ptr)
+
+@msg = private constant [5 x i8] c"boom\00"
+
+define i64 @f(ptr %fcinfo) {
+  call void @plllvm_error(i32 0, ptr @msg)
+  unreachable
+}
+$$;
+SELECT err_of('SELECT raise0_ll()');
+DROP FUNCTION raise0_ll();
+
 -- the PL/LLVM frame shows in the context
 SELECT i4pl_ll(2147483647, 1);
 

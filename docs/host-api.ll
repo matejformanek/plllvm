@@ -23,7 +23,7 @@ declare i64 @plllvm_return_null(ptr %fcinfo)
 
 ; --- errors and interrupts (v0.1a) ------------------------------------------
 
-; ERROR with a SQLSTATE packed as MAKE_SQLSTATE and a message
+; ERROR with a SQLSTATE packed as MAKE_SQLSTATE and a message; 0 is P0001
 declare void @plllvm_error(i32 %sqlstate, ptr %msg)
 ; NOTICE with a message
 declare void @plllvm_notice(ptr %msg)
