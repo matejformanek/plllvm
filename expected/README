@@ -11,3 +11,7 @@ alone.  Call sites are invalidated by PROCOID, AUTHMEMROLEMEM, AUTHOID and
 DATABASEOID callbacks; under debug_discard_caches only the site counters
 of plllvm_cache change, and make installcheck-discard checks that
 plllvm_calls does not.
+
+make installcheck-discard runs only the tests above.  plllvm_spi would not
+fit there: its statements are replanned at every execution, and its
+2000-call cases take minutes.

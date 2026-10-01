@@ -26,6 +26,8 @@
 #include "postgres.h"
 
 #include "access/detoast.h"
+#include "catalog/pg_type_d.h"
+#include "utils/builtins.h"
 #include "utils/datum.h"
 #include "utils/memutils.h"
 #include "varatt.h"
@@ -43,6 +45,12 @@ const plllvm_host_symbol plllvm_host_symbols[] =
 	{"plllvm_scratch_reset", (void *) plllvm_scratch_reset},
 	{"plllvm_rt_site_call", (void *) plllvm_rt_site_call},
 	{"plllvm_rt_site_null", (void *) plllvm_rt_site_null},
+	{"plllvm_array_arg", (void *) plllvm_array_arg},
+	{"plllvm_array_new", (void *) plllvm_array_new},
+	{"plllvm_array_copy", (void *) plllvm_array_copy},
+	{"plllvm_rt_array_access", (void *) plllvm_rt_array_access},
+	{"plllvm_spi_prepare", (void *) plllvm_spi_prepare},
+	{"plllvm_spi_select_into", (void *) plllvm_spi_select_into},
 	{NULL, NULL}
 };
 
@@ -59,11 +67,17 @@ const char *const plllvm_frame_helpers[] =
 	"plllvm_keep",
 	"plllvm_free",
 	"plllvm_scratch_reset",
+	"plllvm_spi_prepare",
+	"plllvm_spi_select_into",
 	NULL
 };
 
 /* innermost frame of the running PL/LLVM functions */
 plllvm_frame *plllvm_cur_frame = NULL;
+
+static int	array_elmlen(Oid elemtype);
+static void array_check(ArrayType *a, Oid elemtype);
+pg_noreturn static void array_elemtype_error(ArrayType *a, Oid elemtype);
 
 /*
  * Raise an ERROR with the given SQLSTATE (packed by MAKE_SQLSTATE)
@@ -170,4 +184,123 @@ plllvm_scratch_reset(void)
 {
 	Assert(plllvm_cur_frame != NULL);
 	MemoryContextReset(plllvm_cur_frame->scratch);
+}
+
+/*
+ * Argument argno as an array of elemtype.  The copy is private to the call,
+ * so that plllvm_array_set_* never writes into the caller's datum, which
+ * may point into a shared buffer.
+ */
+ArrayType *
+plllvm_array_arg(FunctionCallInfo fcinfo, int32 argno, Oid elemtype)
+{
+	ArrayType  *a;
+
+	if (fcinfo->args[argno].isnull)
+		ereport(ERROR,
+				(errcode(ERRCODE_NULL_VALUE_NOT_ALLOWED),
+				 errmsg("PL/LLVM array argument %d is null", argno + 1)));
+
+	a = DatumGetArrayTypePCopy(fcinfo->args[argno].value);
+	array_check(a, elemtype);
+
+	return a;
+}
+
+/* n zeros, lower bound 1 */
+ArrayType *
+plllvm_array_new(Oid elemtype, int32 n)
+{
+	int			elmlen = array_elmlen(elemtype);
+	Size		nbytes;
+	ArrayType  *a;
+
+	if (n == 0)
+		return construct_empty_array(elemtype);
+
+	nbytes = ARR_OVERHEAD_NONULLS(1) + (Size) ArrayGetNItems(1, &n) * elmlen;
+	a = palloc0(nbytes);
+	SET_VARSIZE(a, nbytes);
+	a->ndim = 1;
+	a->elemtype = elemtype;
+	ARR_DIMS(a)[0] = n;
+	ARR_LBOUND(a)[0] = 1;
+
+	return a;
+}
+
+/* also of an array a call returned, which may be toasted or expanded */
+ArrayType *
+plllvm_array_copy(ArrayType *a)
+{
+	a = DatumGetArrayTypePCopy(PointerGetDatum(a));
+	array_check(a, ARR_ELEMTYPE(a));
+
+	return a;
+}
+
+/* the failed check of an inline accessor */
+void
+plllvm_rt_array_access(ArrayType *a, Oid elemtype)
+{
+	if (ARR_ELEMTYPE(a) != elemtype)
+		array_elemtype_error(a, elemtype);
+
+	ereport(ERROR,
+			(errcode(ERRCODE_ARRAY_SUBSCRIPT_ERROR),
+			 errmsg("array subscript out of range")));
+}
+
+static int
+array_elmlen(Oid elemtype)
+{
+	switch (elemtype)
+	{
+		case INT4OID:
+			return sizeof(int32);
+		case INT8OID:
+			return sizeof(int64);
+		case FLOAT8OID:
+			return sizeof(float8);
+	}
+
+	ereport(ERROR,
+			(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+			 errmsg("PL/LLVM arrays of type %s are not supported",
+					format_type_extended(elemtype, -1,
+										 FORMAT_TYPE_ALLOW_INVALID))));
+	return 0;					/* keep compiler quiet */
+}
+
+/*
+ * What the inline accessors rely on.  Without NULL elements the data are
+ * dense, also when a bitmap is present.
+ */
+static void
+array_check(ArrayType *a, Oid elemtype)
+{
+	(void) array_elmlen(elemtype);
+
+	if (ARR_NDIM(a) > 1)
+		ereport(ERROR,
+				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+				 errmsg("PL/LLVM supports only one-dimensional arrays")));
+
+	if (array_contains_nulls(a))
+		ereport(ERROR,
+				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+				 errmsg("PL/LLVM arrays cannot contain null elements")));
+
+	if (ARR_ELEMTYPE(a) != elemtype)
+		array_elemtype_error(a, elemtype);
+}
+
+static void
+array_elemtype_error(ArrayType *a, Oid elemtype)
+{
+	ereport(ERROR,
+			(errcode(ERRCODE_DATATYPE_MISMATCH),
+			 errmsg("array has element type %s, expected %s",
+					format_type_be(ARR_ELEMTYPE(a)),
+					format_type_be(elemtype))));
 }

@@ -1,0 +1,210 @@
+--
+-- One-dimensional arrays of int4, int8 and float8
+--
+LOAD 'plllvm';
+SET plllvm.regress_test_mode = on;
+
+-- fn sums its array argument of type oid (23, 20, 701), read as elemoid
+CREATE FUNCTION mk_sum(fn text, oid int, elemoid int DEFAULT NULL)
+RETURNS void LANGUAGE plpgsql AS $mk$
+DECLARE
+  t text := CASE oid WHEN 701 THEN 'double' ELSE 'i64' END;
+  get text := CASE oid WHEN 23 THEN 'i32' WHEN 20 THEN 'i64' ELSE 'f64' END;
+  et text := CASE oid WHEN 23 THEN 'i32' WHEN 20 THEN 'i64' ELSE 'double' END;
+BEGIN
+  EXECUTE format('CREATE OR REPLACE FUNCTION %s LANGUAGE plllvm AS %L', fn, format($ir$
+declare ptr @plllvm_array_arg(ptr, i32, i32)
+declare i32 @plllvm_array_length(ptr)
+declare i32 @plllvm_array_lower(ptr)
+declare %3$s @plllvm_array_get_%2$s(ptr, i32)
+define i64 @f(ptr %%fcinfo) {
+entry:
+  %%a = call ptr @plllvm_array_arg(ptr %%fcinfo, i32 0, i32 %4$s)
+  %%len = call i32 @plllvm_array_length(ptr %%a)
+  %%lo = call i32 @plllvm_array_lower(ptr %%a)
+  %%hi = add i32 %%lo, %%len
+  br label %%loop
+loop:
+  %%i = phi i32 [ %%lo, %%entry ], [ %%i.next, %%body ]
+  %%acc = phi %1$s [ %5$s, %%entry ], [ %%acc.next, %%body ]
+  %%more = icmp slt i32 %%i, %%hi
+  br i1 %%more, label %%body, label %%done
+body:
+  %%e = call %3$s @plllvm_array_get_%2$s(ptr %%a, i32 %%i)
+  %6$s
+  %%i.next = add i32 %%i, 1
+  br label %%loop
+done:
+  %7$s
+}
+$ir$, t, get, et, coalesce(elemoid, oid),
+      CASE oid WHEN 701 THEN '0.0' ELSE '0' END,
+      CASE oid WHEN 23 THEN E'%e64 = sext i32 %e to i64\n  %acc.next = add i64 %acc, %e64'
+               WHEN 20 THEN '%acc.next = add i64 %acc, %e'
+               ELSE '%acc.next = fadd double %acc, %e' END,
+      CASE oid WHEN 701 THEN E'%r = bitcast double %acc to i64\n  ret i64 %r'
+               ELSE 'ret i64 %acc' END));
+END
+$mk$;
+
+-- 1. reading arguments
+SELECT mk_sum('sum4(a int[]) RETURNS int8 IMMUTABLE', 23);
+SELECT mk_sum('sum8(a int8[]) RETURNS int8 IMMUTABLE', 20);
+SELECT mk_sum('sumf(a float8[]) RETURNS float8 IMMUTABLE', 701);
+SELECT sum4('{1,2,3}'), sum8('{10000000000,1}'), sumf('{0.5,0.25}'),
+       sum4('{}'), sumf('{}'), sum4('[0:2]={1,2,3}'), sum4('[-5:-4]={7,8}');
+SELECT sum4('{{1,2},{3,4}}');  -- fail
+SELECT sum4('{1,NULL}');  -- fail
+SELECT sum4(NULL);  -- fail
+SELECT mk_sum('sum_wrong(a int[]) RETURNS int8 IMMUTABLE', 20, 23);
+SELECT sum_wrong('{1}');  -- fail
+-- an array with a null bitmap but no NULL element
+SELECT sum4(a) FROM (SELECT array_replace('{1,NULL,3}'::int[], NULL, 2) a) s;
+
+-- 2. subscripts and element types
+CREATE FUNCTION get4(a int[], i int) RETURNS int IMMUTABLE LANGUAGE plllvm AS $$
+declare ptr @plllvm_array_arg(ptr, i32, i32)
+declare i32 @plllvm_arg_i32(ptr, i32)
+declare i32 @plllvm_array_get_i32(ptr, i32)
+define i64 @f(ptr %fcinfo) {
+  %a = call ptr @plllvm_array_arg(ptr %fcinfo, i32 0, i32 23)
+  %i = call i32 @plllvm_arg_i32(ptr %fcinfo, i32 1)
+  %e = call i32 @plllvm_array_get_i32(ptr %a, i32 %i)
+  %r = sext i32 %e to i64
+  ret i64 %r
+}
+$$;
+CREATE FUNCTION set4(a int[], i int, v int) RETURNS int[] IMMUTABLE LANGUAGE plllvm AS $$
+declare ptr @plllvm_array_arg(ptr, i32, i32)
+declare i32 @plllvm_arg_i32(ptr, i32)
+declare void @plllvm_array_set_i32(ptr, i32, i32)
+define i64 @f(ptr %fcinfo) {
+  %a = call ptr @plllvm_array_arg(ptr %fcinfo, i32 0, i32 23)
+  %i = call i32 @plllvm_arg_i32(ptr %fcinfo, i32 1)
+  %v = call i32 @plllvm_arg_i32(ptr %fcinfo, i32 2)
+  call void @plllvm_array_set_i32(ptr %a, i32 %i, i32 %v)
+  %r = ptrtoint ptr %a to i64
+  ret i64 %r
+}
+$$;
+-- a float8[] read as int4
+CREATE FUNCTION get4f(a float8[]) RETURNS int IMMUTABLE LANGUAGE plllvm AS $$
+declare ptr @plllvm_array_arg(ptr, i32, i32)
+declare i32 @plllvm_array_get_i32(ptr, i32)
+define i64 @f(ptr %fcinfo) {
+  %a = call ptr @plllvm_array_arg(ptr %fcinfo, i32 0, i32 701)
+  %e = call i32 @plllvm_array_get_i32(ptr %a, i32 1)
+  %r = sext i32 %e to i64
+  ret i64 %r
+}
+$$;
+SELECT get4('{5,6,7}', 1), get4('{5,6,7}', 3), get4('[0:1]={8,9}', 0),
+       set4('{5,6,7}', 2, 0), set4('[3:4]={1,2}', 4, 0);
+SELECT get4('{5,6,7}', 0);  -- fail
+SELECT get4('{5,6,7}', 4);  -- fail
+SELECT get4('{}', 1);  -- fail
+SELECT get4('{5}', -2147483648);  -- fail
+SELECT set4('{5,6,7}', 4, 0);  -- fail
+SELECT get4f('{1.5}');  -- fail
+
+-- 3. new arrays, also returned from a frame
+CREATE FUNCTION mk_seq(fn text, frame bool) RETURNS void LANGUAGE plpgsql AS $mk$
+BEGIN
+  EXECUTE format('CREATE OR REPLACE FUNCTION %s RETURNS float8[] LANGUAGE plllvm AS %L', fn,
+$ir$
+declare ptr @plllvm_array_new(i32, i32)
+declare i32 @plllvm_arg_i32(ptr, i32)
+declare void @plllvm_array_set_f64(ptr, i32, double)
+$ir$ || CASE WHEN frame THEN E'declare void @plllvm_scratch_reset()\n' ELSE '' END || $ir$
+define i64 @f(ptr %fcinfo) {
+entry:
+  %n = call i32 @plllvm_arg_i32(ptr %fcinfo, i32 0)
+  %a = call ptr @plllvm_array_new(i32 701, i32 %n)
+  br label %loop
+loop:
+  %i = phi i32 [ 1, %entry ], [ %i.next, %body ]
+  %more = icmp sle i32 %i, %n
+  br i1 %more, label %body, label %done
+body:
+  %k = sub i32 %i, 1
+  %kf = sitofp i32 %k to double
+  %v = fmul double %kf, 0.5
+  call void @plllvm_array_set_f64(ptr %a, i32 %i, double %v)
+  %i.next = add i32 %i, 1
+  br label %loop
+done:
+  %r = ptrtoint ptr %a to i64
+  ret i64 %r
+}
+$ir$);
+END
+$mk$;
+SELECT mk_seq('f8_seq(n int)', false);
+SELECT mk_seq('f8_seq_frame(n int)', true);
+SELECT f8_seq(3), f8_seq(0), array_length(f8_seq(100000), 1) AS len;
+SELECT f8_seq_frame(3), f8_seq_frame(1000) = f8_seq(1000) AS same;
+SELECT frame FROM plllvm_code_cache() WHERE owner_oid = 'f8_seq_frame(int)'::regprocedure;
+SELECT f8_seq(-1);  -- fail
+CREATE FUNCTION new_text() RETURNS int LANGUAGE plllvm AS $$
+declare ptr @plllvm_array_new(i32, i32)
+define i64 @f(ptr %fcinfo) {
+  %a = call ptr @plllvm_array_new(i32 25, i32 1)
+  ret i64 0
+}
+$$;
+SELECT new_text();  -- fail
+
+-- 4. set writes into a private copy: of the argument, and of a constant
+CREATE TABLE arr_t (a int[]);
+INSERT INTO arr_t VALUES ('{1,2,3}');
+SELECT set4(a, 1, 99) FROM arr_t;
+SELECT a FROM arr_t;
+-- an SPI column is copied
+CREATE FUNCTION copy_spi(nulls bool) RETURNS int[] LANGUAGE plllvm AS $$
+@q.sql = private constant [69 x i8] c"SELECT CASE WHEN $1 THEN '{1,NULL}'::int[] ELSE '{1,2,3}'::int[] END\00"
+@q.args = private constant [5 x i8] c"bool\00"
+@q.cols = private constant [6 x i8] c"int[]\00"
+@q = internal global ptr null
+declare ptr @plllvm_spi_prepare(ptr, ptr, ptr, ptr)
+declare i32 @plllvm_spi_select_into(ptr, ptr, ptr, ptr)
+declare ptr @plllvm_array_copy(ptr)
+declare void @plllvm_array_set_i32(ptr, i32, i32)
+declare i1 @plllvm_arg_bool(ptr, i32)
+%struct.NullableDatum = type { i64, i8 }
+define i64 @f(ptr %fcinfo) {
+  %args = alloca %struct.NullableDatum
+  %out = alloca %struct.NullableDatum
+  %nulls = call i1 @plllvm_arg_bool(ptr %fcinfo, i32 0)
+  %d = zext i1 %nulls to i64
+  store %struct.NullableDatum zeroinitializer, ptr %args
+  store i64 %d, ptr %args
+  %stmt = call ptr @plllvm_spi_prepare(ptr @q, ptr @q.sql, ptr @q.args, ptr @q.cols)
+  %rows = call i32 @plllvm_spi_select_into(ptr %fcinfo, ptr %stmt, ptr %args, ptr %out)
+  %v = load ptr, ptr %out
+  %a = call ptr @plllvm_array_copy(ptr %v)
+  call void @plllvm_array_set_i32(ptr %a, i32 1, i32 99)
+  %r = ptrtoint ptr %a to i64
+  ret i64 %r
+}
+$$;
+SELECT copy_spi(false);
+SELECT copy_spi(true);  -- fail
+
+-- 5. expanded and toasted arguments
+CREATE FUNCTION pl_expanded() RETURNS int8 LANGUAGE plpgsql AS $$
+DECLARE
+  a int[] := '{1,2,3}';
+BEGIN
+  a[2] := 5;
+  RETURN sum4(a);
+END
+$$;
+SELECT pl_expanded();
+CREATE TABLE arr_big AS SELECT array_agg(g) AS a FROM generate_series(1, 100000) g;
+SELECT sum4(a) FROM arr_big;  -- stored out of line
+
+DROP TABLE arr_t, arr_big;
+DROP FUNCTION mk_sum(text, int, int), sum4(int[]), sum8(int8[]), sumf(float8[]),
+  sum_wrong(int[]), get4(int[], int), set4(int[], int, int), get4f(float8[]),
+  mk_seq(text, bool), f8_seq(int), f8_seq_frame(int), new_text(), copy_spi(bool),
+  pl_expanded();

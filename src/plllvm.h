@@ -22,6 +22,7 @@
 #endif
 
 #include "lib/ilist.h"
+#include "utils/array.h"
 #include "utils/funccache.h"
 
 /* keep in sync with META.json; plllvm.control carries major.minor only */
@@ -48,7 +49,9 @@
 		offsetof(plllvm_site, fcinfo), \
 		offsetof(plllvm_site, flinfo), \
 		offsetof(FmgrInfo, fn_addr), \
-		offsetof(FmgrInfo, fn_strict) \
+		offsetof(FmgrInfo, fn_strict), \
+		sizeof(ArrayType), \
+		ARR_OVERHEAD_NONULLS(1) \
 	}
 
 /* a call site of JIT-compiled code (plllvm_sites.c); its address is in the code */
@@ -99,6 +102,11 @@ extern void plllvm_scratch_reset(void);
 extern Datum plllvm_rt_site_call(plllvm_site *site, NullableDatum *args,
 								 bool *isnull);
 pg_noreturn extern void plllvm_rt_site_null(plllvm_site *site);
+extern ArrayType *plllvm_array_arg(FunctionCallInfo fcinfo, int32 argno,
+								   Oid elemtype);
+extern ArrayType *plllvm_array_new(Oid elemtype, int32 n);
+extern ArrayType *plllvm_array_copy(ArrayType *a);
+pg_noreturn extern void plllvm_rt_array_access(ArrayType *a, Oid elemtype);
 
 extern plllvm_frame *plllvm_cur_frame;
 extern void plllvm_frame_push(plllvm_frame *frame, MemoryContext caller);
@@ -129,6 +137,9 @@ typedef struct plllvm_function
 								 * entry, so nothing here may own memory */
 	PGFunction	addr;
 	bool		needs_frame;	/* true, when the IR uses a frame helper */
+	bool		uses_spi;		/* true, when the IR declares a plllvm_spi_
+								 * function */
+	bool		readonly;		/* true, when not VOLATILE */
 	bool		rettypbyval;
 	int16		rettyplen;
 	struct plllvm_jit_module *mod;	/* code record, never freed; NULL once
@@ -152,6 +163,13 @@ extern plllvm_function *plllvm_compile_get(FunctionCallInfo fcinfo);
 extern void plllvm_compile_unpin(plllvm_function *func);
 extern void plllvm_compile_check_scope(HeapTuple procTup);
 extern void plllvm_compile_check_body(HeapTuple procTup);
+
+/* plllvm_spi.c */
+extern void *plllvm_spi_prepare(void **slot, const char *sql,
+								const char *argtypes, const char *coltypes);
+extern int32 plllvm_spi_select_into(FunctionCallInfo fcinfo, void *stmt,
+									NullableDatum *args, NullableDatum *out);
+extern int64 plllvm_spi_statements(void);
 
 /* plllvm_sites.c */
 extern void plllvm_sites_init(void);

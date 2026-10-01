@@ -28,6 +28,7 @@
  */
 #include "postgres.h"
 
+#include "catalog/pg_type_d.h"
 #include "fmgr.h"
 #include "miscadmin.h"
 #include "utils/builtins.h"
@@ -74,6 +75,14 @@ extern Datum plllvm_detoast(Datum v);
 extern char *plllvm_vardata_any(Datum v);
 extern int32 plllvm_varsize_any_exhdr(Datum v);
 extern void plllvm_free(Datum v);
+extern int32 plllvm_array_length(ArrayType *a);
+extern int32 plllvm_array_lower(ArrayType *a);
+extern int32 plllvm_array_get_i32(ArrayType *a, int32 i);
+extern int64 plllvm_array_get_i64(ArrayType *a, int32 i);
+extern float8 plllvm_array_get_f64(ArrayType *a, int32 i);
+extern void plllvm_array_set_i32(ArrayType *a, int32 i, int32 v);
+extern void plllvm_array_set_i64(ArrayType *a, int32 i, int64 v);
+extern void plllvm_array_set_f64(ArrayType *a, int32 i, float8 v);
 
 /* no bounds checks, as PG_GETARG_* */
 pg_always_inline bool
@@ -250,6 +259,70 @@ plllvm_free(Datum v)
 }
 
 /*
+ * Arrays from plllvm_array_arg, _new and _copy: flat, one-dimensional or
+ * empty, without NULL elements.  The element type is compared on every
+ * access, so that IR never reads an element as the wrong type.
+ */
+pg_always_inline int32
+plllvm_array_length(ArrayType *a)
+{
+	return ARR_NDIM(a) == 0 ? 0 : ARR_DIMS(a)[0];
+}
+
+pg_always_inline int32
+plllvm_array_lower(ArrayType *a)
+{
+	return ARR_NDIM(a) == 0 ? 1 : ARR_LBOUND(a)[0];
+}
+
+static pg_always_inline int64
+array_index(ArrayType *a, int32 i, Oid elemtype)
+{
+	int64		k = (int64) i - plllvm_array_lower(a);
+
+	if (unlikely(ARR_ELEMTYPE(a) != elemtype ||
+				 k < 0 || k >= plllvm_array_length(a)))
+		plllvm_rt_array_access(a, elemtype);
+	return k;
+}
+
+pg_always_inline int32
+plllvm_array_get_i32(ArrayType *a, int32 i)
+{
+	return ((int32 *) ARR_DATA_PTR(a))[array_index(a, i, INT4OID)];
+}
+
+pg_always_inline int64
+plllvm_array_get_i64(ArrayType *a, int32 i)
+{
+	return ((int64 *) ARR_DATA_PTR(a))[array_index(a, i, INT8OID)];
+}
+
+pg_always_inline float8
+plllvm_array_get_f64(ArrayType *a, int32 i)
+{
+	return ((float8 *) ARR_DATA_PTR(a))[array_index(a, i, FLOAT8OID)];
+}
+
+pg_always_inline void
+plllvm_array_set_i32(ArrayType *a, int32 i, int32 v)
+{
+	((int32 *) ARR_DATA_PTR(a))[array_index(a, i, INT4OID)] = v;
+}
+
+pg_always_inline void
+plllvm_array_set_i64(ArrayType *a, int32 i, int64 v)
+{
+	((int64 *) ARR_DATA_PTR(a))[array_index(a, i, INT8OID)] = v;
+}
+
+pg_always_inline void
+plllvm_array_set_f64(ArrayType *a, int32 i, float8 v)
+{
+	((float8 *) ARR_DATA_PTR(a))[array_index(a, i, FLOAT8OID)] = v;
+}
+
+/*
  * Forces the declarations of the out-of-line host functions into the .bc,
  * where declarations in user IR are checked against them.
  */
@@ -262,6 +335,11 @@ void	   *referenced_functions[] =
 	plllvm_rt_div_zero,
 	plllvm_keep,
 	plllvm_scratch_reset,
+	plllvm_array_arg,
+	plllvm_array_new,
+	plllvm_array_copy,
+	plllvm_spi_prepare,
+	plllvm_spi_select_into,
 	float_overflow_error,
 	float_underflow_error,
 	float_zero_divide_error,

@@ -40,8 +40,8 @@ plllvm_session_info(PG_FUNCTION_ARGS)
 {
 	ReturnSetInfo *rsinfo = (ReturnSetInfo *) fcinfo->resultinfo;
 	plllvm_jit_session_info info;
-	Datum		values[10];
-	bool		nulls[10] = {0};
+	Datum		values[11];
+	bool		nulls[11] = {0};
 	int64		rss;
 
 	InitMaterializedSRF(fcinfo, 0);
@@ -74,6 +74,7 @@ plllvm_session_info(PG_FUNCTION_ARGS)
 		values[9] = Int64GetDatum(rss);
 	else
 		nulls[9] = true;
+	values[10] = Int64GetDatum(plllvm_spi_statements());
 
 	tuplestore_putvalues(rsinfo->setResult, rsinfo->setDesc, values, nulls);
 

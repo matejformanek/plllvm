@@ -1,0 +1,133 @@
+--
+-- kernel_lookup: examples/kernels/lookup.ll against the PL/pgSQL original
+-- (bench/kernels/42_lookup.sql) on its tables (40_glue_schema.sql)
+--
+SET plllvm.regress_test_mode = on;
+
+\getenv abs_srcdir PG_ABS_SRCDIR
+\set ir `cat :'abs_srcdir'/examples/kernels/lookup.ll`
+
+CREATE TABLE item (
+  i_id integer PRIMARY KEY, i_im_id integer, i_name varchar(24), i_price numeric(5,2), i_data varchar(50));
+CREATE TABLE stock (
+  s_w_id integer, s_i_id integer, s_quantity integer,
+  s_dist_01 char(24), s_dist_02 char(24), s_dist_03 char(24), s_dist_04 char(24), s_dist_05 char(24),
+  s_dist_06 char(24), s_dist_07 char(24), s_dist_08 char(24), s_dist_09 char(24), s_dist_10 char(24),
+  s_ytd integer, s_order_cnt integer, s_remote_cnt integer, s_data varchar(50),
+  PRIMARY KEY (s_w_id, s_i_id));
+
+INSERT INTO item
+SELECT i, 1 + (i * 31) % 10000,
+       substr(md5('name' || i), 1, 14 + i % 10),
+       1.00 + ((i * 7907) % 9901) / 100.0,
+       CASE WHEN i % 10 = 3
+            THEN substr(md5('i' || i), 1, 10) || 'ORIGINAL' || substr(md5('j' || i), 1, 12)
+            ELSE substr(md5('i' || i) || md5('j' || i), 1, 26 + i % 24) END
+FROM generate_series(1, 10000) i;
+
+INSERT INTO stock
+SELECT 1, i, 10 + (i * 7) % 91,
+       substr(md5('d01' || i), 1, 24), substr(md5('d02' || i), 1, 24), substr(md5('d03' || i), 1, 24),
+       substr(md5('d04' || i), 1, 24), substr(md5('d05' || i), 1, 24), substr(md5('d06' || i), 1, 24),
+       substr(md5('d07' || i), 1, 24), substr(md5('d08' || i), 1, 24), substr(md5('d09' || i), 1, 24),
+       substr(md5('d10' || i), 1, 24),
+       0, 0, 0,
+       CASE WHEN i % 5 = 3
+            THEN substr(md5('s' || i), 1, 12) || 'ORIGINAL' || substr(md5('t' || i), 1, 10)
+            ELSE substr(md5('s' || i) || md5('t' || i), 1, 26 + i % 24) END
+FROM generate_series(1, 10000) i;
+
+ANALYZE item, stock;
+
+CREATE FUNCTION lookup_stab(n integer) RETURNS text
+LANGUAGE plpgsql STABLE AS $$
+DECLARE
+  seed bigint := 777;
+  k integer; v_i_id integer;
+  v_price numeric(5,2); v_name varchar(24); v_qty integer;
+  acc numeric(16,2) := 0;
+  low integer := 0; vowel integer := 0;
+BEGIN
+  FOR k IN 1..n LOOP
+    seed := (seed * 1103515245 + 12345) % 2147483648;
+    v_i_id := 1 + (seed % 10000)::integer;
+    SELECT i_price, i_name INTO v_price, v_name FROM item WHERE i_id = v_i_id;
+    SELECT s_quantity INTO v_qty FROM stock WHERE s_w_id = 1 AND s_i_id = v_i_id;
+    acc := acc + v_price * v_qty;
+    IF v_qty < 20 THEN
+      low := low + 1;
+    END IF;
+    IF position(substr(v_name, 1, 1) IN 'aeiou') > 0 THEN
+      vowel := vowel + 1;
+    END IF;
+  END LOOP;
+  RETURN acc::text || '/' || low || '/' || vowel;
+END
+$$;
+
+CREATE FUNCTION lookup_vol(n integer) RETURNS text
+LANGUAGE plpgsql VOLATILE AS $$
+DECLARE
+  seed bigint := 777;
+  k integer; v_i_id integer;
+  v_price numeric(5,2); v_name varchar(24); v_qty integer;
+  acc numeric(16,2) := 0;
+  low integer := 0; vowel integer := 0;
+BEGIN
+  FOR k IN 1..n LOOP
+    seed := (seed * 1103515245 + 12345) % 2147483648;
+    v_i_id := 1 + (seed % 10000)::integer;
+    SELECT i_price, i_name INTO v_price, v_name FROM item WHERE i_id = v_i_id;
+    SELECT s_quantity INTO v_qty FROM stock WHERE s_w_id = 1 AND s_i_id = v_i_id;
+    acc := acc + v_price * v_qty;
+    IF v_qty < 20 THEN
+      low := low + 1;
+    END IF;
+    IF position(substr(v_name, 1, 1) IN 'aeiou') > 0 THEN
+      vowel := vowel + 1;
+    END IF;
+  END LOOP;
+  RETURN acc::text || '/' || low || '/' || vowel;
+END
+$$;
+
+CREATE FUNCTION lookup_ll(n integer) RETURNS text
+LANGUAGE plllvm STABLE AS :'ir';
+
+CREATE FUNCTION lookup_ll_vol(n integer) RETURNS text
+LANGUAGE plllvm VOLATILE AS :'ir';
+
+CREATE FUNCTION sqlstate_of(q text) RETURNS text
+LANGUAGE plpgsql AS $$
+BEGIN
+  EXECUTE q;
+  RETURN NULL;
+EXCEPTION WHEN OTHERS THEN
+  RETURN SQLSTATE;
+END
+$$;
+
+SELECT spi_statements AS st0 FROM plllvm_session_info() \gset
+
+SELECT s.n, lookup_ll(s.n) AS ll, lookup_ll(s.n) = lookup_stab(s.n) AS ok,
+       lookup_ll_vol(s.n) = lookup_vol(s.n) AS ok_vol
+FROM (SELECT n FROM (VALUES (0), (1), (7), (1000)) v(n) OFFSET 0) s
+ORDER BY s.n;
+
+SELECT sqlstate_of('SELECT lookup_ll(n) FROM (SELECT NULL::int AS n OFFSET 0) s') AS ll,
+       sqlstate_of('SELECT lookup_stab(n) FROM (SELECT NULL::int AS n OFFSET 0) s') AS pl;
+
+-- the size of EXP-001
+SELECT lookup_ll(240000);
+
+-- two statements per function, prepared once
+SELECT spi_statements - :st0 AS prepared FROM plllvm_session_info();
+
+SELECT bool_and(ready) AS ready, bool_and(NOT busy) AS idle
+FROM plllvm_call_sites()
+WHERE owner = 'lookup_ll(integer)'::regprocedure;
+
+DROP FUNCTION sqlstate_of(text);
+DROP FUNCTION lookup_ll(integer), lookup_ll_vol(integer);
+DROP FUNCTION lookup_stab(integer), lookup_vol(integer);
+DROP TABLE item, stock;

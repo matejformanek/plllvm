@@ -89,6 +89,7 @@ typedef struct plllvm_jit_result
 	int			helpers_linked;
 	int			cfi_left;		/* -1 when not optimised */
 	bool		needs_frame;
+	bool		uses_spi;
 } plllvm_jit_result;
 
 typedef struct plllvm_jit_session_info

@@ -1,0 +1,123 @@
+--
+-- kernel_revcomp: examples/kernels/revcomp.ll (from src/revcomp.c) against
+-- the PL/pgSQL original (bench/kernels/30_revcomp.sql, revcomp_imm).  The
+-- cluster is UTF8 with locale C (make cluster-init).
+--
+SET plllvm.regress_test_mode = on;
+\getenv abs_srcdir PG_ABS_SRCDIR
+\set ir `cat :'abs_srcdir'/examples/kernels/revcomp.ll`
+CREATE FUNCTION revcomp_ll(nlines integer) RETURNS text
+LANGUAGE plllvm IMMUTABLE AS :'ir';
+CREATE FUNCTION revcomp_pl(nlines integer) RETURNS text
+LANGUAGE plpgsql IMMUTABLE AS $$
+DECLARE
+  seed integer := 42;
+  r float8;
+  im CONSTANT float8 := 139968.0;
+  lines text[] := '{}';
+  outp text[] := '{}';
+  line text; oline text; c text;
+  i integer; j integer; n integer;
+  ngc integer := 0;
+BEGIN
+  -- fasta-style generation: first half IUB codes, second half homo sapiens
+  FOR i IN 1..nlines LOOP
+    line := '';
+    FOR j IN 1..60 LOOP
+      seed := (seed * 3877 + 29573) % 139968;
+      r := seed / im;
+      IF i <= nlines / 2 THEN
+        -- IUB (cumulative)
+        IF    r < 0.27 THEN c := 'a';
+        ELSIF r < 0.39 THEN c := 'c';
+        ELSIF r < 0.51 THEN c := 'g';
+        ELSIF r < 0.78 THEN c := 't';
+        ELSIF r < 0.80 THEN c := 'B';
+        ELSIF r < 0.82 THEN c := 'D';
+        ELSIF r < 0.84 THEN c := 'H';
+        ELSIF r < 0.86 THEN c := 'K';
+        ELSIF r < 0.88 THEN c := 'M';
+        ELSIF r < 0.90 THEN c := 'N';
+        ELSIF r < 0.92 THEN c := 'R';
+        ELSIF r < 0.94 THEN c := 'S';
+        ELSIF r < 0.96 THEN c := 'V';
+        ELSIF r < 0.98 THEN c := 'W';
+        ELSE                c := 'Y';
+        END IF;
+      ELSE
+        -- homo sapiens (cumulative)
+        IF    r < 0.3029549426680 THEN c := 'a';
+        ELSIF r < 0.5009432431601 THEN c := 'c';
+        ELSIF r < 0.6984905497992 THEN c := 'g';
+        ELSE                           c := 't';
+        END IF;
+      END IF;
+      line := line || c;
+    END LOOP;
+    lines := lines || line;
+  END LOOP;
+
+  -- reverse complement, one character at a time
+  n := array_length(lines, 1);
+  FOR i IN REVERSE n..1 LOOP
+    line := lines[i];
+    oline := '';
+    FOR j IN REVERSE length(line)..1 LOOP
+      c := upper(substr(line, j, 1));
+      c := CASE c
+             WHEN 'A' THEN 'T' WHEN 'C' THEN 'G' WHEN 'G' THEN 'C' WHEN 'T' THEN 'A'
+             WHEN 'U' THEN 'A' WHEN 'M' THEN 'K' WHEN 'R' THEN 'Y' WHEN 'W' THEN 'W'
+             WHEN 'S' THEN 'S' WHEN 'Y' THEN 'R' WHEN 'K' THEN 'M' WHEN 'V' THEN 'B'
+             WHEN 'H' THEN 'D' WHEN 'D' THEN 'H' WHEN 'B' THEN 'V' WHEN 'N' THEN 'N'
+             ELSE c END;
+      IF c = 'G' OR c = 'C' THEN
+        ngc := ngc + 1;
+      END IF;
+      oline := oline || c;
+    END LOOP;
+    outp := outp || oline;
+  END LOOP;
+  RETURN ngc::text || '/' || md5(array_to_string(outp, E'\n'));
+END
+$$;
+CREATE FUNCTION sqlstate_of(q text) RETURNS text
+LANGUAGE plpgsql AS $$
+BEGIN
+  EXECUTE q;
+  RETURN NULL;
+EXCEPTION WHEN OTHERS THEN
+  RETURN SQLSTATE;
+END
+$$;
+SELECT s.n, revcomp_ll(s.n) AS ll, revcomp_ll(s.n) = revcomp_pl(s.n) AS ok
+FROM (SELECT n FROM (VALUES (1), (2), (10), (101)) v(n) OFFSET 0) s
+ORDER BY s.n;
+  n  |                  ll                   | ok 
+-----+---------------------------------------+----
+   1 | 28/7ed8dcdcee357ba2772f454c9700a42f   | t
+   2 | 40/a27ca0c36a2d3b1c476a831a05137545   | t
+  10 | 176/85202a3065a2fbad14d22995fc38796e  | t
+ 101 | 1886/999aa73d9a1a87f84056b44f5fb2000f | t
+(4 rows)
+
+-- NULL and 0 fail at the upper and the lower bound (22004)
+SELECT s.n,
+       sqlstate_of(format('SELECT revcomp_ll(n) FROM (SELECT %L::int AS n OFFSET 0) s', s.n)) AS ll,
+       sqlstate_of(format('SELECT revcomp_pl(n) FROM (SELECT %L::int AS n OFFSET 0) s', s.n)) AS pl
+FROM (VALUES (NULL::int), (0)) s(n);
+ n |  ll   |  pl   
+---+-------+-------
+   | 22004 | 22004
+ 0 | 22004 | 22004
+(2 rows)
+
+-- the size of EXP-001
+SELECT revcomp_ll(20000);
+               revcomp_ll                
+-----------------------------------------
+ 381350/c0025aad05da86ef4601852167d811c4
+(1 row)
+
+DROP FUNCTION sqlstate_of(text);
+DROP FUNCTION revcomp_ll(integer);
+DROP FUNCTION revcomp_pl(integer);

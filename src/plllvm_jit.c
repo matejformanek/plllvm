@@ -1215,6 +1215,10 @@ user_ir_check(LLVMContextRef ctx, LLVMModuleRef umod, LLVMModuleRef hmod,
 			host = LLVMGetNamedFunction(hmod, name);
 			if (host == NULL)
 				host = LLVMGetNamedGlobal(hmod, name);
+			/* the link renames local names, as clang's .str of Assert() */
+			if (host != NULL && (LLVMGetLinkage(host) == LLVMPrivateLinkage ||
+								 LLVMGetLinkage(host) == LLVMInternalLinkage))
+				host = NULL;
 
 			if (!LLVMIsDeclaration(gv))
 			{
@@ -1243,6 +1247,8 @@ user_ir_check(LLVMContextRef ctx, LLVMModuleRef umod, LLVMModuleRef hmod,
 				}
 				if (is_frame_helper(name))
 					result->needs_frame = true;
+				if (strncmp(name, "plllvm_spi_", 11) == 0)
+					result->uses_spi = true;
 			}
 			else if (pass == 1 && (name[0] == '\'' || strchr(name, '(') != NULL))
 			{
