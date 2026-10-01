@@ -303,7 +303,8 @@ ALTER TABLE spi_t ALTER COLUMN s TYPE varchar;
 SELECT spi_s(1);  -- fail
 ERROR:  PL/LLVM statement result does not match its declaration
 DETAIL:  Column 1 has type character varying, text was declared.
-CONTEXT:  PL/LLVM function "spi_s"
+CONTEXT:  SQL statement "SELECT s FROM spi_t WHERE i = $1"
+PL/LLVM function "spi_s"
 ALTER TABLE spi_t ALTER COLUMN s TYPE text;
 SELECT spi_s(1);
  spi_s 
@@ -389,8 +390,8 @@ SELECT mk_spi('spi_bad() RETURNS int VOLATILE',
 
 SELECT spi_bad();  -- fail
 ERROR:  PL/LLVM supports only plain SELECT statements
-DETAIL:  The statement is "INSERT INTO spi_v VALUES (1) RETURNING 1".
-CONTEXT:  PL/LLVM function "spi_bad"
+CONTEXT:  SQL statement "INSERT INTO spi_v VALUES (1) RETURNING 1"
+PL/LLVM function "spi_bad"
 SELECT mk_spi('spi_bad() RETURNS int VOLATILE',
               'SELECT i FROM spi_t WHERE i = 1 FOR UPDATE', '', 'int4');
  mk_spi 
@@ -400,8 +401,8 @@ SELECT mk_spi('spi_bad() RETURNS int VOLATILE',
 
 SELECT spi_bad();  -- fail
 ERROR:  PL/LLVM supports only plain SELECT statements
-DETAIL:  The statement is "SELECT i FROM spi_t WHERE i = 1 FOR UPDATE".
-CONTEXT:  PL/LLVM function "spi_bad"
+CONTEXT:  SQL statement "SELECT i FROM spi_t WHERE i = 1 FOR UPDATE"
+PL/LLVM function "spi_bad"
 SELECT mk_spi('spi_bad() RETURNS int VOLATILE',
               'WITH d AS (DELETE FROM spi_v RETURNING 1) SELECT 1', '', 'int4');
  mk_spi 
@@ -411,8 +412,8 @@ SELECT mk_spi('spi_bad() RETURNS int VOLATILE',
 
 SELECT spi_bad();  -- fail
 ERROR:  PL/LLVM supports only plain SELECT statements
-DETAIL:  The statement is "WITH d AS (DELETE FROM spi_v RETURNING 1) SELECT 1".
-CONTEXT:  PL/LLVM function "spi_bad"
+CONTEXT:  SQL statement "WITH d AS (DELETE FROM spi_v RETURNING 1) SELECT 1"
+PL/LLVM function "spi_bad"
 SELECT mk_spi('spi_bad() RETURNS int VOLATILE',
               'SELECT 1; SELECT 2', '', 'int4');
  mk_spi 
@@ -422,8 +423,8 @@ SELECT mk_spi('spi_bad() RETURNS int VOLATILE',
 
 SELECT spi_bad();  -- fail
 ERROR:  PL/LLVM supports only plain SELECT statements
-DETAIL:  The statement is "SELECT 1; SELECT 2".
-CONTEXT:  PL/LLVM function "spi_bad"
+CONTEXT:  SQL statement "SELECT 1; SELECT 2"
+PL/LLVM function "spi_bad"
 -- below the top level, only SPI's read-only check applies
 SELECT mk_spi('spi_sub() RETURNS int VOLATILE',
               'SELECT i FROM (SELECT i FROM spi_t WHERE i = 1 FOR UPDATE) s', '', 'int4');
@@ -470,7 +471,8 @@ SELECT mk_spi('spi_bad() RETURNS int STABLE', 'SELECT 1', '', 'nosuchtype');
 
 SELECT spi_bad();  -- fail
 ERROR:  type "nosuchtype" does not exist
-CONTEXT:  PL/LLVM function "spi_bad"
+CONTEXT:  SQL statement "SELECT 1"
+PL/LLVM function "spi_bad"
 SELECT mk_spi('spi_bad(a int) RETURNS int STABLE', 'SELECT $2', 'int4', 'int4');
  mk_spi 
 --------
@@ -492,7 +494,8 @@ SELECT mk_spi('spi_bad() RETURNS int STABLE', 'SELECT 1, 2', '', 'int4');
 SELECT spi_bad();  -- fail
 ERROR:  PL/LLVM statement result does not match its declaration
 DETAIL:  The statement returns 2 columns, its declaration has 1.
-CONTEXT:  PL/LLVM function "spi_bad"
+CONTEXT:  SQL statement "SELECT 1, 2"
+PL/LLVM function "spi_bad"
 -- 8. errors
 SELECT mk_spi('spi_div(a int) RETURNS int STABLE', 'SELECT 1 / $1', 'int4', 'int4');
  mk_spi 

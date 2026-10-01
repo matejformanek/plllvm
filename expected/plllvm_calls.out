@@ -394,7 +394,8 @@ REVOKE EXECUTE ON FUNCTION priv(int) FROM PUBLIC;
 SET ROLE regress_plllvm_user;
 SELECT c_priv(1);
 ERROR:  permission denied for function priv
-CONTEXT:  PL/LLVM function "c_priv"
+CONTEXT:  PL/LLVM call site "priv(integer)"
+PL/LLVM function "c_priv"
 RESET ROLE;
 GRANT EXECUTE ON FUNCTION priv(int) TO PUBLIC;
 SET ROLE regress_plllvm_user;
@@ -421,7 +422,8 @@ REVOKE regress_plllvm_grp FROM regress_plllvm_user;
 SET ROLE regress_plllvm_user;
 SELECT c_priv(2);
 ERROR:  permission denied for function priv
-CONTEXT:  PL/LLVM function "c_priv"
+CONTEXT:  PL/LLVM call site "priv(integer)"
+PL/LLVM function "c_priv"
 RESET ROLE;
 -- (c) as a superuser that stops being one
 SET ROLE regress_plllvm_su;
@@ -436,7 +438,8 @@ ALTER ROLE regress_plllvm_su NOSUPERUSER;
 SET ROLE regress_plllvm_su;
 SELECT c_priv(3);
 ERROR:  permission denied for function priv
-CONTEXT:  PL/LLVM function "c_priv"
+CONTEXT:  PL/LLVM call site "priv(integer)"
+PL/LLVM function "c_priv"
 RESET ROLE;
 -- (d) SET ROLE alone
 SELECT c_priv(4);
@@ -448,7 +451,8 @@ SELECT c_priv(4);
 SET ROLE regress_plllvm_user;
 SELECT c_priv(4);
 ERROR:  permission denied for function priv
-CONTEXT:  PL/LLVM function "c_priv"
+CONTEXT:  PL/LLVM call site "priv(integer)"
+PL/LLVM function "c_priv"
 RESET ROLE;
 SELECT c_priv(4);
  c_priv 
@@ -499,7 +503,8 @@ SELECT c_dr(1);
 DROP FUNCTION dr(int);
 SELECT c_dr(1);
 ERROR:  function "dr(integer)" does not exist
-CONTEXT:  PL/LLVM function "c_dr"
+CONTEXT:  PL/LLVM call site "dr(integer)"
+PL/LLVM function "c_dr"
 CREATE FUNCTION dr(x int) RETURNS int LANGUAGE sql AS 'SELECT x + 200';
 SELECT c_dr(1);
  c_dr 
@@ -512,7 +517,8 @@ CREATE FUNCTION dr(x int) RETURNS int8 LANGUAGE sql AS 'SELECT x + 300';
 SELECT c_dr(1);
 ERROR:  return type of function dr(integer) has changed
 HINT:  Replace the calling PL/LLVM function.
-CONTEXT:  PL/LLVM function "c_dr"
+CONTEXT:  PL/LLVM call site "dr(integer)"
+PL/LLVM function "c_dr"
 -- 12. ERRORs in the callee leave no busy site and no memory behind
 SELECT mk_ll('div0(x int, y int)', 'int', 'int4div(integer,integer)', 2);
  mk_ll 
@@ -526,6 +532,10 @@ SELECT div0(6, 3);
     2
 (1 row)
 
+SELECT div0(1, 0);  -- the site shows in the context
+ERROR:  division by zero
+CONTEXT:  PL/LLVM call site "int4div(integer,integer)"
+PL/LLVM function "div0"
 SELECT sum(total_bytes) AS bytes0 FROM pg_backend_memory_contexts
 WHERE name LIKE 'plllvm%' OR name LIKE 'PL/LLVM%' \gset
 DO $$
@@ -592,6 +602,21 @@ WHERE owner = 'via_site(int)'::regprocedure;
          5 | f
 (1 row)
 
+-- under more calls of the code, only a reentrant call names its site
+CREATE OR REPLACE FUNCTION sqlrec(n int) RETURNS int LANGUAGE sql
+AS 'SELECT CASE WHEN n > 0 THEN via_site(n - 1) + 1 ELSE 1 / n END';
+SELECT via_site(1);
+ERROR:  division by zero
+CONTEXT:  SQL function "sqlrec" statement 1
+PL/LLVM call site "sqlrec(integer)"
+PL/LLVM function "via_site"
+SQL function "sqlrec" statement 1
+PL/LLVM function "via_site"
+SELECT via_site(0);  -- named again: the code was idle
+ERROR:  division by zero
+CONTEXT:  SQL function "sqlrec" statement 1
+PL/LLVM call site "sqlrec(integer)"
+PL/LLVM function "via_site"
 -- 14. collation: the input collation, else the argument type's
 SELECT mk_ll('lower_ll(t text)', 'text', 'lower(text)', 1);
  mk_ll 

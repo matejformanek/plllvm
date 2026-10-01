@@ -245,7 +245,12 @@ static void
 exec_error_callback(void *arg)
 {
 	plllvm_function *func = (plllvm_function *) arg;
+	const char *site = NULL;
 
+	if (func->mod != NULL && func->mod->refs != NULL)
+		site = plllvm_sites_running(func->mod->refs, func->cfunc.use_count);
+	if (site != NULL)
+		errcontext("PL/LLVM call site \"%s\"", site);
 	errcontext("PL/LLVM function \"%s\"", NameStr(func->proname));
 }
 

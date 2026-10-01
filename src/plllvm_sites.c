@@ -28,6 +28,12 @@
  * 4) Sites are released with their code, which deletes their contexts.  The
  *    records themselves stay, like the code.
  *
+ * 5) The errcontext of a call costs the fast path nothing: on ERROR, the
+ *    busy site is the running call.  That holds only while one call of the
+ *    code runs and no ERROR has left a flag behind (note 3), so an ERROR
+ *    under more calls drops the line until the code is idle.  The slow
+ *    path pushes a callback of its own.
+ *
  */
 #include "postgres.h"
 
@@ -59,6 +65,7 @@ struct plllvm_refs
 	int			guc_level;
 	bool		check_only;		/* true, when nothing is kept (validator) */
 	bool		published;		/* true, while the sites are in the list */
+	bool		unsure;			/* true, when a busy flag may be stale */
 	int			nsites;
 	plllvm_site *sites;
 };
@@ -440,6 +447,35 @@ plllvm_sites_idle(plllvm_refs *refs)
 {
 	for (int i = 0; i < refs->nsites; i++)
 		refs->sites[i].busy = false;
+	refs->unsure = false;
+}
+
+/*
+ * For errcontext: the signature of the site whose call is running, or NULL
+ * when that is not certain.  ncalls is the number of running calls of the
+ * code.
+ */
+const char *
+plllvm_sites_running(plllvm_refs *refs, int ncalls)
+{
+	const char *signature = NULL;
+
+	/* the ERROR may leave the outer calls' flags behind */
+	if (ncalls > 1)
+		refs->unsure = true;
+	if (refs->unsure)
+		return NULL;
+
+	for (int i = 0; i < refs->nsites; i++)
+	{
+		if (!refs->sites[i].busy)
+			continue;
+		if (signature != NULL)
+			return NULL;
+		signature = refs->sites[i].signature;
+	}
+
+	return signature;
 }
 
 /*
@@ -471,8 +507,20 @@ plllvm_sites_release(plllvm_refs *refs)
 Datum
 plllvm_rt_site_call(plllvm_site *site, NullableDatum *args, bool *isnull)
 {
+	ErrorContextCallback errcallback;
+	Datum		result;
+
+	errcallback.callback = ref_error_callback;
+	errcallback.arg = unconstify(char *, site->signature);
+	errcallback.previous = error_context_stack;
+	error_context_stack = &errcallback;
+
 	if (site->busy)
-		return call_reentrant(site, args, isnull);
+	{
+		result = call_reentrant(site, args, isnull);
+		error_context_stack = errcallback.previous;
+		return result;
+	}
 
 	if (!site->ready)
 		rebuild(site);
@@ -483,6 +531,9 @@ plllvm_rt_site_call(plllvm_site *site, NullableDatum *args, bool *isnull)
 		site->userid = GetUserId();
 		site->checks++;
 	}
+
+	/* the busy site names itself (note 5) */
+	error_context_stack = errcallback.previous;
 
 	return call(site, site->fcinfo, args, isnull);
 }

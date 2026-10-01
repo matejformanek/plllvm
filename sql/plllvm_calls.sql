@@ -267,6 +267,7 @@ SELECT c_dr(1);
 -- 12. ERRORs in the callee leave no busy site and no memory behind
 SELECT mk_ll('div0(x int, y int)', 'int', 'int4div(integer,integer)', 2);
 SELECT div0(6, 3);
+SELECT div0(1, 0);  -- the site shows in the context
 SELECT sum(total_bytes) AS bytes0 FROM pg_backend_memory_contexts
 WHERE name LIKE 'plllvm%' OR name LIKE 'PL/LLVM%' \gset
 DO $$
@@ -298,6 +299,11 @@ AS 'SELECT CASE WHEN n > 0 THEN via_site(n - 1) + 1 ELSE 0 END';
 SELECT via_site(5);
 SELECT reentries, busy FROM plllvm_call_sites()
 WHERE owner = 'via_site(int)'::regprocedure;
+-- under more calls of the code, only a reentrant call names its site
+CREATE OR REPLACE FUNCTION sqlrec(n int) RETURNS int LANGUAGE sql
+AS 'SELECT CASE WHEN n > 0 THEN via_site(n - 1) + 1 ELSE 1 / n END';
+SELECT via_site(1);
+SELECT via_site(0);  -- named again: the code was idle
 
 -- 14. collation: the input collation, else the argument type's
 SELECT mk_ll('lower_ll(t text)', 'text', 'lower(text)', 1);
