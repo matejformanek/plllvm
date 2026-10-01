@@ -1215,6 +1215,10 @@ user_ir_check(LLVMContextRef ctx, LLVMModuleRef umod, LLVMModuleRef hmod,
 			host = LLVMGetNamedFunction(hmod, name);
 			if (host == NULL)
 				host = LLVMGetNamedGlobal(hmod, name);
+			/* the link renames local names, as clang's .str of Assert() */
+			if (host != NULL && (LLVMGetLinkage(host) == LLVMPrivateLinkage ||
+								 LLVMGetLinkage(host) == LLVMInternalLinkage))
+				host = NULL;
 
 			if (!LLVMIsDeclaration(gv))
 			{
