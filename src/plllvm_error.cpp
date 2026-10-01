@@ -21,6 +21,13 @@
  *    inside LLVM.  Neither llvmjit nor plllvm runs SQL inside such a
  *    section, so the two never nest.
  *
+ * 3) Core resets its own depth only in PostgresMain()'s error recovery.  If
+ *    an out-of-memory ERROR inside llvmjit is caught by a PL/pgSQL EXCEPTION
+ *    block, core keeps counting a depth > 0 while a later plllvm section
+ *    empties LLVM's handler slot, so a later LLVM fatal error in llvmjit in
+ *    that transaction aborts instead of raising FATAL.  An extension cannot
+ *    fix that.
+ *
  */
 
 extern "C"
@@ -114,6 +121,21 @@ void
 plllvm_assert_in_fatal_section(void)
 {
 	Assert(fatal_new_handler_depth > 0);
+}
+
+/*
+ * Raise the LLVM error that plllvm.debug_inject asks for, as LLVM itself
+ * would.  Called inside a section, so it ends the session with FATAL.
+ */
+void
+plllvm_inject_fault(int kind)
+{
+	plllvm_assert_in_fatal_section();
+
+	if (kind == PLLLVM_INJECT_LLVM_FATAL)
+		llvm::reportFatalInternalError("plllvm.debug_inject");
+	else if (kind == PLLLVM_INJECT_BAD_ALLOC)
+		llvm::report_bad_alloc_error("plllvm.debug_inject");
 }
 
 static void
