@@ -39,13 +39,15 @@ SELECT pg_describe_object(classid, objid, objsubid) AS member
    AND refobjid = (SELECT oid FROM pg_extension WHERE extname = 'plllvm')
    AND deptype = 'e'
  ORDER BY 1;
-             member             
---------------------------------
+                     member                     
+------------------------------------------------
  function plllvm_call_handler()
+ function plllvm_code_cache()
+ function plllvm_jit_test(text,integer,boolean)
  function plllvm_session_info()
  function plllvm_validator(oid)
  language plllvm
-(4 rows)
+(6 rows)
 
 DROP LANGUAGE plllvm;  -- fail
 ERROR:  cannot drop language plllvm because extension plllvm requires it
