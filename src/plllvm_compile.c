@@ -105,7 +105,8 @@ compile_callback(FunctionCallInfo fcinfo, HeapTuple procTup,
 	get_typlenbyval(procStruct->prorettype, &rettyplen, &rettypbyval);
 
 	if (!plllvm_jit_compile(fcinfo->flinfo->fn_oid, hashkey->inputCollation,
-							path, src, plllvm_opt_level, &r))
+							path, procStruct->pronargs, src, plllvm_opt_level,
+							&r))
 		report_jit_error(&r, src);
 
 	error_context_stack = errcallback.previous;
@@ -249,7 +250,8 @@ plllvm_compile_check_body(HeapTuple procTup)
 	errcallback.previous = error_context_stack;
 	error_context_stack = &errcallback;
 
-	if (!plllvm_jit_check(src, plllvm_sites_path(procTup), &r))
+	if (!plllvm_jit_check(src, plllvm_sites_path(procTup),
+						  procStruct->pronargs, &r))
 		report_jit_error(&r, src);
 
 	error_context_stack = errcallback.previous;

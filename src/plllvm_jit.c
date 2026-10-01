@@ -130,17 +130,19 @@ static LLVMErrorRef host_symbols_define(void);
 static void log_jit_error(void *ctx, LLVMErrorRef error);
 static void plllvm_jit_shutdown(int code, Datum arg);
 static bool build(const char *ir, bool codegen, Oid collation,
-				  const char *search_path, plllvm_jit_module *mod,
+				  const char *search_path, int nargs, plllvm_jit_module *mod,
 				  LLVMOrcResourceTrackerRef *rt, plllvm_refs **refs,
 				  char **optimized_ir, plllvm_jit_result *result);
 static bool helpers_load(LLVMContextRef ctx, LLVMModuleRef *hmod,
 						 LLVMAttributeRef *attrs);
 static void parse_error_set(char *msg, plllvm_jit_result *result);
 static bool user_ir_check(LLVMContextRef ctx, LLVMModuleRef umod,
-						  LLVMModuleRef hmod, List **irrefs,
+						  LLVMModuleRef hmod, int nargs, List **irrefs,
 						  plllvm_jit_result *result);
 static bool ir_ref_check(LLVMValueRef gv, const char *name, int *nargs,
 						 plllvm_jit_result *result);
+static bool arg_index_check(LLVMValueRef gv, const char *name, int nargs,
+							plllvm_jit_result *result);
 static bool is_frame_helper(const char *name);
 static const char *unresolved_symbol(LLVMModuleRef mod);
 static bool host_symbol_exists(const char *name);
@@ -334,7 +336,8 @@ plllvm_jit_get_session_info(plllvm_jit_session_info *info)
  */
 bool
 plllvm_jit_compile(Oid owner_oid, Oid collation, const char *search_path,
-				   const char *ir, int opt_level, plllvm_jit_result *result)
+				   int nargs, const char *ir, int opt_level,
+				   plllvm_jit_result *result)
 {
 	plllvm_jit_module mod = {0};
 	LLVMOrcResourceTrackerRef rt;
@@ -363,7 +366,7 @@ plllvm_jit_compile(Oid owner_oid, Oid collation, const char *search_path,
 			 owner_oid, mod.gen);
 	mod.opt_level = opt_level;
 
-	if (!build(ir, true, collation, search_path, &mod, &rt, &refs,
+	if (!build(ir, true, collation, search_path, nargs, &mod, &rt, &refs,
 			   &optimized_ir, result))
 	{
 		if (refs != NULL)
@@ -409,7 +412,7 @@ plllvm_jit_compile(Oid owner_oid, Oid collation, const char *search_path,
  * Check the IR as plllvm_jit_compile() would, without generating code
  */
 bool
-plllvm_jit_check(const char *ir, const char *search_path,
+plllvm_jit_check(const char *ir, const char *search_path, int nargs,
 				 plllvm_jit_result *result)
 {
 	plllvm_jit_module mod = {0};
@@ -420,8 +423,8 @@ plllvm_jit_check(const char *ir, const char *search_path,
 
 	plllvm_jit_session_ensure();
 
-	ok = build(ir, false, InvalidOid, search_path, &mod, NULL, &refs, NULL,
-			   result);
+	ok = build(ir, false, InvalidOid, search_path, nargs, &mod, NULL, &refs,
+			   NULL, result);
 	if (refs != NULL)
 		plllvm_refs_end(refs, false);
 
@@ -794,7 +797,7 @@ plllvm_jit_shutdown(int code, Datum arg)
  */
 static bool
 build(const char *ir, bool codegen, Oid collation, const char *search_path,
-	  plllvm_jit_module *mod, LLVMOrcResourceTrackerRef *rt,
+	  int nargs, plllvm_jit_module *mod, LLVMOrcResourceTrackerRef *rt,
 	  plllvm_refs **refs, char **optimized_ir, plllvm_jit_result *result)
 {
 	LLVMContextRef ctx;
@@ -839,7 +842,8 @@ build(const char *ir, bool codegen, Oid collation, const char *search_path,
 		parse_error_set(msg, result);
 	}
 	LLVMDisposeMemoryBuffer(buf);
-	if (umod == NULL || !user_ir_check(ctx, umod, hmod, &irrefs, result))
+	if (umod == NULL ||
+		!user_ir_check(ctx, umod, hmod, nargs, &irrefs, result))
 		goto out;
 	mod->parse_ms = elapsed_ms(&since);
 
@@ -1152,7 +1156,7 @@ parse_error_set(char *msg, plllvm_jit_result *result)
  */
 static bool
 user_ir_check(LLVMContextRef ctx, LLVMModuleRef umod, LLVMModuleRef hmod,
-			  List **irrefs, plllvm_jit_result *result)
+			  int nargs, List **irrefs, plllvm_jit_result *result)
 {
 	LLVMTypeRef ptr = LLVMPointerTypeInContext(ctx, 0);
 	LLVMTypeRef entry_type;
@@ -1245,6 +1249,8 @@ user_ir_check(LLVMContextRef ctx, LLVMModuleRef umod, LLVMModuleRef hmod,
 										 llvm_message(LLVMPrintTypeToString(found))));
 					return false;
 				}
+				if (!arg_index_check(gv, name, nargs, result))
+					return false;
 				if (is_frame_helper(name))
 					result->needs_frame = true;
 				if (strncmp(name, "plllvm_spi_", 11) == 0)
@@ -1331,6 +1337,47 @@ misused:
 						 name),
 				NULL);
 	return false;
+}
+
+/*
+ * A constant argument number of an argument accessor must be one of the
+ * function's (nargs, -1 when there is no function).  Its type is not
+ * checked: plllvm_arg_i64 reads any Datum.
+ */
+static bool
+arg_index_check(LLVMValueRef gv, const char *name, int nargs,
+				plllvm_jit_result *result)
+{
+	if (nargs < 0 ||
+		(strncmp(name, "plllvm_arg_", 11) != 0 &&
+		 strcmp(name, "plllvm_array_arg") != 0))
+		return true;
+
+	for (LLVMUseRef use = LLVMGetFirstUse(gv); use; use = LLVMGetNextUse(use))
+	{
+		LLVMValueRef user = LLVMGetUser(use);
+		LLVMValueRef argno;
+		long long	n;
+
+		if (!LLVMIsACallInst(user) || LLVMGetCalledValue(user) != gv)
+			continue;
+
+		argno = LLVMGetOperand(user, 1);
+		if (!LLVMIsAConstantInt(argno))
+			continue;
+
+		n = LLVMConstIntGetSExtValue(argno);
+		if (n < 0 || n >= nargs)
+		{
+			build_error(result, ERRCODE_INVALID_FUNCTION_DEFINITION,
+						psprintf("\"%s\" reads argument %lld", name, n),
+						psprintf("Arguments are numbered from 0; the function has %d.",
+								 nargs));
+			return false;
+		}
+	}
+
+	return true;
 }
 
 static bool

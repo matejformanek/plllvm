@@ -157,7 +157,37 @@ SELECT * FROM plllvm_function_status('v_strict(int8)');
 SELECT v_strict(NULL);
 SELECT * FROM plllvm_function_status('v_strict(int8)');
 
+-- a constant argument number must be one of the function's
+CREATE FUNCTION v_argno(x int8) RETURNS int8 LANGUAGE plllvm AS $$
+declare i64 @plllvm_arg_i64(ptr, i32)
+
+define i64 @f(ptr %fcinfo) {
+  %x = call i64 @plllvm_arg_i64(ptr %fcinfo, i32 1)
+  ret i64 %x
+}
+$$;
+CREATE FUNCTION v_argno() RETURNS int8 LANGUAGE plllvm AS $$
+declare zeroext i1 @plllvm_arg_isnull(ptr, i32)
+
+define i64 @f(ptr %fcinfo) {
+  %n = call i1 @plllvm_arg_isnull(ptr %fcinfo, i32 0)
+  ret i64 0
+}
+$$;
+SET check_function_bodies = off;
+CREATE FUNCTION v_argno(x int8) RETURNS int8 LANGUAGE plllvm AS $$
+declare i64 @plllvm_arg_i64(ptr, i32)
+
+define i64 @f(ptr %fcinfo) {
+  %x = call i64 @plllvm_arg_i64(ptr %fcinfo, i32 -1)
+  ret i64 %x
+}
+$$;
+RESET check_function_bodies;
+SELECT v_argno(1);
+
 DROP FUNCTION v_late();
 DROP FUNCTION v_strict(int8);
+DROP FUNCTION v_argno(int8);
 DROP TYPE v_pair;
 DROP DOMAIN v_posint;
