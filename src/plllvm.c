@@ -40,6 +40,7 @@ PG_FUNCTION_INFO_V1(plllvm_call_handler);
 PG_FUNCTION_INFO_V1(plllvm_validator);
 
 bool		plllvm_regress_test_mode = false;
+char	   *plllvm_types_bc_path = NULL;
 
 /*
  * Module initialization
@@ -59,6 +60,14 @@ _PG_init(void)
 							 false,
 							 PGC_USERSET, 0,
 							 NULL, NULL, NULL);
+
+	DefineCustomStringVariable("plllvm.types_bc_path",
+							   gettext_noop("Sets the path of plllvm_types.bc."),
+							   gettext_noop("Read when a session first uses LLVM. Empty means plllvm/plllvm_types.bc next to the plllvm library."),
+							   &plllvm_types_bc_path,
+							   "",
+							   PGC_SUSET, GUC_NOT_IN_SAMPLE,
+							   NULL, NULL, NULL);
 
 	MarkGUCPrefixReserved("plllvm");
 
@@ -97,4 +106,17 @@ plllvm_validator(PG_FUNCTION_ARGS)
 			 errmsg("PL/LLVM functions are not implemented yet")));
 
 	PG_RETURN_VOID();			/* keep compiler quiet */
+}
+
+/*
+ * Path for messages: only its last component in regression tests
+ */
+const char *
+plllvm_display_path(const char *path)
+{
+	const char *sep = last_dir_separator(path);
+
+	if (plllvm_regress_test_mode && sep != NULL)
+		return sep + 1;
+	return path;
 }

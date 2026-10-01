@@ -9,11 +9,12 @@ DATA = plllvm--0.1.sql
 PGFILEDESC = "plllvm - PL/LLVM procedural language"
 
 REGRESS = plllvm_setup \
+		plllvm_types \
 		plllvm_teardown
 
 REGRESS_OPTS = --dbname=$(PL_TESTDB)
 
-EXTRA_CLEAN = stage
+EXTRA_CLEAN = stage src/plllvm_types.bc src/plllvm_types_stale.bc
 
 # PGXS of a meson-built server has empty LLVM_* variables
 LLVM ?= /opt/homebrew/opt/llvm@22
@@ -45,6 +46,54 @@ override COMPILER = $(CXX) $(CXXFLAGS)
 ifdef PG_SYSROOT
 override CXXFLAGS += -isysroot $(PG_SYSROOT)
 endif
+
+#
+# plllvm_types.bc, with core's flags for llvmjit_types.bc
+# (src/backend/jit/llvm/meson.build).  PGXS's own %.bc rule would use the
+# empty BITCODE_CFLAGS of a meson-built server.
+#
+PLLLVM_CLANG ?= $(LLVM)/bin/clang
+PLLLVM_BCFLAGS = -O2 -flto=thin -emit-llvm -fno-strict-aliasing -fwrapv \
+	-Wno-ignored-attributes -Wno-empty-body
+ifdef PG_SYSROOT
+PLLLVM_BCFLAGS += -isysroot $(PG_SYSROOT)
+endif
+
+# the .bc and plllvm_jit.o must come from the same sources (see plllvm.h)
+PLLLVM_TYPES_VERSION := $(shell cat src/plllvm_types.c src/plllvm.h | cksum | cut -d' ' -f1)
+
+all: src/plllvm_types.bc
+
+src/plllvm_types.bc: src/plllvm_types.c src/plllvm.h
+	$(PLLLVM_CLANG) $(PLLLVM_BCFLAGS) $(CPPFLAGS) \
+		-DPLLLVM_TYPES_VERSION=$(PLLLVM_TYPES_VERSION)U -c -o $@ $<
+
+# PGXS sets CPPFLAGS with override, so a plain += would be ignored
+src/plllvm_jit.o: override CPPFLAGS += -DPLLLVM_TYPES_VERSION=$(PLLLVM_TYPES_VERSION)U
+src/plllvm_jit.o: src/plllvm_types.c
+
+# the .bc of slightly different sources, for the plllvm_types test
+src/plllvm_types_stale.bc: src/plllvm_types.c src/plllvm.h
+	{ cat $<; echo '/* stale */'; } > $@.tmp
+	$(PLLLVM_CLANG) $(PLLLVM_BCFLAGS) $(CPPFLAGS) -Isrc \
+		-DPLLLVM_TYPES_VERSION=`cat $@.tmp src/plllvm.h | cksum | cut -d' ' -f1`U \
+		-x c -c -o $@ $@.tmp
+	rm -f $@.tmp
+
+installcheck: src/plllvm_types_stale.bc
+
+install: install-types
+uninstall: uninstall-types
+
+.PHONY: install-types uninstall-types
+
+install-types: src/plllvm_types.bc
+	$(MKDIR_P) '$(DESTDIR)$(pkglibdir)/plllvm'
+	$(INSTALL_DATA) src/plllvm_types.bc '$(DESTDIR)$(pkglibdir)/plllvm/'
+
+uninstall-types:
+	rm -f '$(DESTDIR)$(pkglibdir)/plllvm/plllvm_types.bc'
+	rmdir '$(DESTDIR)$(pkglibdir)/plllvm' 2>/dev/null || true
 
 plllvm.typedefs: $(OBJS)
 	./typedefs_gen.py
@@ -98,12 +147,13 @@ doctor: all
 	[ $$rc = 0 ] && echo "doctor: $$v (catversion $$cv), LLVM $$lv (pinned), $$ours"; \
 	exit $$rc
 
-# rm first: overwriting a dylib that a backend has mapped can crash it
+# rm first: overwriting a file that a backend has mapped can crash it
 stage: all
-	$(MKDIR_P) '$(STAGE)/share/extension' '$(STAGE)/lib'
+	$(MKDIR_P) '$(STAGE)/share/extension' '$(STAGE)/lib/plllvm'
 	cp $(EXTENSION).control $(DATA) '$(STAGE)/share/extension/'
-	rm -f '$(STAGE)/lib/$(MODULE_big)$(DLSUFFIX)'
+	rm -f '$(STAGE)/lib/$(MODULE_big)$(DLSUFFIX)' '$(STAGE)/lib/plllvm/plllvm_types.bc'
 	cp $(MODULE_big)$(DLSUFFIX) '$(STAGE)/lib/'
+	cp src/plllvm_types.bc '$(STAGE)/lib/plllvm/'
 
 cluster-init: port-ok
 	$(MKDIR_P) '$(dir $(PLLLVM_DATA))'

@@ -10,8 +10,8 @@
  *
  * Notes:
  *
- * 1) Only LLVM-C types (LLVM*Ref) may appear here, so that both the C files
- *    and the C++ file can include it (as core's jit/llvmjit.h).
+ * 1) The part shared with the C++ file may use only LLVM-C types (LLVM*Ref),
+ *    as core's jit/llvmjit.h.  The rest is for C only.
  *
  */
 #ifndef PLLLVM_JIT_H
@@ -32,5 +32,23 @@ extern void plllvm_assert_in_fatal_section(void);
 #ifdef __cplusplus
 }								/* extern "C" */
 #endif
+
+#ifndef __cplusplus
+
+typedef struct plllvm_jit_session_info
+{
+	char	   *llvm_version;
+	char	   *triple;			/* of plllvm_types.bc */
+	char	   *data_layout;
+	char	   *libllvm;		/* file of the loaded libLLVM */
+	char	   *types_bc;		/* file the session was set up from */
+	double		init_ms;
+} plllvm_jit_session_info;
+
+/* plllvm_jit.c */
+extern void plllvm_jit_session_ensure(void);
+extern void plllvm_jit_get_session_info(plllvm_jit_session_info *info);
+
+#endif							/* !__cplusplus */
 
 #endif							/* PLLLVM_JIT_H */

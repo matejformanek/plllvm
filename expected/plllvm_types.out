@@ -1,0 +1,52 @@
+--
+-- plllvm_types.bc and the LLVM session check
+--
+LOAD 'plllvm';
+SET plllvm.regress_test_mode = on;
+\getenv abs_builddir PG_ABS_BUILDDIR
+\set stale :abs_builddir '/src/plllvm_types_stale.bc'
+\set notbc :abs_builddir '/plllvm.control'
+-- a .bc built from other sources is refused
+SET plllvm.types_bc_path = :'stale';
+SELECT llvm_version FROM plllvm_session_info();  -- fail
+ERROR:  incompatible PL/LLVM types file "plllvm_types_stale.bc"
+DETAIL:  The file was built from other plllvm sources than the library.
+HINT:  Rebuild and reinstall the plllvm extension.
+-- so are a file that is not bitcode and a missing file
+SET plllvm.types_bc_path = :'notbc';
+SELECT llvm_version FROM plllvm_session_info();  -- fail
+ERROR:  could not parse PL/LLVM types file "plllvm.control"
+DETAIL:  Invalid bitcode signature
+HINT:  Rebuild and reinstall the plllvm extension.
+SET plllvm.types_bc_path = '/nonexistent/plllvm_types.bc';
+SELECT llvm_version FROM plllvm_session_info();  -- fail
+ERROR:  could not open PL/LLVM types file "plllvm_types.bc": No such file or directory
+HINT:  Check the installation of the plllvm extension, or set plllvm.types_bc_path.
+-- the default, next to the library, works after the failed attempts
+RESET plllvm.types_bc_path;
+SELECT llvm_version, triple <> '' AS triple, data_layout <> '' AS data_layout,
+       libllvm LIKE 'libLLVM%' AS libllvm, types_bc, init_ms > 0 AS timed
+  FROM plllvm_session_info();
+ llvm_version | triple | data_layout | libllvm |    types_bc     | timed 
+--------------+--------+-------------+---------+-----------------+-------
+ 22           | t      | t           | t       | plllvm_types.bc | t
+(1 row)
+
+-- once set up, the session does not read the file again
+SET plllvm.types_bc_path = :'stale';
+SELECT types_bc FROM plllvm_session_info();
+    types_bc     
+-----------------
+ plllvm_types.bc
+(1 row)
+
+RESET plllvm.types_bc_path;
+-- only superusers may set the path or call the function
+CREATE ROLE regress_plllvm_types;
+SET ROLE regress_plllvm_types;
+SET plllvm.types_bc_path = '/tmp/x.bc';  -- fail
+ERROR:  permission denied to set parameter "plllvm.types_bc_path"
+SELECT count(*) FROM plllvm_session_info();  -- fail
+ERROR:  permission denied for function plllvm_session_info
+RESET ROLE;
+DROP ROLE regress_plllvm_types;
