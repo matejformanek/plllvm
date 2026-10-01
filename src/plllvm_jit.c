@@ -141,7 +141,7 @@ static bool user_ir_parse(LLVMContextRef ctx, const char *ir,
 static bool helpers_link(LLVMModuleRef umod, LLVMModuleRef hmod,
 						 plllvm_jit_result *result);
 static void symbols_internalize(LLVMModuleRef umod, const char *symbol,
-								LLVMAttributeRef *attrs);
+								LLVMAttributeRef *attrs, int nattrs);
 static bool ir_verify(LLVMModuleRef umod, plllvm_jit_result *result);
 static void refs_apply(LLVMContextRef ctx, LLVMModuleRef umod, List *irrefs,
 					   bool codegen, Oid collation, const char *search_path,
@@ -855,7 +855,7 @@ build(const char *ir, bool codegen, Oid collation, const char *search_path,
 	mod->link_ms = elapsed_ms(&since);
 
 	if (codegen)
-		symbols_internalize(umod, mod->symbol, attrs);
+		symbols_internalize(umod, mod->symbol, attrs, lengthof(attrs));
 
 	if (!ir_verify(umod, result))
 		goto out;
@@ -1006,7 +1006,7 @@ helpers_link(LLVMModuleRef umod, LLVMModuleRef hmod, plllvm_jit_result *result)
  */
 static void
 symbols_internalize(LLVMModuleRef umod, const char *symbol,
-					LLVMAttributeRef *attrs)
+					LLVMAttributeRef *attrs, int nattrs)
 {
 	LLVMValueRef fn;
 	LLVMValueRef gv;
@@ -1020,7 +1020,7 @@ symbols_internalize(LLVMModuleRef umod, const char *symbol,
 			continue;
 		if (gv != fn)
 			LLVMSetLinkage(gv, LLVMInternalLinkage);
-		for (int i = 0; i < 2; i++)
+		for (int i = 0; i < nattrs; i++)
 		{
 			if (attrs[i] != NULL)
 				LLVMAddAttributeAtIndex(gv, LLVMAttributeFunctionIndex,
