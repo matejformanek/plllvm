@@ -262,7 +262,8 @@ plllvm_jit_session_ensure(void)
 					 errhint("Rebuild and reinstall the plllvm extension.")));
 		else
 			ereport(ERROR,
-					(errmsg("could not create the LLVM JIT: %s", jit_error)));
+					(errmsg("could not create the LLVM JIT: %s", jit_error),
+					 errhint("Check the LLVM installation the plllvm extension was built with.")));
 	}
 
 	oldcxt = MemoryContextSwitchTo(plllvm_jit_cxt);
@@ -465,13 +466,16 @@ types_module_check(LLVMModuleRef mod, unsigned llvm_major)
 	if (LLVMConstIntGetZExtValue(version) != PLLLVM_TYPES_VERSION)
 		return pstrdup("The file was built from other plllvm sources than the library.");
 
-	/* the same sources from here on, so the same shapes */
 	built_by = types_constant(mod, "plllvm_types_llvm_major");
+	probes = types_constant(mod, "plllvm_types_layout");
+	if (built_by == NULL || !LLVMIsAConstantInt(built_by) ||
+		probes == NULL || LLVMGetAggregateElement(probes, lengthof(layout) - 1) == NULL)
+		return pstrdup("The file is not a plllvm types file.");
+
 	if (LLVMConstIntGetZExtValue(built_by) != llvm_major)
 		return psprintf("The file was built by LLVM %u, the server runs LLVM %u.",
 						(unsigned) LLVMConstIntGetZExtValue(built_by), llvm_major);
 
-	probes = types_constant(mod, "plllvm_types_layout");
 	for (int i = 0; i < lengthof(layout); i++)
 	{
 		if (LLVMConstIntGetZExtValue(LLVMGetAggregateElement(probes, i)) != layout[i])
