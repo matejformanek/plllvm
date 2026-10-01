@@ -16,22 +16,28 @@ language only; everything else depends on the thesis plan.
 | `src/plllvm_jit.c` | LLVM session (checks `plllvm_types.bc`, target machine); LLJIT, compile pipeline, symbols, timings |
 | `src/plllvm_compile.c` | funccache callbacks, signature and scope checks (PR 3) |
 | `src/plllvm_sites.c` | calls to other functions (PR 4) |
-| `src/plllvm_stats.c` | `plllvm_session_info()`, `plllvm_code_cache()`, `plllvm_function_status()` |
+| `src/plllvm_stats.c` | `plllvm_session_info()`, `plllvm_code_cache()`, `plllvm_jit_test()`, `plllvm_function_status()` (PR 3) |
 
 Only `plllvm_jit.c` and `plllvm_error.cpp` include LLVM headers.
 
 ## Runtime (v0.1)
 
-* One LLJIT per backend, created lazily, RTDyld object layer, no compile
-  threads.
-* Each compile gets a fresh `LLVMContext`: parse `plllvm_types.bc`, parse the
-  user IR, check the user's declarations against the helpers, link, rename
-  the entry to `plllvm_<oid>_<gen>_<n>`, internalise, verify, optimise, add
-  with its own resource tracker, look up.
-* Compiled code is never freed in v0.1; a GUC caps the number of resident
-  compiles.
-* Every LLVM call runs inside a fatal-on-OOM section; JIT-compiled code never
-  does.
+* One LLJIT per backend, created with the session, RTDyld object layer with
+  reserved allocation, no compile threads. Server symbols resolve through a
+  process generator; plllvm's own host functions are hidden from `dlsym` and
+  defined as absolute symbols.
+* Each compile gets a fresh `LLVMContext`: parse `plllvm_types.bc` (helpers
+  become `linkonce_odr`), parse the user IR, check the entry `@f`, the size
+  and the user's declarations against the helpers, link, rename the entry to
+  `plllvm_<oid>_<gen>`, internalise, verify, resolve every declaration,
+  optimise, add with its own resource tracker, look up.
+* Compiled code is never freed in v0.1: a successful compile keeps its
+  tracker for the session, and `plllvm_jit_retire()` only marks it.
+  `plllvm.max_resident_compiles` caps the number of resident compiles. A
+  failed add or lookup removes its tracker at once.
+* Every LLVM call runs inside a fatal-on-OOM section that never raises an
+  ERROR; failures are returned and raised after leaving it. JIT-compiled code
+  never runs inside a section.
 
 ## Language
 
