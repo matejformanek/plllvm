@@ -85,10 +85,57 @@ declare void @plllvm_free(i64 %v)
 ; frees everything allocated in the scratch so far
 declare void @plllvm_scratch_reset()
 
+; --- SQL statements (v0.1c) --------------------------------------------------
+;
+; A body that declares a @plllvm_spi_ function runs connected to SPI, in a
+; frame.  A statement is one plain SELECT; the functions it calls are not
+; restricted.  It runs read-only unless the function is VOLATILE, as in
+; PL/pgSQL.  The slot is an internal global ptr, null at first:
+; @plllvm_spi_prepare fills it on the first call in a backend.  The types
+; are comma-separated names, as in "numeric(5,2), int4"; the result must
+; have the declared column types.  NullableDatum is { i64, i8 }
+; (16 bytes).
+
+; (slot, sql, argtypes, coltypes) -> statement
+declare ptr @plllvm_spi_prepare(ptr %slot, ptr %sql, ptr %argtypes, ptr %coltypes)
+; runs it with the NullableDatum %args as a non-STRICT SELECT INTO: the
+; first row into the NullableDatum %out, all NULL without one; returns the
+; number of rows, 0 or 1.  By-reference columns are copies as from
+; @plllvm_keep: free them with @plllvm_free.
+declare i32 @plllvm_spi_select_into(ptr %fcinfo, ptr %stmt, ptr %args, ptr %out)
+
+; --- arrays (v0.1c) ----------------------------------------------------------
+;
+; Flat one-dimensional (or empty) arrays of int4, int8 or float8 (element
+; type OIDs 23, 20, 701), without NULL elements, allocated in the current
+; context: the scratch in a frame.  Subscripts start at the lower bound;
+; one out of range, or an element type other than the accessor's, is an
+; ERROR.
+
+; argument n as an array of the element type: a private copy, which
+; @plllvm_array_set_* may change.  It is made at each call.
+declare ptr @plllvm_array_arg(ptr %fcinfo, i32 %n, i32 %elemtype)
+; n zeros, lower bound 1
+declare ptr @plllvm_array_new(i32 %elemtype, i32 %n)
+; copy of an array, also of one a call returned
+declare ptr @plllvm_array_copy(ptr %a)
+; number of elements and lower bound (1 when empty)
+declare i32 @plllvm_array_length(ptr %a)
+declare i32 @plllvm_array_lower(ptr %a)
+declare i32 @plllvm_array_get_i32(ptr %a, i32 %i)
+declare i64 @plllvm_array_get_i64(ptr %a, i32 %i)
+declare double @plllvm_array_get_f64(ptr %a, i32 %i)
+declare void @plllvm_array_set_i32(ptr %a, i32 %i, i32 %v)
+declare void @plllvm_array_set_i64(ptr %a, i32 %i, i64 %v)
+declare void @plllvm_array_set_f64(ptr %a, i32 %i, double %v)
+
 @hello = private constant [6 x i8] c"hello\00"
 @"pi()" = external global i8
 @"abs(integer)" = external global i8
 @"substr(text,integer,integer)" = external global i8
+@q = internal global ptr null
+@q.sql = private constant [20 x i8] c"SELECT $1::int8 + 1\00"
+@q.types = private constant [5 x i8] c"int8\00"
 
 ; every helper once; argument 0 picks the path
 define i64 @f(ptr %fcinfo) {
@@ -107,6 +154,8 @@ entry:
     i32 3, label %bigint_overflow
     i32 4, label %div_zero
     i32 5, label %null_result
+    i32 6, label %spi
+    i32 7, label %arrays
   ]
 
 error:
@@ -129,6 +178,34 @@ null_result:
   call void @plllvm_notice(ptr @hello)
   %r = call i64 @plllvm_return_null(ptr %fcinfo)
   ret i64 %r
+
+spi:
+  %args = alloca { i64, i8 }
+  %out = alloca { i64, i8 }
+  store { i64, i8 } { i64 41, i8 0 }, ptr %args
+  %stmt = call ptr @plllvm_spi_prepare(ptr @q, ptr @q.sql, ptr @q.types, ptr @q.types)
+  %rows = call i32 @plllvm_spi_select_into(ptr %fcinfo, ptr %stmt, ptr %args, ptr %out)
+  %v = load i64, ptr %out
+  ret i64 %v
+
+arrays:
+  %a = call ptr @plllvm_array_arg(ptr %fcinfo, i32 1, i32 20)
+  %a4 = call ptr @plllvm_array_new(i32 23, i32 3)
+  %a8 = call ptr @plllvm_array_copy(ptr %a)
+  %af = call ptr @plllvm_array_new(i32 701, i32 1)
+  %len = call i32 @plllvm_array_length(ptr %a)
+  %lo = call i32 @plllvm_array_lower(ptr %a)
+  call void @plllvm_array_set_i32(ptr %a4, i32 1, i32 %len)
+  call void @plllvm_array_set_i64(ptr %a8, i32 %lo, i64 %i64)
+  call void @plllvm_array_set_f64(ptr %af, i32 1, double %f64)
+  %e4 = call i32 @plllvm_array_get_i32(ptr %a4, i32 1)
+  %e8 = call i64 @plllvm_array_get_i64(ptr %a8, i32 %lo)
+  %ef = call double @plllvm_array_get_f64(ptr %af, i32 1)
+  %e4.64 = sext i32 %e4 to i64
+  %efi = fptosi double %ef to i64
+  %s.0 = add i64 %e4.64, %e8
+  %s.1 = add i64 %s.0, %efi
+  ret i64 %s.1
 
 calls:
   %isnull = alloca i1

@@ -26,6 +26,8 @@ REGRESS = plllvm_setup \
 		plllvm_host_api \
 		kernel_ledger \
 		kernel_text \
+		plllvm_spi \
+		plllvm_array \
 		plllvm_fatal \
 		plllvm_teardown
 
@@ -207,7 +209,7 @@ installcheck-discard:
 		PGOPTIONS='-c debug_discard_caches=1'
 
 # runtime functions that only the inline helpers call
-HOST_API_INTERNAL = plllvm_rt_site_call plllvm_rt_site_null
+HOST_API_INTERNAL = plllvm_rt_site_call plllvm_rt_site_null plllvm_rt_array_access
 
 # docs/host-api.ll declares every other plllvm_* name of plllvm_types.bc
 check-host-api: src/plllvm_types.bc

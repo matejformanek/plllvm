@@ -12,8 +12,9 @@
  * Notes:
  *
  * 1) A body is LLVM IR whose entry "i64 @f(ptr %fcinfo)" is called as a
- *    version 1 function.  The handler adds only the pin, the error context
- *    and the frame; argument and NULL handling are the IR's.
+ *    version 1 function.  The handler adds only the pin, the error context,
+ *    the frame and the SPI connection; argument and NULL handling are the
+ *    IR's.
  *
  * 2) There is no inline handler, so PostgreSQL itself rejects DO blocks.
  *
@@ -26,6 +27,7 @@
 #include <limits.h>
 
 #include "access/xact.h"
+#include "executor/spi.h"
 #include "fmgr.h"
 #include "miscadmin.h"
 #include "utils/guc.h"
@@ -176,6 +178,8 @@ plllvm_subxact_callback(SubXactEvent event, SubTransactionId mySubid,
  * The order of the steps is fixed:
  * - the caller's context is taken first: the result and kept values live
  *   there, and an SPI_connect() before the frame must save that context;
+ * - SPI is finished last; after an ERROR the abort pops the SPI level, as
+ *   for PL/pgSQL;
  * - the frame is pushed before the pin, so that a failed push leaks no pin;
  * - the result is copied out inside the TRY, while what it points into
  *   still exists, and the frame is popped before the unpin, so that
@@ -189,11 +193,15 @@ plllvm_call_handler(PG_FUNCTION_ARGS)
 	plllvm_frame frame;
 	ErrorContextCallback errcallback;
 	volatile Datum retval = (Datum) 0;
+	int			rc;
 
 	/* PL/LLVM functions may call each other through fmgr alone */
 	check_stack_depth();
 
 	func = plllvm_compile_get(fcinfo);
+
+	if (func->uses_spi && (rc = SPI_connect()) != SPI_OK_CONNECT)
+		elog(ERROR, "SPI_connect failed: %s", SPI_result_code_string(rc));
 
 	if (func->needs_frame)
 		plllvm_frame_push(&frame, entry_cxt);
@@ -226,6 +234,9 @@ plllvm_call_handler(PG_FUNCTION_ARGS)
 	 * restores its own.
 	 */
 	error_context_stack = errcallback.previous;
+
+	if (func->uses_spi && (rc = SPI_finish()) != SPI_OK_FINISH)
+		elog(ERROR, "SPI_finish failed: %s", SPI_result_code_string(rc));
 
 	return retval;
 }

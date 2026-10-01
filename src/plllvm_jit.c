@@ -1247,6 +1247,8 @@ user_ir_check(LLVMContextRef ctx, LLVMModuleRef umod, LLVMModuleRef hmod,
 				}
 				if (is_frame_helper(name))
 					result->needs_frame = true;
+				if (strncmp(name, "plllvm_spi_", 11) == 0)
+					result->uses_spi = true;
 			}
 			else if (pass == 1 && (name[0] == '\'' || strchr(name, '(') != NULL))
 			{

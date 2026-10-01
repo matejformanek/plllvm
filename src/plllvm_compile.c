@@ -121,9 +121,13 @@ compile_callback(FunctionCallInfo fcinfo, HeapTuple procTup,
 	namestrcpy(&func->proname, NameStr(procStruct->proname));
 	func->addr = (PGFunction) r.mod->addr;
 	func->needs_frame = r.mod->needs_frame;
+	func->uses_spi = r.uses_spi;
+	func->readonly = (procStruct->provolatile != PROVOLATILE_VOLATILE);
 	func->rettypbyval = rettypbyval;
 	func->rettyplen = rettyplen;
 	func->mod = r.mod;
+	/* the SPI helpers are frame helpers */
+	Assert(!func->uses_spi || func->needs_frame);
 
 	pfree(src);
 }

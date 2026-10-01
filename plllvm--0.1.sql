@@ -20,7 +20,7 @@ CREATE FUNCTION plllvm_session_info()
   RETURNS TABLE(llvm_version text, triple text, data_layout text,
                 libllvm text, types_bc text, init_ms float8,
                 compiles int8, compile_failures int8, retired int8,
-                rss_bytes int8)
+                rss_bytes int8, spi_statements int8)
   LANGUAGE c AS 'MODULE_PATHNAME';
 
 REVOKE ALL ON FUNCTION plllvm_session_info() FROM PUBLIC;
