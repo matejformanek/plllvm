@@ -22,6 +22,10 @@ REGRESS = plllvm_setup \
 		kernel_fib \
 		kernel_is_prime \
 		kernel_mandelbrot \
+		plllvm_calls \
+		plllvm_host_api \
+		kernel_ledger \
+		kernel_text \
 		plllvm_fatal \
 		plllvm_teardown
 
@@ -150,7 +154,8 @@ $(error MEASURE=1 needs $(THESIS_ROOT)/scratch/measure.lock)
 endif
 endif
 
-.PHONY: port-ok doctor stage cluster-init cluster-start cluster-stop pgindent
+.PHONY: port-ok doctor stage cluster-init cluster-start cluster-stop pgindent \
+	installcheck-discard check-host-api
 
 # 5432, 5433 belong to pg-claude, 5444 to the perf cluster
 port-ok:
@@ -195,6 +200,24 @@ cluster-start: port-ok
 
 cluster-stop:
 	'$(bindir)/pg_ctl' -D '$(PLLLVM_DATA)' -w -m fast stop
+
+# call sites under cache flushes; plllvm_cache has an alternative output
+installcheck-discard:
+	$(MAKE) installcheck REGRESS='plllvm_setup plllvm_calls plllvm_cache' \
+		PGOPTIONS='-c debug_discard_caches=1'
+
+# runtime functions that only the inline helpers call
+HOST_API_INTERNAL = plllvm_rt_site_call plllvm_rt_site_null
+
+# docs/host-api.ll declares every other plllvm_* name of plllvm_types.bc
+check-host-api: src/plllvm_types.bc
+	$(LLVM)/bin/llvm-nm -j $< | sed 's/^_//' | grep '^plllvm_' | \
+		grep -v -x -e plllvm_attr_template -e 'plllvm_types_.*' $(addprefix -e ,$(HOST_API_INTERNAL)) | \
+		sort -u > $@.bc
+	sed -n 's/^declare .*@\(plllvm_[a-z0-9_]*\)(.*/\1/p' docs/host-api.ll | sort -u > $@.ll
+	diff $@.bc $@.ll; rc=$$?; rm -f $@.bc $@.ll; exit $$rc
+
+installcheck: check-host-api
 
 # pgindent and pg_bsd_indent of the PostgreSQL tree in the workspace
 PGINDENT ?= $(THESIS_ROOT)/code/src/tools/pgindent/pgindent
