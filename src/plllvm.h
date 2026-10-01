@@ -21,6 +21,8 @@
 #error "plllvm requires PostgreSQL 18 or later"
 #endif
 
+#include "utils/funccache.h"
+
 /* keep in sync with META.json; plllvm.control carries major.minor only */
 #define PLLLVM_VERSION "0.1.0"
 
@@ -59,6 +61,20 @@ typedef struct plllvm_host_symbol
 /* terminated by {NULL, NULL} */
 extern const plllvm_host_symbol plllvm_host_symbols[];
 
+/* stored in fn_extra; set once a compile succeeded */
+#define PLLLVM_FN_MAGIC		2026100101
+
+typedef struct plllvm_function
+{
+	CachedFunction cfunc;		/* must be first */
+	int			magic;
+	NameData	proname;		/* for errcontext; funccache zeroes a reused
+								 * entry, so nothing here may own memory */
+	PGFunction	addr;
+	struct plllvm_jit_module *mod;	/* code record, never freed; NULL once
+									 * retired */
+} plllvm_function;
+
 /* GUCs (plllvm.c) */
 extern bool plllvm_regress_test_mode;
 extern char *plllvm_types_bc_path;
@@ -70,5 +86,11 @@ extern int	plllvm_debug_inject;
 
 /* plllvm.c */
 extern const char *plllvm_display_path(const char *path);
+
+/* plllvm_compile.c */
+extern plllvm_function *plllvm_compile_get(FunctionCallInfo fcinfo);
+extern void plllvm_compile_unpin(plllvm_function *func);
+extern void plllvm_compile_check_scope(HeapTuple procTup);
+extern void plllvm_compile_check_body(HeapTuple procTup);
 
 #endif							/* PLLLVM_H */

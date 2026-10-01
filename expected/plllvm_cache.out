@@ -1,0 +1,113 @@
+--
+-- The core function cache: one compile per definition and call signature
+--
+LOAD 'plllvm';
+SET plllvm.regress_test_mode = on;
+CREATE FUNCTION c_one() RETURNS int8 LANGUAGE plllvm
+AS $$ define i64 @f(ptr %fcinfo) { ret i64 1 } $$;
+-- many call sites, each with its own FmgrInfo
+SELECT c_one();
+ c_one 
+-------
+     1
+(1 row)
+
+SELECT c_one() + c_one();
+ ?column? 
+----------
+        2
+(1 row)
+
+PREPARE c_p AS SELECT c_one();
+EXECUTE c_p;
+ c_one 
+-------
+     1
+(1 row)
+
+EXECUTE c_p;
+ c_one 
+-------
+     1
+(1 row)
+
+EXECUTE c_p;
+ c_one 
+-------
+     1
+(1 row)
+
+DO $$
+DECLARE
+  s int8 := 0;
+BEGIN
+  FOR i IN 1..100 LOOP
+    s := s + c_one();
+  END LOOP;
+  RAISE NOTICE 'sum %', s;
+END
+$$;
+NOTICE:  sum 100
+CREATE FUNCTION c_sql() RETURNS int8 LANGUAGE sql AS 'SELECT c_one() + 1';
+SELECT c_sql();
+ c_sql 
+-------
+     2
+(1 row)
+
+SELECT * FROM plllvm_function_status('c_one()');
+ state | compiles | retired 
+-------+----------+---------
+ live  |        1 |       0
+(1 row)
+
+DISCARD ALL;
+SET plllvm.regress_test_mode = on;
+SELECT c_one();
+ c_one 
+-------
+     1
+(1 row)
+
+SELECT * FROM plllvm_function_status('c_one()');
+ state | compiles | retired 
+-------+----------+---------
+ live  |        1 |       0
+(1 row)
+
+-- the input collation is part of the key
+CREATE FUNCTION c_text(t text) RETURNS int8 LANGUAGE plllvm
+AS $$ define i64 @f(ptr %fcinfo) { ret i64 0 } $$;
+SELECT c_text('a' COLLATE "C"), c_text('a' COLLATE "POSIX");
+ c_text | c_text 
+--------+--------
+      0 |      0
+(1 row)
+
+SELECT * FROM plllvm_function_status('c_text(text)');
+ state | compiles | retired 
+-------+----------+---------
+ live  |        2 |       0
+(1 row)
+
+-- any change of the pg_proc row makes the entry stale
+ALTER FUNCTION c_one() COST 5;
+SELECT * FROM plllvm_function_status('c_one()');
+ state | compiles | retired 
+-------+----------+---------
+ stale |        1 |       0
+(1 row)
+
+SELECT c_one();
+ c_one 
+-------
+     1
+(1 row)
+
+SELECT * FROM plllvm_function_status('c_one()');
+ state | compiles | retired 
+-------+----------+---------
+ live  |        2 |       1
+(1 row)
+
+DROP FUNCTION c_sql(), c_one(), c_text(text);

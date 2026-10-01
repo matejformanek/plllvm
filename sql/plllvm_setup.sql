@@ -50,21 +50,18 @@ CREATE SCHEMA plllvm_setup_scratch;
 SET search_path = plllvm_setup_scratch;
 
 CREATE FUNCTION plllvm_user_fn() RETURNS int LANGUAGE plllvm
-AS $$ define i64 @plllvm_user_fn(ptr %fcinfo) { ret i64 0 } $$;  -- fail
+AS $$ define i64 @f(ptr %fcinfo) { ret i64 0 } $$;  -- fail
 
 RESET ROLE;
 RESET search_path;
 
--- not implemented yet: the validator rejects every function
+-- a superuser can
 CREATE FUNCTION plllvm_fn() RETURNS int LANGUAGE plllvm
-AS $$ define i64 @plllvm_fn(ptr %fcinfo) { ret i64 0 } $$;  -- fail
+AS $$ define i64 @f(ptr %fcinfo) { ret i64 7 } $$;
 
-SET check_function_bodies = off;
+SELECT plllvm_fn();
 
-CREATE FUNCTION plllvm_fn() RETURNS int LANGUAGE plllvm
-AS $$ define i64 @plllvm_fn(ptr %fcinfo) { ret i64 0 } $$;  -- fail
-
-RESET check_function_bodies;
+DROP FUNCTION plllvm_fn();
 
 -- no inline handler
 DO LANGUAGE plllvm $$ $$;  -- fail

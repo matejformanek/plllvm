@@ -1,3 +1,10 @@
 Alternative expected outputs (*_N.out) and the reason for each:
 
 (none yet)
+
+Messages of LLVM itself (parser, verifier) appear only in plllvm_jit and
+plllvm_validator; another LLVM major may need _1.out files for these two.
+
+plllvm registers no syscache callbacks: an entry is revalidated by the xmin
+and ctid of its pg_proc row alone, so debug_discard_caches does not change
+any output.

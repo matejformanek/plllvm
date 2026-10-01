@@ -1,0 +1,308 @@
+--
+-- Errors raised by PL/LLVM code: the same SQLSTATE and message as
+-- PL/pgSQL, pins released, cancel, stack depth
+--
+LOAD 'plllvm';
+SET plllvm.regress_test_mode = on;
+
+CREATE FUNCTION err_of(q text) RETURNS text
+LANGUAGE plpgsql AS $$
+BEGIN
+  EXECUTE q;
+  RETURN 'no error';
+EXCEPTION WHEN OTHERS THEN
+  RETURN SQLSTATE || ': ' || SQLERRM;
+END
+$$;
+
+-- int4pl, int4div, int8pl, float8mul and float8div, checks included
+CREATE FUNCTION i4pl_ll(a int4, b int4) RETURNS int4
+LANGUAGE plllvm STRICT AS $$
+declare i32 @plllvm_arg_i32(ptr, i32)
+declare void @plllvm_rt_int_overflow()
+declare { i32, i1 } @llvm.sadd.with.overflow.i32(i32, i32)
+
+define i64 @f(ptr %fcinfo) {
+entry:
+  %a = call i32 @plllvm_arg_i32(ptr %fcinfo, i32 0)
+  %b = call i32 @plllvm_arg_i32(ptr %fcinfo, i32 1)
+  %r = call { i32, i1 } @llvm.sadd.with.overflow.i32(i32 %a, i32 %b)
+  %ov = extractvalue { i32, i1 } %r, 1
+  br i1 %ov, label %overflow, label %ok
+ok:
+  %v = extractvalue { i32, i1 } %r, 0
+  %d = sext i32 %v to i64
+  ret i64 %d
+overflow:
+  call void @plllvm_rt_int_overflow()
+  unreachable
+}
+$$;
+
+CREATE FUNCTION i4div_ll(a int4, b int4) RETURNS int4
+LANGUAGE plllvm STRICT AS $$
+declare i32 @plllvm_arg_i32(ptr, i32)
+declare void @plllvm_rt_int_overflow()
+declare void @plllvm_rt_div_zero()
+
+define i64 @f(ptr %fcinfo) {
+entry:
+  %a = call i32 @plllvm_arg_i32(ptr %fcinfo, i32 0)
+  %b = call i32 @plllvm_arg_i32(ptr %fcinfo, i32 1)
+  %zero = icmp eq i32 %b, 0
+  br i1 %zero, label %div_zero, label %check
+check:
+  %amin = icmp eq i32 %a, -2147483648
+  %bm1 = icmp eq i32 %b, -1
+  %ov = and i1 %amin, %bm1
+  br i1 %ov, label %overflow, label %ok
+ok:
+  %v = sdiv i32 %a, %b
+  %d = sext i32 %v to i64
+  ret i64 %d
+div_zero:
+  call void @plllvm_rt_div_zero()
+  unreachable
+overflow:
+  call void @plllvm_rt_int_overflow()
+  unreachable
+}
+$$;
+
+CREATE FUNCTION i8pl_ll(a int8, b int8) RETURNS int8
+LANGUAGE plllvm STRICT AS $$
+declare i64 @plllvm_arg_i64(ptr, i32)
+declare void @plllvm_rt_bigint_overflow()
+declare { i64, i1 } @llvm.sadd.with.overflow.i64(i64, i64)
+
+define i64 @f(ptr %fcinfo) {
+entry:
+  %a = call i64 @plllvm_arg_i64(ptr %fcinfo, i32 0)
+  %b = call i64 @plllvm_arg_i64(ptr %fcinfo, i32 1)
+  %r = call { i64, i1 } @llvm.sadd.with.overflow.i64(i64 %a, i64 %b)
+  %ov = extractvalue { i64, i1 } %r, 1
+  br i1 %ov, label %overflow, label %ok
+ok:
+  %v = extractvalue { i64, i1 } %r, 0
+  ret i64 %v
+overflow:
+  call void @plllvm_rt_bigint_overflow()
+  unreachable
+}
+$$;
+
+CREATE FUNCTION f8mul_ll(a float8, b float8) RETURNS float8
+LANGUAGE plllvm STRICT AS $$
+declare double @plllvm_arg_f64(ptr, i32)
+declare void @float_overflow_error()
+declare void @float_underflow_error()
+declare double @llvm.fabs.f64(double)
+
+define i64 @f(ptr %fcinfo) {
+entry:
+  %a = call double @plllvm_arg_f64(ptr %fcinfo, i32 0)
+  %b = call double @plllvm_arg_f64(ptr %fcinfo, i32 1)
+  %r = fmul double %a, %b
+  %r.abs = call double @llvm.fabs.f64(double %r)
+  %r.inf = fcmp oeq double %r.abs, 0x7FF0000000000000
+  br i1 %r.inf, label %inf, label %finite
+inf:
+  %a.abs = call double @llvm.fabs.f64(double %a)
+  %b.abs = call double @llvm.fabs.f64(double %b)
+  %a.inf = fcmp oeq double %a.abs, 0x7FF0000000000000
+  %b.inf = fcmp oeq double %b.abs, 0x7FF0000000000000
+  %from.inf = or i1 %a.inf, %b.inf
+  br i1 %from.inf, label %ok, label %overflow
+finite:
+  %r.zero = fcmp oeq double %r, 0.0
+  %a.nz = fcmp une double %a, 0.0
+  %b.nz = fcmp une double %b, 0.0
+  %nz = and i1 %a.nz, %b.nz
+  %underflow = and i1 %r.zero, %nz
+  br i1 %underflow, label %underflow_error, label %ok
+ok:
+  %d = bitcast double %r to i64
+  ret i64 %d
+overflow:
+  call void @float_overflow_error()
+  unreachable
+underflow_error:
+  call void @float_underflow_error()
+  unreachable
+}
+$$;
+
+CREATE FUNCTION f8div_ll(a float8, b float8) RETURNS float8
+LANGUAGE plllvm STRICT AS $$
+declare double @plllvm_arg_f64(ptr, i32)
+declare void @float_zero_divide_error()
+
+define i64 @f(ptr %fcinfo) {
+entry:
+  %a = call double @plllvm_arg_f64(ptr %fcinfo, i32 0)
+  %b = call double @plllvm_arg_f64(ptr %fcinfo, i32 1)
+  %b.zero = fcmp oeq double %b, 0.0
+  %a.num = fcmp ord double %a, 0.0
+  %div.zero = and i1 %b.zero, %a.num
+  br i1 %div.zero, label %zero_divide, label %ok
+ok:
+  %r = fdiv double %a, %b
+  %d = bitcast double %r to i64
+  ret i64 %d
+zero_divide:
+  call void @float_zero_divide_error()
+  unreachable
+}
+$$;
+
+-- RAISE EXCEPTION 'boom'; P0001 is MAKE_SQLSTATE('P','0','0','0','1')
+CREATE FUNCTION raise_ll() RETURNS int8
+LANGUAGE plllvm AS $$
+declare void @plllvm_error(i32, ptr)
+
+@msg = private constant [5 x i8] c"boom\00"
+
+define i64 @f(ptr %fcinfo) {
+  call void @plllvm_error(i32 16777248, ptr @msg)
+  unreachable
+}
+$$;
+
+-- the PL/pgSQL twins
+CREATE FUNCTION i4pl_pl(a int4, b int4) RETURNS int4
+LANGUAGE plpgsql STRICT AS $$ BEGIN RETURN a + b; END $$;
+CREATE FUNCTION i4div_pl(a int4, b int4) RETURNS int4
+LANGUAGE plpgsql STRICT AS $$ BEGIN RETURN a / b; END $$;
+CREATE FUNCTION i8pl_pl(a int8, b int8) RETURNS int8
+LANGUAGE plpgsql STRICT AS $$ BEGIN RETURN a + b; END $$;
+CREATE FUNCTION f8mul_pl(a float8, b float8) RETURNS float8
+LANGUAGE plpgsql STRICT AS $$ BEGIN RETURN a * b; END $$;
+CREATE FUNCTION f8div_pl(a float8, b float8) RETURNS float8
+LANGUAGE plpgsql STRICT AS $$ BEGIN RETURN a / b; END $$;
+CREATE FUNCTION raise_pl() RETURNS int8
+LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'boom'; END $$;
+
+SELECT q, err_of(format(q, 'll')) AS ll,
+       err_of(format(q, 'll')) = err_of(format(q, 'pl')) AS same
+  FROM (VALUES ('SELECT i4pl_%s(2147483647, 1)'),
+               ('SELECT i4pl_%s(40, 2)'),
+               ('SELECT i4div_%s(-2147483648, -1)'),
+               ('SELECT i4div_%s(1, 0)'),
+               ('SELECT i4div_%s(-7, 2)'),
+               ('SELECT i8pl_%s(9223372036854775807, 1)'),
+               ('SELECT f8mul_%s(1e308, 10)'),
+               ('SELECT f8mul_%s(1e-308, 1e-308)'),
+               ('SELECT f8mul_%s(''inf'', 2)'),
+               ('SELECT f8div_%s(1, 0)'),
+               ('SELECT f8div_%s(''nan'', 0)'),
+               ('SELECT raise_%s()')) v(q);
+
+-- the PL/LLVM frame shows in the context
+SELECT i4pl_ll(2147483647, 1);
+
+-- errors release the pin: the replace retires the old code
+DO $$
+BEGIN
+  FOR i IN 1..50 LOOP
+    BEGIN
+      PERFORM i4pl_ll(2147483647, i);
+    EXCEPTION WHEN numeric_value_out_of_range THEN
+      NULL;
+    END;
+  END LOOP;
+END
+$$;
+
+SELECT * FROM plllvm_function_status('i4pl_ll(int4,int4)');
+
+CREATE OR REPLACE FUNCTION i4pl_ll(a int4, b int4) RETURNS int4
+LANGUAGE plllvm STRICT AS $$
+declare i32 @plllvm_arg_i32(ptr, i32)
+
+define i64 @f(ptr %fcinfo) {
+  %a = call i32 @plllvm_arg_i32(ptr %fcinfo, i32 0)
+  %d = sext i32 %a to i64
+  ret i64 %d
+}
+$$;
+
+SELECT i4pl_ll(3, 4);
+SELECT * FROM plllvm_function_status('i4pl_ll(int4,int4)');
+
+-- a loop that only checks for interrupts can be canceled
+CREATE FUNCTION spin(n int8) RETURNS int8
+LANGUAGE plllvm STRICT AS $$
+declare i64 @plllvm_arg_i64(ptr, i32)
+declare void @plllvm_cfi()
+
+define i64 @f(ptr %fcinfo) {
+entry:
+  %n = call i64 @plllvm_arg_i64(ptr %fcinfo, i32 0)
+  %forever = icmp slt i64 %n, 0
+  br i1 %forever, label %loop, label %done
+loop:
+  call void @plllvm_cfi()
+  br label %loop
+done:
+  ret i64 0
+}
+$$;
+
+-- compile outside the timeout
+SELECT spin(0);
+SET statement_timeout = '100ms';
+SELECT spin(-1);
+\echo :LAST_ERROR_SQLSTATE
+RESET statement_timeout;
+
+-- recursion inside the module is limited by max_stack_depth
+CREATE FUNCTION deep(n int4) RETURNS int4
+LANGUAGE plllvm STRICT AS $$
+declare i32 @plllvm_arg_i32(ptr, i32)
+declare void @plllvm_check_stack()
+declare void @plllvm_cfi()
+
+define i64 @f(ptr %fcinfo) {
+  %n = call i32 @plllvm_arg_i32(ptr %fcinfo, i32 0)
+  %r = call i32 @rec(i32 %n)
+  %d = sext i32 %r to i64
+  ret i64 %d
+}
+
+define internal i32 @rec(i32 %n) {
+entry:
+  call void @plllvm_check_stack()
+  call void @plllvm_cfi()
+  %small = icmp slt i32 %n, 2
+  br i1 %small, label %base, label %recurse
+base:
+  ret i32 %n
+recurse:
+  %n1 = sub i32 %n, 1
+  %n2 = sub i32 %n, 2
+  %a = call i32 @rec(i32 %n1)
+  %b = call i32 @rec(i32 %n2)
+  %s = add i32 %a, %b
+  ret i32 %s
+}
+$$;
+
+SELECT deep(20);
+SET statement_timeout = '30s';
+SET max_stack_depth = '100kB';
+SELECT deep(100000);
+\echo :LAST_ERROR_SQLSTATE
+RESET max_stack_depth;
+RESET statement_timeout;
+
+SELECT p.proname, s.*
+  FROM pg_proc p, plllvm_function_status(p.oid) s
+ WHERE p.prolang = (SELECT oid FROM pg_language WHERE lanname = 'plllvm')
+ ORDER BY p.proname;
+
+DROP FUNCTION err_of(text);
+DROP FUNCTION i4pl_ll(int4, int4), i4div_ll(int4, int4), i8pl_ll(int8, int8),
+  f8mul_ll(float8, float8), f8div_ll(float8, float8), raise_ll();
+DROP FUNCTION i4pl_pl(int4, int4), i4div_pl(int4, int4), i8pl_pl(int8, int8),
+  f8mul_pl(float8, float8), f8div_pl(float8, float8), raise_pl();
+DROP FUNCTION spin(int8), deep(int4);
