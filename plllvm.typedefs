@@ -91,6 +91,8 @@ ScanDirection
 SetFunctionReturnMode
 Size
 Snapshot
+SubTransactionId
+SubXactEvent
 TransactionId
 Trigger
 TriggerDesc
@@ -102,6 +104,7 @@ TupleTableSlot
 TupleTableSlotOps
 Tuplestorestate
 WorkerNodeInstrumentation
+XactEvent
 __darwin_intptr_t
 __darwin_size_t
 __darwin_time_t

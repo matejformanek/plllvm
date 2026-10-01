@@ -13,7 +13,8 @@
  * 1) Every call into LLVM runs inside a fatal-on-OOM section, and nothing
  *    raises an ERROR inside one: failures are collected, LLVM objects are
  *    disposed, and the ERROR is raised after leaving the section.  palloc
- *    is used inside, as core does.
+ *    is used inside, as core does; if it fails, the abort callbacks in
+ *    plllvm.c close the section.
  *
  * 2) The triple and the data layout come from plllvm_types.bc, which clang
  *    built for this host, as llvmjit takes them from llvmjit_types.bc

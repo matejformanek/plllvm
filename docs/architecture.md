@@ -7,13 +7,13 @@ language only; everything else depends on the thesis plan.
 
 | file | content |
 |---|---|
-| `src/plllvm.c` | module magic, `_PG_init` (GUCs), call handler, validator |
+| `src/plllvm.c` | module magic, `_PG_init` (GUCs, abort callbacks), call handler, validator |
 | `src/plllvm.h` | internal declarations, version floor |
 | `src/plllvm_jit.h` | the LLVM-facing API, the only header shared with C++ |
 | `src/plllvm_error.cpp` | fatal-on-OOM sections (copy of core's `llvmjit_error.cpp`) |
 | `src/plllvm_types.c` | inline host helpers and the version and layout constants, compiled to `plllvm_types.bc` only |
 | `src/plllvm_runtime.c` | out-of-line host functions and the JIT symbol table |
-| `src/plllvm_jit.c` | LLVM session (checks `plllvm_types.bc`, target machine); LLJIT, compile pipeline, symbols, timings (PR 2) |
+| `src/plllvm_jit.c` | LLVM session (checks `plllvm_types.bc`, target machine); LLJIT, compile pipeline, symbols, timings |
 | `src/plllvm_compile.c` | funccache callbacks, signature and scope checks (PR 3) |
 | `src/plllvm_sites.c` | calls to other functions (PR 4) |
 | `src/plllvm_stats.c` | `plllvm_session_info()`, `plllvm_code_cache()`, `plllvm_function_status()` |

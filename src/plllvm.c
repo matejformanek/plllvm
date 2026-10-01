@@ -18,10 +18,12 @@
  */
 #include "postgres.h"
 
+#include "access/xact.h"
 #include "fmgr.h"
 #include "utils/guc.h"
 
 #include "plllvm.h"
+#include "plllvm_jit.h"
 
 #ifdef PG_MODULE_MAGIC_EXT
 
@@ -41,6 +43,12 @@ PG_FUNCTION_INFO_V1(plllvm_validator);
 
 bool		plllvm_regress_test_mode = false;
 char	   *plllvm_types_bc_path = NULL;
+
+static void plllvm_xact_callback(XactEvent event, void *arg);
+static void plllvm_subxact_callback(SubXactEvent event,
+									SubTransactionId mySubid,
+									SubTransactionId parentSubid,
+									void *arg);
 
 /*
  * Module initialization
@@ -71,7 +79,30 @@ _PG_init(void)
 
 	MarkGUCPrefixReserved("plllvm");
 
+	RegisterXactCallback(plllvm_xact_callback, NULL);
+	RegisterSubXactCallback(plllvm_subxact_callback, NULL);
+
 	inited = true;
+}
+
+/*
+ * An ERROR (e.g. out of memory in palloc) can leave a fatal-on-OOM section
+ * open.  Core resets its own in PostgresMain(); an extension has to do it
+ * at (sub)transaction abort.
+ */
+static void
+plllvm_xact_callback(XactEvent event, void *arg)
+{
+	if (event == XACT_EVENT_ABORT || event == XACT_EVENT_PARALLEL_ABORT)
+		plllvm_reset_after_error();
+}
+
+static void
+plllvm_subxact_callback(SubXactEvent event, SubTransactionId mySubid,
+						SubTransactionId parentSubid, void *arg)
+{
+	if (event == SUBXACT_EVENT_ABORT_SUB)
+		plllvm_reset_after_error();
 }
 
 /*
