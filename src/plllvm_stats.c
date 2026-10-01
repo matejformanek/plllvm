@@ -11,8 +11,14 @@
  */
 #include "postgres.h"
 
+#ifdef __APPLE__
+#include <mach/mach.h>
+#endif
+
+#include "access/htup_details.h"
 #include "funcapi.h"
 #include "utils/builtins.h"
+#include "utils/syscache.h"
 #include "utils/tuplestore.h"
 
 #include "plllvm.h"
@@ -21,6 +27,9 @@
 PG_FUNCTION_INFO_V1(plllvm_session_info);
 PG_FUNCTION_INFO_V1(plllvm_code_cache);
 PG_FUNCTION_INFO_V1(plllvm_jit_test);
+PG_FUNCTION_INFO_V1(plllvm_function_status);
+
+static bool resident_size(int64 *bytes);
 
 /*
  * The LLVM session of this backend; sets it up if needed
@@ -30,8 +39,9 @@ plllvm_session_info(PG_FUNCTION_ARGS)
 {
 	ReturnSetInfo *rsinfo = (ReturnSetInfo *) fcinfo->resultinfo;
 	plllvm_jit_session_info info;
-	Datum		values[9];
-	bool		nulls[9] = {0};
+	Datum		values[10];
+	bool		nulls[10] = {0};
+	int64		rss;
 
 	InitMaterializedSRF(fcinfo, 0);
 
@@ -58,6 +68,10 @@ plllvm_session_info(PG_FUNCTION_ARGS)
 	values[6] = Int64GetDatum(info.compiles);
 	values[7] = Int64GetDatum(info.compile_failures);
 	values[8] = Int64GetDatum(info.retired);
+	if (resident_size(&rss))
+		values[9] = Int64GetDatum(rss);
+	else
+		nulls[9] = true;
 
 	tuplestore_putvalues(rsinfo->setResult, rsinfo->setDesc, values, nulls);
 
@@ -190,4 +204,87 @@ plllvm_jit_test(PG_FUNCTION_ARGS)
 	tuplestore_putvalues(rsinfo->setResult, rsinfo->setDesc, values, nulls);
 
 	return (Datum) 0;
+}
+
+/*
+ * State of a function's code in this backend, from its newest compile.  Other
+ * backends compile and retire on their own.
+ */
+Datum
+plllvm_function_status(PG_FUNCTION_ARGS)
+{
+	Oid			fn = PG_GETARG_OID(0);
+	plllvm_jit_module *newest = NULL;
+	int64		compiles = 0;
+	int64		retired = 0;
+	const char *state;
+	TupleDesc	tupdesc;
+	Datum		values[3];
+	bool		nulls[3] = {0};
+
+	if (get_call_result_type(fcinfo, NULL, &tupdesc) != TYPEFUNC_COMPOSITE)
+		elog(ERROR, "return type must be a row type");
+
+	for (plllvm_jit_module *mod = plllvm_jit_modules(); mod; mod = mod->next)
+	{
+		if (!OidIsValid(fn) || mod->owner_oid != fn)
+			continue;
+
+		compiles++;
+		if (mod->retired)
+			retired++;
+		if (newest == NULL || mod->gen > newest->gen)
+			newest = mod;
+	}
+
+	if (newest == NULL)
+		state = "not_compiled";
+	else if (newest->retired)
+		state = "retired";
+	else
+	{
+		HeapTuple	tuple = SearchSysCache1(PROCOID, ObjectIdGetDatum(fn));
+
+		if (!HeapTupleIsValid(tuple))
+			state = "dropped";
+		else
+		{
+			if (HeapTupleHeaderGetRawXmin(tuple->t_data) != newest->owner_xmin ||
+				!ItemPointerEquals(&tuple->t_self, &newest->owner_tid))
+				state = "stale";
+			else
+				state = "live";
+			ReleaseSysCache(tuple);
+		}
+	}
+
+	values[0] = CStringGetTextDatum(state);
+	values[1] = Int64GetDatum(compiles);
+	values[2] = Int64GetDatum(retired);
+
+	PG_RETURN_DATUM(HeapTupleGetDatum(heap_form_tuple(tupdesc, values, nulls)));
+}
+
+/*
+ * Resident set size of this backend, where the platform tells it cheaply
+ */
+static bool
+resident_size(int64 *bytes)
+{
+#ifdef __APPLE__
+
+	mach_task_basic_info_data_t info;
+	mach_msg_type_number_t count = MACH_TASK_BASIC_INFO_COUNT;
+
+	if (task_info(mach_task_self(), MACH_TASK_BASIC_INFO,
+				  (task_info_t) &info, &count) != KERN_SUCCESS)
+		return false;
+	*bytes = (int64) info.resident_size;
+	return true;
+
+#else
+
+	return false;
+
+#endif
 }

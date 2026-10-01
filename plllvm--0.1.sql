@@ -19,7 +19,8 @@ COMMENT ON LANGUAGE plllvm IS 'PL/LLVM untrusted procedural language';
 CREATE FUNCTION plllvm_session_info()
   RETURNS TABLE(llvm_version text, triple text, data_layout text,
                 libllvm text, types_bc text, init_ms float8,
-                compiles int8, compile_failures int8, retired int8)
+                compiles int8, compile_failures int8, retired int8,
+                rss_bytes int8)
   LANGUAGE c AS 'MODULE_PATHNAME';
 
 REVOKE ALL ON FUNCTION plllvm_session_info() FROM PUBLIC;
@@ -33,6 +34,14 @@ CREATE FUNCTION plllvm_code_cache()
   LANGUAGE c AS 'MODULE_PATHNAME';
 
 REVOKE ALL ON FUNCTION plllvm_code_cache() FROM PUBLIC;
+
+-- of this backend: not_compiled, live, stale, retired or dropped
+CREATE FUNCTION plllvm_function_status(fn regprocedure, OUT state text,
+                                       OUT compiles int8, OUT retired int8)
+  RETURNS record
+  STRICT VOLATILE LANGUAGE c AS 'MODULE_PATHNAME';
+
+REVOKE ALL ON FUNCTION plllvm_function_status(regprocedure) FROM PUBLIC;
 
 -- compiles IR as a function body would be; the code stays resident
 CREATE FUNCTION plllvm_jit_test(ir text, opt_level int4 DEFAULT NULL,

@@ -1,0 +1,355 @@
+--
+-- Replacing and dropping PL/LLVM functions: retired code, stale entries,
+-- replaces during a call
+--
+LOAD 'plllvm';
+SET plllvm.regress_test_mode = on;
+-- every replace compiles anew and retires the old code
+CREATE FUNCTION lc_cyc() RETURNS int8 LANGUAGE plllvm
+AS $$ define i64 @f(ptr %fcinfo) { ret i64 1 } $$;
+SELECT lc_cyc();
+ lc_cyc 
+--------
+      1
+(1 row)
+
+CREATE OR REPLACE FUNCTION lc_cyc() RETURNS int8 LANGUAGE plllvm
+AS $$ define i64 @f(ptr %fcinfo) { ret i64 2 } $$;
+SELECT lc_cyc();
+ lc_cyc 
+--------
+      2
+(1 row)
+
+CREATE OR REPLACE FUNCTION lc_cyc() RETURNS int8 LANGUAGE plllvm
+AS $$ define i64 @f(ptr %fcinfo) { ret i64 3 } $$;
+SELECT lc_cyc();
+ lc_cyc 
+--------
+      3
+(1 row)
+
+CREATE OR REPLACE FUNCTION lc_cyc() RETURNS int8 LANGUAGE plllvm
+AS $$ define i64 @f(ptr %fcinfo) { ret i64 4 } $$;
+SELECT lc_cyc();
+ lc_cyc 
+--------
+      4
+(1 row)
+
+SELECT * FROM plllvm_function_status('lc_cyc()');
+ state | compiles | retired 
+-------+----------+---------
+ live  |        4 |       3
+(1 row)
+
+SELECT count(DISTINCT symbol) AS symbols, count(*) FILTER (WHERE retired) AS retired
+  FROM plllvm_code_cache() WHERE owner_oid = 'lc_cyc()'::regprocedure;
+ symbols | retired 
+---------+---------
+       4 |       3
+(1 row)
+
+-- a rolled back replace leaves a stale entry; the next call recompiles
+CREATE FUNCTION lc_tx() RETURNS int8 LANGUAGE plllvm
+AS $$ define i64 @f(ptr %fcinfo) { ret i64 1 } $$;
+SELECT lc_tx();
+ lc_tx 
+-------
+     1
+(1 row)
+
+BEGIN;
+CREATE OR REPLACE FUNCTION lc_tx() RETURNS int8 LANGUAGE plllvm
+AS $$ define i64 @f(ptr %fcinfo) { ret i64 2 } $$;
+SELECT lc_tx();
+ lc_tx 
+-------
+     2
+(1 row)
+
+ROLLBACK;
+SELECT * FROM plllvm_function_status('lc_tx()');
+ state | compiles | retired 
+-------+----------+---------
+ stale |        2 |       1
+(1 row)
+
+SELECT lc_tx();
+ lc_tx 
+-------
+     1
+(1 row)
+
+SELECT * FROM plllvm_function_status('lc_tx()');
+ state | compiles | retired 
+-------+----------+---------
+ live  |        3 |       2
+(1 row)
+
+BEGIN;
+SAVEPOINT s;
+CREATE OR REPLACE FUNCTION lc_tx() RETURNS int8 LANGUAGE plllvm
+AS $$ define i64 @f(ptr %fcinfo) { ret i64 2 } $$;
+SELECT lc_tx();
+ lc_tx 
+-------
+     2
+(1 row)
+
+ROLLBACK TO s;
+SELECT * FROM plllvm_function_status('lc_tx()');
+ state | compiles | retired 
+-------+----------+---------
+ stale |        4 |       3
+(1 row)
+
+SELECT lc_tx();
+ lc_tx 
+-------
+     1
+(1 row)
+
+COMMIT;
+SELECT * FROM plllvm_function_status('lc_tx()');
+ state | compiles | retired 
+-------+----------+---------
+ live  |        5 |       4
+(1 row)
+
+-- DROP
+SELECT 'lc_tx()'::regprocedure::oid AS oid \gset
+DROP FUNCTION lc_tx();
+SELECT * FROM plllvm_function_status(:'oid');
+  state  | compiles | retired 
+---------+----------+---------
+ dropped |        5 |       4
+(1 row)
+
+-- another language in between keeps its own cache entry
+CREATE FUNCTION lc_lang() RETURNS int8 LANGUAGE plllvm
+AS $$ define i64 @f(ptr %fcinfo) { ret i64 1 } $$;
+SELECT lc_lang();
+ lc_lang 
+---------
+       1
+(1 row)
+
+CREATE OR REPLACE FUNCTION lc_lang() RETURNS int8 LANGUAGE plpgsql
+AS $$ BEGIN RETURN 2; END $$;
+SELECT lc_lang();
+ lc_lang 
+---------
+       2
+(1 row)
+
+SELECT * FROM plllvm_function_status('lc_lang()');
+ state | compiles | retired 
+-------+----------+---------
+ stale |        1 |       0
+(1 row)
+
+CREATE OR REPLACE FUNCTION lc_lang() RETURNS int8 LANGUAGE plllvm
+AS $$ define i64 @f(ptr %fcinfo) { ret i64 3 } $$;
+SELECT lc_lang();
+ lc_lang 
+---------
+       3
+(1 row)
+
+SELECT * FROM plllvm_function_status('lc_lang()');
+ state | compiles | retired 
+-------+----------+---------
+ live  |        2 |       1
+(1 row)
+
+-- a failed recompile under a prepared statement
+CREATE FUNCTION lc_prep() RETURNS int8 LANGUAGE plllvm
+AS $$ define i64 @f(ptr %fcinfo) { ret i64 1 } $$;
+PREPARE lc_p AS SELECT lc_prep();
+EXECUTE lc_p;
+ lc_prep 
+---------
+       1
+(1 row)
+
+SET check_function_bodies = off;
+CREATE OR REPLACE FUNCTION lc_prep() RETURNS int8 LANGUAGE plllvm
+AS $$ define i64 @g(ptr %fcinfo) { ret i64 0 } $$;
+RESET check_function_bodies;
+EXECUTE lc_p;
+ERROR:  IR does not define the entry function "f"
+CONTEXT:  compilation of PL/LLVM function "lc_prep"
+SELECT * FROM plllvm_function_status('lc_prep()');
+  state  | compiles | retired 
+---------+----------+---------
+ retired |        1 |       1
+(1 row)
+
+CREATE OR REPLACE FUNCTION lc_prep() RETURNS int8 LANGUAGE plllvm
+AS $$ define i64 @f(ptr %fcinfo) { ret i64 2 } $$;
+EXECUTE lc_p;
+ lc_prep 
+---------
+       2
+(1 row)
+
+SELECT * FROM plllvm_function_status('lc_prep()');
+ state | compiles | retired 
+-------+----------+---------
+ live  |        2 |       1
+(1 row)
+
+DEALLOCATE lc_p;
+--
+-- Replaces while the function runs.  lc_rec(1) runs SQL through SPI, the
+-- SQL replaces lc_rec and calls the new code; the running code finishes,
+-- and retires itself when it returns.
+--
+CREATE FUNCTION lc_rec(n int4) RETURNS int8 LANGUAGE plllvm STRICT AS $$
+declare i32 @plllvm_arg_i32(ptr, i32)
+declare i32 @SPI_connect()
+declare i32 @SPI_exec(ptr, i64)
+declare i32 @SPI_finish()
+
+@q = private constant [29 x i8] c"SELECT lc_replace_and_call()\00"
+
+define i64 @f(ptr %fcinfo) {
+entry:
+  %n = call i32 @plllvm_arg_i32(ptr %fcinfo, i32 0)
+  %spi = icmp eq i32 %n, 1
+  br i1 %spi, label %reenter, label %done
+reenter:
+  call i32 @SPI_connect()
+  call i32 @SPI_exec(ptr @q, i64 0)
+  call i32 @SPI_finish()
+  br label %done
+done:
+  ret i64 1
+}
+$$;
+CREATE FUNCTION lc_replace_and_call() RETURNS void LANGUAGE plpgsql AS $$
+BEGIN
+  CREATE OR REPLACE FUNCTION lc_rec(n int4) RETURNS int8 LANGUAGE plllvm STRICT
+  AS 'define i64 @f(ptr %fcinfo) { ret i64 2 }';
+  RAISE NOTICE 'new code returns %', lc_rec(0);
+END
+$$;
+SELECT lc_rec(1);
+NOTICE:  new code returns 2
+ lc_rec 
+--------
+      1
+(1 row)
+
+SELECT * FROM plllvm_function_status('lc_rec(int4)');
+ state | compiles | retired 
+-------+----------+---------
+ live  |        2 |       1
+(1 row)
+
+-- the same, with the replace rolled back
+CREATE FUNCTION lc_rec2(n int4) RETURNS int8 LANGUAGE plllvm STRICT AS $$
+declare i32 @plllvm_arg_i32(ptr, i32)
+declare i32 @SPI_connect()
+declare i32 @SPI_exec(ptr, i64)
+declare i32 @SPI_finish()
+
+@q = private constant [29 x i8] c"SELECT lc_replace_and_undo()\00"
+
+define i64 @f(ptr %fcinfo) {
+entry:
+  %n = call i32 @plllvm_arg_i32(ptr %fcinfo, i32 0)
+  %spi = icmp eq i32 %n, 1
+  br i1 %spi, label %reenter, label %done
+reenter:
+  call i32 @SPI_connect()
+  call i32 @SPI_exec(ptr @q, i64 0)
+  call i32 @SPI_finish()
+  br label %done
+done:
+  ret i64 1
+}
+$$;
+CREATE FUNCTION lc_replace_and_undo() RETURNS void LANGUAGE plpgsql AS $$
+BEGIN
+  CREATE OR REPLACE FUNCTION lc_rec2(n int4) RETURNS int8 LANGUAGE plllvm STRICT
+  AS 'define i64 @f(ptr %fcinfo) { ret i64 2 }';
+  RAISE NOTICE 'new code returns %', lc_rec2(0);
+  RAISE EXCEPTION 'undo';
+EXCEPTION WHEN raise_exception THEN
+  NULL;
+END
+$$;
+SELECT lc_rec2(1);
+NOTICE:  new code returns 2
+ lc_rec2 
+---------
+       1
+(1 row)
+
+SELECT * FROM plllvm_function_status('lc_rec2(int4)');
+ state | compiles | retired 
+-------+----------+---------
+ stale |        2 |       1
+(1 row)
+
+SELECT lc_rec2(0);
+ lc_rec2 
+---------
+       1
+(1 row)
+
+SELECT * FROM plllvm_function_status('lc_rec2(int4)');
+ state | compiles | retired 
+-------+----------+---------
+ live  |        3 |       2
+(1 row)
+
+-- replaced through SPI but not called: the next row recompiles the entry
+-- of the same call site in place
+CREATE FUNCTION lc_f(n int4) RETURNS int8 LANGUAGE plllvm STRICT AS $$
+declare i32 @plllvm_arg_i32(ptr, i32)
+declare i32 @SPI_connect()
+declare i32 @SPI_exec(ptr, i64)
+declare i32 @SPI_finish()
+
+@q = private constant [20 x i8] c"SELECT lc_replace()\00"
+
+define i64 @f(ptr %fcinfo) {
+entry:
+  %n = call i32 @plllvm_arg_i32(ptr %fcinfo, i32 0)
+  %spi = icmp eq i32 %n, 1
+  br i1 %spi, label %reenter, label %done
+reenter:
+  call i32 @SPI_connect()
+  call i32 @SPI_exec(ptr @q, i64 0)
+  call i32 @SPI_finish()
+  br label %done
+done:
+  ret i64 1
+}
+$$;
+CREATE FUNCTION lc_replace() RETURNS void LANGUAGE plpgsql AS $$
+BEGIN
+  CREATE OR REPLACE FUNCTION lc_f(n int4) RETURNS int8 LANGUAGE plllvm STRICT
+  AS 'define i64 @f(ptr %fcinfo) { ret i64 2 }';
+END
+$$;
+SELECT lc_f(i) FROM generate_series(1, 3) i;
+ lc_f 
+------
+    1
+    2
+    2
+(3 rows)
+
+SELECT * FROM plllvm_function_status('lc_f(int4)');
+ state | compiles | retired 
+-------+----------+---------
+ live  |        2 |       1
+(1 row)
+
+DROP FUNCTION lc_cyc(), lc_lang(), lc_prep(), lc_rec(int4), lc_rec2(int4),
+  lc_f(int4);
+DROP FUNCTION lc_replace_and_call(), lc_replace_and_undo(), lc_replace();

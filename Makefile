@@ -11,6 +11,17 @@ PGFILEDESC = "plllvm - PL/LLVM procedural language"
 REGRESS = plllvm_setup \
 		plllvm_types \
 		plllvm_jit \
+		plllvm_basic \
+		plllvm_validator \
+		plllvm_errors \
+		plllvm_lifecycle \
+		plllvm_cache \
+		plllvm_queryjit \
+		plllvm_memory \
+		kernel_loop \
+		kernel_fib \
+		kernel_is_prime \
+		kernel_mandelbrot \
 		plllvm_fatal \
 		plllvm_teardown
 
@@ -88,17 +99,26 @@ src/plllvm_types_stale.bc: src/plllvm_types.c src/plllvm.h
 
 installcheck: src/plllvm_types_stale.bc
 
-install: install-types
+install: install-types install-build-info
 uninstall: uninstall-types
 
-.PHONY: install-types uninstall-types
+.PHONY: install-types uninstall-types install-build-info
 
 install-types: src/plllvm_types.bc
 	$(MKDIR_P) '$(DESTDIR)$(pkglibdir)/plllvm'
 	$(INSTALL_DATA) src/plllvm_types.bc '$(DESTDIR)$(pkglibdir)/plllvm/'
 
+# ties an installation to its sources, for the benchmarks
+install-build-info: install-lib install-types
+	{ echo "git_head=`git rev-parse HEAD`"; \
+	  echo "git_dirty=`git status --porcelain --untracked-files=no | wc -l | tr -d ' '`"; \
+	  echo "plllvm_sha256=`shasum -a 256 '$(DESTDIR)$(pkglibdir)/$(MODULE_big)$(DLSUFFIX)' | cut -d' ' -f1`"; \
+	  echo "types_bc_sha256=`shasum -a 256 '$(DESTDIR)$(pkglibdir)/plllvm/plllvm_types.bc' | cut -d' ' -f1`"; \
+	} > '$(DESTDIR)$(pkglibdir)/plllvm/build-info.txt'
+
 uninstall-types:
-	rm -f '$(DESTDIR)$(pkglibdir)/plllvm/plllvm_types.bc'
+	rm -f '$(DESTDIR)$(pkglibdir)/plllvm/plllvm_types.bc' \
+		'$(DESTDIR)$(pkglibdir)/plllvm/build-info.txt'
 	rmdir '$(DESTDIR)$(pkglibdir)/plllvm' 2>/dev/null || true
 
 plllvm.typedefs: $(OBJS)

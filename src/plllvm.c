@@ -11,7 +11,9 @@
  *
  * Notes:
  *
- * 1) The handler and the validator are stubs until the compiler is in place.
+ * 1) A body is LLVM IR whose entry "i64 @f(ptr %fcinfo)" is called as a
+ *    version 1 function.  The handler adds only the pin and the error
+ *    context; argument and NULL handling are the IR's.
  *
  * 2) There is no inline handler, so PostgreSQL itself rejects DO blocks.
  *
@@ -22,7 +24,9 @@
 
 #include "access/xact.h"
 #include "fmgr.h"
+#include "miscadmin.h"
 #include "utils/guc.h"
+#include "utils/syscache.h"
 
 #include "plllvm.h"
 #include "plllvm_jit.h"
@@ -58,6 +62,7 @@ static const struct config_enum_entry debug_inject_options[] = {
 	{NULL, 0, false}
 };
 
+static void exec_error_callback(void *arg);
 static void plllvm_xact_callback(XactEvent event, void *arg);
 static void plllvm_subxact_callback(SubXactEvent event,
 									SubTransactionId mySubid,
@@ -166,32 +171,75 @@ plllvm_subxact_callback(SubXactEvent event, SubTransactionId mySubid,
 Datum
 plllvm_call_handler(PG_FUNCTION_ARGS)
 {
-	ereport(ERROR,
-			(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-			 errmsg("PL/LLVM functions are not implemented yet")));
+	plllvm_function *func;
+	ErrorContextCallback errcallback;
+	volatile Datum retval = (Datum) 0;
 
-	PG_RETURN_VOID();			/* keep compiler quiet */
+	/* PL/LLVM functions may call each other through fmgr alone */
+	check_stack_depth();
+
+	func = plllvm_compile_get(fcinfo);
+
+	/* pin entry, so that funccache cannot reuse it under this call */
+	func->cfunc.use_count++;
+
+	errcallback.callback = exec_error_callback;
+	errcallback.arg = func;
+	errcallback.previous = error_context_stack;
+	error_context_stack = &errcallback;
+
+	PG_TRY();
+	{
+		retval = func->addr(fcinfo);
+	}
+	PG_FINALLY();
+	{
+		plllvm_compile_unpin(func);
+	}
+	PG_END_TRY();
+
+	/*
+	 * Only the normal return needs this: PG_END_TRY restores the stack PG_TRY
+	 * saw, which still has errcallback.  On ERROR, the catching caller
+	 * restores its own.
+	 */
+	error_context_stack = errcallback.previous;
+
+	return retval;
+}
+
+static void
+exec_error_callback(void *arg)
+{
+	plllvm_function *func = (plllvm_function *) arg;
+
+	errcontext("PL/LLVM function \"%s\"", NameStr(func->proname));
 }
 
 /*
  * Validator for PL/LLVM functions
- *
- * Note: it rejects every function, also with check_function_bodies = off,
- * so that no PL/LLVM function can exist before the compiler does.
  */
 Datum
 plllvm_validator(PG_FUNCTION_ARGS)
 {
 	Oid			funcoid = PG_GETARG_OID(0);
+	HeapTuple	tuple;
 
 	if (!CheckFunctionValidatorAccess(fcinfo->flinfo->fn_oid, funcoid))
 		PG_RETURN_VOID();
 
-	ereport(ERROR,
-			(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-			 errmsg("PL/LLVM functions are not implemented yet")));
+	tuple = SearchSysCache1(PROCOID, ObjectIdGetDatum(funcoid));
+	if (!HeapTupleIsValid(tuple))
+		elog(ERROR, "cache lookup failed for function %u", funcoid);
 
-	PG_RETURN_VOID();			/* keep compiler quiet */
+	plllvm_compile_check_scope(tuple);
+
+	if (check_function_bodies)
+		plllvm_compile_check_body(tuple);
+
+	ReleaseSysCache(tuple);
+
+	PG_RETURN_VOID();
 }
 
 /*

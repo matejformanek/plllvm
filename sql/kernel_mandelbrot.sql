@@ -1,0 +1,91 @@
+--
+-- kernel_mandelbrot: examples/kernels/mandelbrot.ll against the PL/pgSQL
+-- original (bench/kernels/12_mandelbrot.sql, mandelbrot_imm)
+--
+SET plllvm.regress_test_mode = on;
+
+\getenv abs_srcdir PG_ABS_SRCDIR
+\set ir `cat :'abs_srcdir'/examples/kernels/mandelbrot.ll`
+
+-- v0.1a has no text helpers: the kernel returns (cnt << 32) | h and a SQL
+-- wrapper formats it as the original does
+CREATE FUNCTION mandelbrot_ll_raw(sz integer) RETURNS bigint
+LANGUAGE plllvm IMMUTABLE AS :'ir';
+
+CREATE FUNCTION mandelbrot_ll(sz integer) RETURNS text
+LANGUAGE sql IMMUTABLE
+BEGIN ATOMIC
+  SELECT (r >> 32)::text || '/' || (r & 4294967295)::text
+  FROM mandelbrot_ll_raw(sz) AS r;
+END;
+
+CREATE FUNCTION mandelbrot_pl(sz integer) RETURNS text
+LANGUAGE plpgsql IMMUTABLE AS $$
+DECLARE
+  two CONSTANT float8 := 2.0;
+  four CONSTANT float8 := 4.0;
+  one CONSTANT float8 := 1.0;
+  onehalf CONSTANT float8 := 1.5;
+  fsz float8;
+  x integer; y integer; k integer;
+  cr float8; ci float8; zr float8; zi float8; tr float8; ti float8;
+  cnt integer := 0;
+  h bigint := 0;
+BEGIN
+  fsz := sz;
+  FOR y IN 0..sz-1 LOOP
+    ci := two * y / fsz - one;
+    FOR x IN 0..sz-1 LOOP
+      cr := two * x / fsz - onehalf;
+      zr := 0; zi := 0; tr := 0; ti := 0; k := 0;
+      WHILE k < 50 AND tr + ti <= four LOOP
+        zi := two * zr * zi + ci;
+        zr := tr - ti + cr;
+        tr := zr * zr;
+        ti := zi * zi;
+        k := k + 1;
+      END LOOP;
+      IF tr + ti <= four THEN
+        cnt := cnt + 1;
+        h := (h * 31 + x * 7 + y) % 1000000007;
+      END IF;
+    END LOOP;
+  END LOOP;
+  RETURN cnt::text || '/' || h::text;
+END
+$$;
+
+CREATE FUNCTION sqlstate_of(q text) RETURNS text
+LANGUAGE plpgsql AS $$
+BEGIN
+  EXECUTE q;
+  RETURN NULL;
+EXCEPTION WHEN OTHERS THEN
+  RETURN SQLSTATE;
+END
+$$;
+
+-- same sizes as bench/ctwins/test/sql/mandelbrot.sql
+SELECT s.n, mandelbrot_ll(s.n) AS ll, mandelbrot_ll(s.n) = mandelbrot_pl(s.n) AS ok
+FROM (SELECT n FROM (VALUES (-3), (0), (1), (2), (7), (50), (101)) v(n)
+      OFFSET 0) s
+ORDER BY s.n;
+
+SELECT count(*) FILTER (WHERE mandelbrot_ll(g) = mandelbrot_pl(g)) AS ok
+FROM generate_series(0, 40) g;
+
+-- NULL sz fails at the FOR bound (22004), INT_MIN at sz-1 (22003)
+SELECT s.n,
+       sqlstate_of(format('SELECT mandelbrot_ll(n) FROM (SELECT %L::int AS n OFFSET 0) s', s.n)) AS ll,
+       sqlstate_of(format('SELECT mandelbrot_pl(n) FROM (SELECT %L::int AS n OFFSET 0) s', s.n)) AS pl
+FROM (VALUES (NULL::int), (-2147483648)) s(n);
+
+-- the size of EXP-001
+SELECT mandelbrot_ll(440);
+
+SELECT state FROM plllvm_function_status('mandelbrot_ll_raw(integer)');
+
+DROP FUNCTION sqlstate_of(text);
+DROP FUNCTION mandelbrot_ll(integer);
+DROP FUNCTION mandelbrot_ll_raw(integer);
+DROP FUNCTION mandelbrot_pl(integer);
