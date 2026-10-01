@@ -134,7 +134,24 @@ static bool build(const char *ir, bool codegen, Oid collation,
 				  LLVMOrcResourceTrackerRef *rt, plllvm_refs **refs,
 				  char **optimized_ir, plllvm_jit_result *result);
 static bool helpers_load(LLVMContextRef ctx, LLVMModuleRef *hmod,
-						 LLVMAttributeRef *attrs);
+						 LLVMAttributeRef *attrs, plllvm_jit_result *result);
+static bool user_ir_parse(LLVMContextRef ctx, const char *ir,
+						  LLVMModuleRef hmod, int nargs, LLVMModuleRef *umod,
+						  List **irrefs, plllvm_jit_result *result);
+static bool helpers_link(LLVMModuleRef umod, LLVMModuleRef hmod,
+						 plllvm_jit_result *result);
+static void symbols_internalize(LLVMModuleRef umod, const char *symbol,
+								LLVMAttributeRef *attrs, int nattrs);
+static bool ir_verify(LLVMModuleRef umod, plllvm_jit_result *result);
+static void refs_apply(LLVMContextRef ctx, LLVMModuleRef umod, List *irrefs,
+					   bool codegen, Oid collation, const char *search_path,
+					   plllvm_refs **refs);
+static bool symbols_check(LLVMModuleRef umod, plllvm_jit_result *result);
+static bool ir_optimize(LLVMModuleRef umod, int opt_level, char **optimized_ir,
+						plllvm_jit_result *result);
+static void code_emit(LLVMContextRef ctx, LLVMModuleRef umod,
+					  plllvm_jit_module *mod, LLVMOrcResourceTrackerRef *rt,
+					  plllvm_jit_result *result);
 static void parse_error_set(char *msg, plllvm_jit_result *result);
 static bool user_ir_check(LLVMContextRef ctx, LLVMModuleRef umod,
 						  LLVMModuleRef hmod, int nargs, List **irrefs,
@@ -794,6 +811,9 @@ plllvm_jit_shutdown(int code, Datum arg)
  * call sites and constants leaves the section; an ERROR there disposes the
  * LLVM objects and is rethrown.  *refs is set once they are resolved, and
  * the caller ends it.
+ *
+ * The steps that take over hmod, umod or ctx do so also on failure; the
+ * caller forgets them right after the call, so out: disposes what is left.
  */
 static bool
 build(const char *ir, bool codegen, Oid collation, const char *search_path,
@@ -803,14 +823,9 @@ build(const char *ir, bool codegen, Oid collation, const char *search_path,
 	LLVMContextRef ctx;
 	LLVMModuleRef hmod = NULL;
 	LLVMModuleRef umod = NULL;
-	LLVMMemoryBufferRef buf;
 	LLVMAttributeRef attrs[2];
-	LLVMValueRef fn;
-	LLVMErrorRef error;
 	instr_time	since;
-	const char *name;
-	char	   *msg;
-	int			ndefs;
+	bool		linked;
 	List	   *irrefs = NIL;
 
 	plllvm_reset_after_error();
@@ -825,161 +840,32 @@ build(const char *ir, bool codegen, Oid collation, const char *search_path,
 	ctx = LLVMContextCreate();
 	LLVMContextSetDiagnosticHandler(ctx, diag_handler, NULL);
 
-	if (!helpers_load(ctx, &hmod, attrs))
-	{
-		build_error(result, ERRCODE_INTERNAL_ERROR,
-					pstrdup("could not parse plllvm_types.bc"),
-					diag_error_take());
+	if (!helpers_load(ctx, &hmod, attrs, result))
 		goto out;
-	}
 	mod->parse_bc_ms = elapsed_ms(&since);
 
-	/* the IR is NUL-terminated, but the length excludes the NUL */
-	buf = LLVMCreateMemoryBufferWithMemoryRange(ir, strlen(ir), "plllvm", true);
-	if (LLVMParseIRInContext2(ctx, buf, &umod, &msg))
-	{
-		umod = NULL;
-		parse_error_set(msg, result);
-	}
-	LLVMDisposeMemoryBuffer(buf);
-	if (umod == NULL ||
-		!user_ir_check(ctx, umod, hmod, nargs, &irrefs, result))
+	if (!user_ir_parse(ctx, ir, hmod, nargs, &umod, &irrefs, result))
 		goto out;
 	mod->parse_ms = elapsed_ms(&since);
 
-	LLVMSetTarget(umod, session.triple);
-	LLVMSetDataLayout(umod, session.layout);
-
-	ndefs = count_definitions(umod);
-	/* only the helpers the IR uses come along, they are linkonce_odr */
-	if (LLVMLinkModules2(umod, hmod))
-	{
-		hmod = NULL;
-		build_error(result, ERRCODE_INVALID_FUNCTION_DEFINITION,
-					psprintf("could not link the IR with the host API: %s",
-							 diag_error ? diag_error : "unknown error"),
-					NULL);
-		goto out;
-	}
+	linked = helpers_link(umod, hmod, result);
 	hmod = NULL;
-	result->helpers_linked = count_definitions(umod) - ndefs;
+	if (!linked)
+		goto out;
 	mod->link_ms = elapsed_ms(&since);
 
-	/*
-	 * One JITDylib holds every module: export only the entry point, under a
-	 * name unique in the session, and let the helpers inline everywhere.
-	 * Names starting with "llvm." (llvm.used, ...) need appending linkage.
-	 */
 	if (codegen)
-	{
-		LLVMValueRef gv;
+		symbols_internalize(umod, mod->symbol, attrs, lengthof(attrs));
 
-		fn = LLVMGetNamedFunction(umod, "f");
-		LLVMSetValueName2(fn, mod->symbol, strlen(mod->symbol));
-
-		for (gv = LLVMGetFirstFunction(umod); gv; gv = LLVMGetNextFunction(gv))
-		{
-			if (LLVMIsDeclaration(gv))
-				continue;
-			if (gv != fn)
-				LLVMSetLinkage(gv, LLVMInternalLinkage);
-			for (int i = 0; i < lengthof(attrs); i++)
-			{
-				if (attrs[i] != NULL)
-					LLVMAddAttributeAtIndex(gv, LLVMAttributeFunctionIndex,
-											attrs[i]);
-			}
-		}
-		for (gv = LLVMGetFirstGlobal(umod); gv; gv = LLVMGetNextGlobal(gv))
-		{
-			if (!LLVMIsDeclaration(gv) &&
-				LLVMGetLinkage(gv) != LLVMPrivateLinkage &&
-				strncmp(value_name(gv), "llvm.", 5) != 0)
-				LLVMSetLinkage(gv, LLVMInternalLinkage);
-		}
-	}
-
-	/* the message is allocated also on success */
-	if (LLVMVerifyModule(umod, LLVMReturnStatusAction, &msg))
-		build_error(result, ERRCODE_INVALID_FUNCTION_DEFINITION,
-					psprintf("invalid IR: %s", first_line(msg)), NULL);
-	LLVMDisposeMessage(msg);
-	if (result->sqlerrcode != 0)
+	if (!ir_verify(umod, result))
 		goto out;
 	mod->verify_ms = elapsed_ms(&since);
 
 	if (irrefs != NIL)
-	{
-		Datum	   *values = palloc(list_length(irrefs) * sizeof(Datum));
-		plllvm_refs *volatile vrefs = NULL;
-		LLVMTypeRef i64 = LLVMInt64TypeInContext(ctx);
+		refs_apply(ctx, umod, irrefs, codegen, collation, search_path, refs);
 
-		plllvm_leave_fatal_on_oom();
-
-		PG_TRY();
-		{
-			int			i = 0;
-
-			vrefs = plllvm_refs_begin(list_length(irrefs), collation,
-									  search_path, !codegen);
-			foreach_ptr(IrRef, ref, irrefs)
-				values[i++] = plllvm_refs_add(vrefs, ref->name, ref->nargs);
-			plllvm_refs_resolved(vrefs);
-		}
-		PG_CATCH();
-		{
-			if (vrefs != NULL)
-				plllvm_refs_end(vrefs, false);
-
-			plllvm_enter_fatal_on_oom();
-			LLVMDisposeModule(umod);
-			LLVMContextDispose(ctx);
-			diag_error_clear();
-			plllvm_leave_fatal_on_oom();
-
-			if (codegen)
-				n_failures++;
-			PG_RE_THROW();
-		}
-		PG_END_TRY();
-
-		*refs = vrefs;
-
-		plllvm_enter_fatal_on_oom();
-
-		/* a site becomes its record's address, a constant its Datum */
-		for (int i = 0; i < list_length(irrefs); i++)
-		{
-			IrRef	   *ref = list_nth(irrefs, i);
-			LLVMValueRef gv = LLVMGetNamedGlobal(umod, ref->name);
-			LLVMValueRef value = LLVMConstInt(i64, values[i], false);
-
-			if (ref->name[0] == '\'')
-			{
-				LLVMUseRef	use;
-
-				while ((use = LLVMGetFirstUse(gv)) != NULL)
-				{
-					LLVMValueRef call = LLVMGetUser(use);
-
-					LLVMReplaceAllUsesWith(call, value);
-					LLVMInstructionEraseFromParent(call);
-				}
-			}
-			else
-				LLVMReplaceAllUsesWith(gv, LLVMConstIntToPtr(value,
-															 LLVMTypeOf(gv)));
-			LLVMDeleteGlobal(gv);
-		}
-	}
-
-	/* ORC would fail the lookup too, but only with an error string */
-	if ((name = unresolved_symbol(umod)) != NULL)
-	{
-		build_error(result, ERRCODE_UNDEFINED_FUNCTION,
-					psprintf("undefined symbol \"%s\"", name), NULL);
+	if (!symbols_check(umod, result))
 		goto out;
-	}
 	mod->resolve_ms = elapsed_ms(&since);
 
 	if (!codegen)
@@ -988,77 +874,13 @@ build(const char *ir, bool codegen, Oid collation, const char *search_path,
 		goto out;
 	}
 
-	{
-		LLVMPassBuilderOptionsRef options = LLVMCreatePassBuilderOptions();
-		char		passes[64];
-
-		/* at O0 only always-inline helpers are inlined, so keep the rest */
-		if (mod->opt_level == 0)
-			strlcpy(passes, "default<O0>,mem2reg,globaldce", sizeof(passes));
-		else
-			snprintf(passes, sizeof(passes), "default<O%d>,globaldce",
-					 mod->opt_level);
-
-		error = LLVMRunPasses(umod, passes, session.tm, options);
-		LLVMDisposePassBuilderOptions(options);
-		if (error)
-		{
-			build_error(result, ERRCODE_INTERNAL_ERROR,
-						psprintf("could not optimize the IR: %s",
-								 llvm_error_message(error)),
-						NULL);
-			goto out;
-		}
-	}
-	result->cfi_left = count_uses(umod, "plllvm_cfi");
-	if (plllvm_dump_ir)
-		*optimized_ir = llvm_message(LLVMPrintModuleToString(umod));
+	if (!ir_optimize(umod, mod->opt_level, optimized_ir, result))
+		goto out;
 	mod->optimize_ms = elapsed_ms(&since);
 
-	/* ORC owns the module and the context from here, also on error */
-	{
-		LLVMOrcThreadSafeContextRef tsc;
-		LLVMOrcThreadSafeModuleRef tsm;
-		LLVMOrcExecutorAddress addr = 0;
-
-		tsc = LLVMOrcCreateNewThreadSafeContextFromLLVMContext(ctx);
-		tsm = LLVMOrcCreateNewThreadSafeModule(umod, tsc);
-		LLVMOrcDisposeThreadSafeContext(tsc);
-		ctx = NULL;
-		umod = NULL;
-
-		*rt = LLVMOrcJITDylibCreateResourceTracker(LLVMOrcLLJITGetMainJITDylib(session.jit));
-
-		/* code is generated at the first lookup */
-		error = LLVMOrcLLJITAddLLVMIRModuleWithRT(session.jit, *rt, tsm);
-		if (!error)
-			error = LLVMOrcLLJITLookup(session.jit, &addr, mod->symbol);
-
-		/* code generation may report an error and still succeed */
-		if (error)
-			msg = llvm_error_message(error);
-		else
-			msg = diag_error_take();
-
-		if (msg != NULL)
-		{
-			LLVMOrcSymbolStringPoolRef pool;
-
-			build_error(result, ERRCODE_INTERNAL_ERROR,
-						psprintf("could not emit code: %s", first_line(msg)),
-						NULL);
-
-			LLVMConsumeError(LLVMOrcResourceTrackerRemove(*rt));
-			LLVMOrcReleaseResourceTracker(*rt);
-			*rt = NULL;
-
-			/* as llvmjit, else the names of the module leak */
-			pool = LLVMOrcExecutionSessionGetSymbolStringPool(LLVMOrcLLJITGetExecutionSession(session.jit));
-			LLVMOrcSymbolStringPoolClearDeadEntries(pool);
-		}
-		else
-			mod->addr = (void *) addr;
-	}
+	code_emit(ctx, umod, mod, rt, result);
+	ctx = NULL;
+	umod = NULL;
 	mod->emit_ms = elapsed_ms(&since);
 
 out:
@@ -1086,7 +908,8 @@ out:
  * return the target attributes of plllvm_attr_template.
  */
 static bool
-helpers_load(LLVMContextRef ctx, LLVMModuleRef *hmod, LLVMAttributeRef *attrs)
+helpers_load(LLVMContextRef ctx, LLVMModuleRef *hmod, LLVMAttributeRef *attrs,
+			 plllvm_jit_result *result)
 {
 	LLVMValueRef gv;
 	LLVMValueRef next;
@@ -1095,6 +918,9 @@ helpers_load(LLVMContextRef ctx, LLVMModuleRef *hmod, LLVMAttributeRef *attrs)
 	if (LLVMParseBitcodeInContext2(ctx, session.types_bc, hmod))
 	{
 		*hmod = NULL;
+		build_error(result, ERRCODE_INTERNAL_ERROR,
+					pstrdup("could not parse plllvm_types.bc"),
+					diag_error_take());
 		return false;
 	}
 
@@ -1120,6 +946,279 @@ helpers_load(LLVMContextRef ctx, LLVMModuleRef *hmod, LLVMAttributeRef *attrs)
 											 "target-features", strlen("target-features"));
 
 	return true;
+}
+
+/*
+ * Parse the user IR into ctx and check it.  *umod is set also when the
+ * check fails.
+ */
+static bool
+user_ir_parse(LLVMContextRef ctx, const char *ir, LLVMModuleRef hmod,
+			  int nargs, LLVMModuleRef *umod, List **irrefs,
+			  plllvm_jit_result *result)
+{
+	LLVMMemoryBufferRef buf;
+	char	   *msg;
+
+	/* the IR is NUL-terminated, but the length excludes the NUL */
+	buf = LLVMCreateMemoryBufferWithMemoryRange(ir, strlen(ir), "plllvm", true);
+	if (LLVMParseIRInContext2(ctx, buf, umod, &msg))
+	{
+		*umod = NULL;
+		parse_error_set(msg, result);
+	}
+	LLVMDisposeMemoryBuffer(buf);
+
+	return *umod != NULL &&
+		user_ir_check(ctx, *umod, hmod, nargs, irrefs, result);
+}
+
+/*
+ * Link the helpers into umod.  The linker takes hmod, also on failure.
+ */
+static bool
+helpers_link(LLVMModuleRef umod, LLVMModuleRef hmod, plllvm_jit_result *result)
+{
+	int			ndefs;
+
+	LLVMSetTarget(umod, session.triple);
+	LLVMSetDataLayout(umod, session.layout);
+
+	ndefs = count_definitions(umod);
+	/* only the helpers the IR uses come along, they are linkonce_odr */
+	if (LLVMLinkModules2(umod, hmod))
+	{
+		build_error(result, ERRCODE_INVALID_FUNCTION_DEFINITION,
+					psprintf("could not link the IR with the host API: %s",
+							 diag_error ? diag_error : "unknown error"),
+					NULL);
+		return false;
+	}
+	result->helpers_linked = count_definitions(umod) - ndefs;
+
+	return true;
+}
+
+/*
+ * One JITDylib holds every module: export only the entry point, under a
+ * name unique in the session, and let the helpers inline everywhere.
+ * Names starting with "llvm." (llvm.used, ...) need appending linkage.
+ */
+static void
+symbols_internalize(LLVMModuleRef umod, const char *symbol,
+					LLVMAttributeRef *attrs, int nattrs)
+{
+	LLVMValueRef fn;
+	LLVMValueRef gv;
+
+	fn = LLVMGetNamedFunction(umod, "f");
+	LLVMSetValueName2(fn, symbol, strlen(symbol));
+
+	for (gv = LLVMGetFirstFunction(umod); gv; gv = LLVMGetNextFunction(gv))
+	{
+		if (LLVMIsDeclaration(gv))
+			continue;
+		if (gv != fn)
+			LLVMSetLinkage(gv, LLVMInternalLinkage);
+		for (int i = 0; i < nattrs; i++)
+		{
+			if (attrs[i] != NULL)
+				LLVMAddAttributeAtIndex(gv, LLVMAttributeFunctionIndex,
+										attrs[i]);
+		}
+	}
+	for (gv = LLVMGetFirstGlobal(umod); gv; gv = LLVMGetNextGlobal(gv))
+	{
+		if (!LLVMIsDeclaration(gv) &&
+			LLVMGetLinkage(gv) != LLVMPrivateLinkage &&
+			strncmp(value_name(gv), "llvm.", 5) != 0)
+			LLVMSetLinkage(gv, LLVMInternalLinkage);
+	}
+}
+
+static bool
+ir_verify(LLVMModuleRef umod, plllvm_jit_result *result)
+{
+	char	   *msg;
+	bool		failed;
+
+	/* the message is allocated also on success */
+	failed = LLVMVerifyModule(umod, LLVMReturnStatusAction, &msg);
+	if (failed)
+		build_error(result, ERRCODE_INVALID_FUNCTION_DEFINITION,
+					psprintf("invalid IR: %s", first_line(msg)), NULL);
+	LLVMDisposeMessage(msg);
+
+	return !failed;
+}
+
+/*
+ * Resolve the call sites and constants outside the section and replace
+ * their globals.  An ERROR disposes umod and ctx and is rethrown.
+ */
+static void
+refs_apply(LLVMContextRef ctx, LLVMModuleRef umod, List *irrefs, bool codegen,
+		   Oid collation, const char *search_path, plllvm_refs **refs)
+{
+	Datum	   *values = palloc(list_length(irrefs) * sizeof(Datum));
+	plllvm_refs *volatile vrefs = NULL;
+	LLVMTypeRef i64 = LLVMInt64TypeInContext(ctx);
+
+	plllvm_leave_fatal_on_oom();
+
+	PG_TRY();
+	{
+		int			i = 0;
+
+		vrefs = plllvm_refs_begin(list_length(irrefs), collation,
+								  search_path, !codegen);
+		foreach_ptr(IrRef, ref, irrefs)
+			values[i++] = plllvm_refs_add(vrefs, ref->name, ref->nargs);
+		plllvm_refs_resolved(vrefs);
+	}
+	PG_CATCH();
+	{
+		if (vrefs != NULL)
+			plllvm_refs_end(vrefs, false);
+
+		plllvm_enter_fatal_on_oom();
+		LLVMDisposeModule(umod);
+		LLVMContextDispose(ctx);
+		diag_error_clear();
+		plllvm_leave_fatal_on_oom();
+
+		if (codegen)
+			n_failures++;
+		PG_RE_THROW();
+	}
+	PG_END_TRY();
+
+	*refs = vrefs;
+
+	plllvm_enter_fatal_on_oom();
+
+	/* a site becomes its record's address, a constant its Datum */
+	for (int i = 0; i < list_length(irrefs); i++)
+	{
+		IrRef	   *ref = list_nth(irrefs, i);
+		LLVMValueRef gv = LLVMGetNamedGlobal(umod, ref->name);
+		LLVMValueRef value = LLVMConstInt(i64, values[i], false);
+
+		if (ref->name[0] == '\'')
+		{
+			LLVMUseRef	use;
+
+			while ((use = LLVMGetFirstUse(gv)) != NULL)
+			{
+				LLVMValueRef call = LLVMGetUser(use);
+
+				LLVMReplaceAllUsesWith(call, value);
+				LLVMInstructionEraseFromParent(call);
+			}
+		}
+		else
+			LLVMReplaceAllUsesWith(gv, LLVMConstIntToPtr(value,
+														 LLVMTypeOf(gv)));
+		LLVMDeleteGlobal(gv);
+	}
+}
+
+static bool
+symbols_check(LLVMModuleRef umod, plllvm_jit_result *result)
+{
+	const char *name;
+
+	/* ORC would fail the lookup too, but only with an error string */
+	if ((name = unresolved_symbol(umod)) != NULL)
+	{
+		build_error(result, ERRCODE_UNDEFINED_FUNCTION,
+					psprintf("undefined symbol \"%s\"", name), NULL);
+		return false;
+	}
+
+	return true;
+}
+
+static bool
+ir_optimize(LLVMModuleRef umod, int opt_level, char **optimized_ir,
+			plllvm_jit_result *result)
+{
+	LLVMPassBuilderOptionsRef options = LLVMCreatePassBuilderOptions();
+	LLVMErrorRef error;
+	char		passes[64];
+
+	/* at O0 only always-inline helpers are inlined, so keep the rest */
+	if (opt_level == 0)
+		strlcpy(passes, "default<O0>,mem2reg,globaldce", sizeof(passes));
+	else
+		snprintf(passes, sizeof(passes), "default<O%d>,globaldce", opt_level);
+
+	error = LLVMRunPasses(umod, passes, session.tm, options);
+	LLVMDisposePassBuilderOptions(options);
+	if (error)
+	{
+		build_error(result, ERRCODE_INTERNAL_ERROR,
+					psprintf("could not optimize the IR: %s",
+							 llvm_error_message(error)),
+					NULL);
+		return false;
+	}
+	result->cfi_left = count_uses(umod, "plllvm_cfi");
+	if (plllvm_dump_ir)
+		*optimized_ir = llvm_message(LLVMPrintModuleToString(umod));
+
+	return true;
+}
+
+/*
+ * Add umod under its own tracker and look up the entry point.  ORC takes
+ * the module and the context, also on error.
+ */
+static void
+code_emit(LLVMContextRef ctx, LLVMModuleRef umod, plllvm_jit_module *mod,
+		  LLVMOrcResourceTrackerRef *rt, plllvm_jit_result *result)
+{
+	LLVMOrcThreadSafeContextRef tsc;
+	LLVMOrcThreadSafeModuleRef tsm;
+	LLVMOrcExecutorAddress addr = 0;
+	LLVMErrorRef error;
+	char	   *msg;
+
+	tsc = LLVMOrcCreateNewThreadSafeContextFromLLVMContext(ctx);
+	tsm = LLVMOrcCreateNewThreadSafeModule(umod, tsc);
+	LLVMOrcDisposeThreadSafeContext(tsc);
+
+	*rt = LLVMOrcJITDylibCreateResourceTracker(LLVMOrcLLJITGetMainJITDylib(session.jit));
+
+	/* code is generated at the first lookup */
+	error = LLVMOrcLLJITAddLLVMIRModuleWithRT(session.jit, *rt, tsm);
+	if (!error)
+		error = LLVMOrcLLJITLookup(session.jit, &addr, mod->symbol);
+
+	/* code generation may report an error and still succeed */
+	if (error)
+		msg = llvm_error_message(error);
+	else
+		msg = diag_error_take();
+
+	if (msg != NULL)
+	{
+		LLVMOrcSymbolStringPoolRef pool;
+
+		build_error(result, ERRCODE_INTERNAL_ERROR,
+					psprintf("could not emit code: %s", first_line(msg)),
+					NULL);
+
+		LLVMConsumeError(LLVMOrcResourceTrackerRemove(*rt));
+		LLVMOrcReleaseResourceTracker(*rt);
+		*rt = NULL;
+
+		/* as llvmjit, else the names of the module leak */
+		pool = LLVMOrcExecutionSessionGetSymbolStringPool(LLVMOrcLLJITGetExecutionSession(session.jit));
+		LLVMOrcSymbolStringPoolClearDeadEntries(pool);
+	}
+	else
+		mod->addr = (void *) addr;
 }
 
 /*
