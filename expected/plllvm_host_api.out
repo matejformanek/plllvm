@@ -1,0 +1,38 @@
+--
+-- docs/host-api.ll is a valid body
+--
+LOAD 'plllvm';
+SET plllvm.regress_test_mode = on;
+\getenv abs_srcdir PG_ABS_SRCDIR
+\set ir `cat :'abs_srcdir'/docs/host-api.ll`
+SELECT ok, sqlstate, message FROM plllvm_jit_test(:'ir', 0, false);
+ ok | sqlstate | message 
+----+----------+---------
+ t  |          | 
+(1 row)
+
+SELECT ok, sqlstate, message, cfi_left FROM plllvm_jit_test(:'ir', 0, true);
+ ok | sqlstate | message | cfi_left 
+----+----------+---------+----------
+ t  |          |         |        0
+(1 row)
+
+SELECT ok, sqlstate, message, cfi_left FROM plllvm_jit_test(:'ir', 2, true);
+ ok | sqlstate | message | cfi_left 
+----+----------+---------+----------
+ t  |          |         |        0
+(1 row)
+
+SELECT owner, callee, ready FROM plllvm_call_sites() ORDER BY callee;
+ owner |            callee            | ready 
+-------+------------------------------+-------
+       | abs(integer)                 | f
+       | abs(integer)                 | f
+       | int4pl(integer,integer)      | f
+       | int4pl(integer,integer)      | f
+       | pi()                         | f
+       | pi()                         | f
+       | substr(text,integer,integer) | f
+       | substr(text,integer,integer) | f
+(8 rows)
+

@@ -25,10 +25,6 @@
 ;   END LOOP;
 ;   RETURN cnt::text || '/' || h::text;
 ;
-; v0.1a has no text helpers, so this returns bigint (cnt << 32) | h and the SQL
-; wrapper in sql/kernel_mandelbrot.sql formats "cnt/h".  Lossless: 0 <= h <
-; 1000000007 < 2^32 and 0 <= cnt < 2^31.
-;
 ; float8 arithmetic goes through @f8_* below, which copy float8_pl/mi/mul/div
 ; from utils/float.h with their overflow, underflow and division-by-zero
 ; errors.  No fast-math flags, so "two * zr * zi + ci" is never fused.
@@ -41,6 +37,9 @@ declare void @plllvm_cfi()
 declare void @plllvm_error(i32, ptr) noreturn
 declare void @plllvm_rt_int_overflow() noreturn
 declare void @plllvm_rt_bigint_overflow() noreturn
+declare i64 @plllvm_cstring_to_text(ptr)
+declare i32 @pg_ltoa(i32, ptr)
+declare i32 @pg_lltoa(i64, ptr)
 declare void @float_overflow_error() noreturn
 declare void @float_underflow_error() noreturn
 declare void @float_zero_divide_error() noreturn
@@ -54,6 +53,8 @@ declare double @llvm.fabs.f64(double)
 
 define i64 @f(ptr %fcinfo) {
 entry:
+  ; cnt '/' h: at most 11 + 1 + 20 bytes and the NUL
+  %buf = alloca [40 x i8]
   call void @plllvm_cfi()
   %sz.isnull = call i1 @plllvm_arg_isnull(ptr %fcinfo, i32 0)
   br i1 %sz.isnull, label %null_bound, label %start
@@ -152,10 +153,13 @@ y.latch:
   br label %y.cond
 
 done:
-  %cnt.l = zext i32 %cnt to i64
-  %hi = shl i64 %cnt.l, 32
-  %packed = or i64 %hi, %h
-  ret i64 %packed
+  %n = call i32 @pg_ltoa(i32 %cnt, ptr %buf)
+  %slash = getelementptr inbounds i8, ptr %buf, i32 %n
+  store i8 47, ptr %slash
+  %h.at = getelementptr inbounds i8, ptr %slash, i32 1
+  call i32 @pg_lltoa(i64 %h, ptr %h.at)
+  %r = call i64 @plllvm_cstring_to_text(ptr %buf)
+  ret i64 %r
 
 null_bound:
   ; 22004 = MAKE_SQLSTATE('2','2','0','0','4')

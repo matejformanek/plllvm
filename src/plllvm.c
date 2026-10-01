@@ -12,10 +12,13 @@
  * Notes:
  *
  * 1) A body is LLVM IR whose entry "i64 @f(ptr %fcinfo)" is called as a
- *    version 1 function.  The handler adds only the pin and the error
- *    context; argument and NULL handling are the IR's.
+ *    version 1 function.  The handler adds only the pin, the error context
+ *    and the frame; argument and NULL handling are the IR's.
  *
  * 2) There is no inline handler, so PostgreSQL itself rejects DO blocks.
+ *
+ * 3) A body that uses a call, text or memory helper runs in a frame
+ *    (plllvm_runtime.c).  The steps of the handler keep a fixed order.
  *
  */
 #include "postgres.h"
@@ -142,6 +145,8 @@ _PG_init(void)
 	RegisterXactCallback(plllvm_xact_callback, NULL);
 	RegisterSubXactCallback(plllvm_subxact_callback, NULL);
 
+	plllvm_sites_init();
+
 	inited = true;
 }
 
@@ -167,11 +172,21 @@ plllvm_subxact_callback(SubXactEvent event, SubTransactionId mySubid,
 
 /*
  * Call handler for PL/LLVM functions
+ *
+ * The order of the steps is fixed:
+ * - the caller's context is taken first: the result and kept values live
+ *   there, and an SPI_connect() before the frame must save that context;
+ * - the frame is pushed before the pin, so that a failed push leaks no pin;
+ * - the result is copied out inside the TRY, while what it points into
+ *   still exists, and the frame is popped before the unpin, so that
+ *   nothing runs in a context about to be deleted.
  */
 Datum
 plllvm_call_handler(PG_FUNCTION_ARGS)
 {
+	MemoryContext entry_cxt = CurrentMemoryContext;
 	plllvm_function *func;
+	plllvm_frame frame;
 	ErrorContextCallback errcallback;
 	volatile Datum retval = (Datum) 0;
 
@@ -179,6 +194,9 @@ plllvm_call_handler(PG_FUNCTION_ARGS)
 	check_stack_depth();
 
 	func = plllvm_compile_get(fcinfo);
+
+	if (func->needs_frame)
+		plllvm_frame_push(&frame, entry_cxt);
 
 	/* pin entry, so that funccache cannot reuse it under this call */
 	func->cfunc.use_count++;
@@ -191,9 +209,13 @@ plllvm_call_handler(PG_FUNCTION_ARGS)
 	PG_TRY();
 	{
 		retval = func->addr(fcinfo);
+		if (func->needs_frame && !func->rettypbyval && !fcinfo->isnull)
+			retval = plllvm_frame_copy_out(&frame, retval, func->rettyplen);
 	}
 	PG_FINALLY();
 	{
+		if (func->needs_frame)
+			plllvm_frame_pop(&frame);
 		plllvm_compile_unpin(func);
 	}
 	PG_END_TRY();

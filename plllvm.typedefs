@@ -1,3 +1,5 @@
+AclResult
+ArrayType
 AttrDefault
 AttrNumber
 Bitmapset
@@ -29,6 +31,7 @@ ExprDoneCond
 ExprState
 ExprStateEvalFunc
 FmgrInfo
+ForEachState
 FormData_pg_proc
 Form_pg_proc
 FunctionCallInfo
@@ -39,6 +42,7 @@ HeapTupleHeader
 HeapTupleHeaderData
 Index
 IndexInfo
+IrRef
 ItemPointerData
 JitCode
 JunkFilter
@@ -76,6 +80,7 @@ LLVMUseRef
 LLVMValueRef
 List
 ListCell
+LocalTransactionId
 LockClauseStrength
 LockWaitPolicy
 MemoryContext
@@ -125,8 +130,10 @@ ScanDirection
 SetFunctionReturnMode
 Size
 Snapshot
+StringInfoData
 SubTransactionId
 SubXactEvent
+SysCacheIdentifier
 TransactionId
 Trigger
 TriggerDesc
@@ -146,6 +153,9 @@ __darwin_time_t
 bitmapword
 compile_error_arg
 div_t
+dlist_head
+dlist_iter
+dlist_node
 float4
 float8
 instr_time
@@ -176,11 +186,14 @@ max_align_t
 natural_t
 new_handler
 oidvector
+plllvm_frame
 plllvm_function
 plllvm_host_symbol
 plllvm_jit_module
 plllvm_jit_result
 plllvm_jit_session_info
+plllvm_refs
+plllvm_site
 policy_t
 regproc
 sigjmp_buf
@@ -206,4 +219,7 @@ uint_least64_t
 uint_least8_t
 uintmax_t
 uintptr_t
+varattrib_1b
+varattrib_1b_e
 varlena
+vartag_external

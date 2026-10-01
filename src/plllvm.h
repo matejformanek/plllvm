@@ -21,6 +21,7 @@
 #error "plllvm requires PostgreSQL 18 or later"
 #endif
 
+#include "lib/ilist.h"
 #include "utils/funccache.h"
 
 /* keep in sync with META.json; plllvm.control carries major.minor only */
@@ -42,8 +43,50 @@
 		offsetof(FunctionCallInfoBaseData, flinfo), \
 		offsetof(FunctionCallInfoBaseData, isnull), \
 		offsetof(FunctionCallInfoBaseData, nargs), \
-		offsetof(FunctionCallInfoBaseData, args) \
+		offsetof(FunctionCallInfoBaseData, args), \
+		offsetof(plllvm_site, userid), \
+		offsetof(plllvm_site, fcinfo), \
+		offsetof(plllvm_site, flinfo), \
+		offsetof(FmgrInfo, fn_addr), \
+		offsetof(FmgrInfo, fn_strict) \
 	}
+
+/* a call site of JIT-compiled code (plllvm_sites.c); its address is in the code */
+typedef struct plllvm_site
+{
+	bool		ready;			/* true, while flinfo matches pg_proc */
+	bool		busy;			/* true, while a call through flinfo runs */
+	Oid			userid;			/* user whose EXECUTE right was checked, or
+								 * InvalidOid */
+	FunctionCallInfo fcinfo;	/* nargs slots; fcinfo->flinfo = &flinfo */
+	FmgrInfo	flinfo;
+	Oid			fn_oid;
+	uint32		hashvalue;		/* of fn_oid in PROCOID */
+	int16		nargs;
+	Oid			rettype;		/* with argtypes, to recognise another
+								 * function under the same OID */
+	Oid		   *argtypes;
+	Oid			collation;
+	MemoryContext mcxt;			/* fn_mcxt, replaced at each rebuild */
+	const char *signature;		/* as written in the IR */
+	const char *search_path;	/* the module's resolution path */
+	int64		prepares;		/* for plllvm_call_sites() */
+	int64		checks;
+	int64		reentries;
+	dlist_node	node;			/* in the list the callbacks walk */
+} plllvm_site;
+
+/* the memory of a running function that calls other functions */
+typedef struct plllvm_frame
+{
+	MemoryContext caller_cxt;	/* context at handler entry: result and kept
+								 * values */
+	MemoryContext scratch;		/* CurrentMemoryContext of the JIT code */
+	struct plllvm_frame *prev;
+} plllvm_frame;
+
+/* the sites and constants of one compile (plllvm_sites.c) */
+typedef struct plllvm_refs plllvm_refs;
 
 /* host functions called from JIT-compiled code (plllvm_runtime.c) */
 pg_noreturn extern void plllvm_error(int32 sqlstate, const char *msg);
@@ -51,6 +94,20 @@ extern void plllvm_notice(const char *msg);
 pg_noreturn extern void plllvm_rt_int_overflow(void);
 pg_noreturn extern void plllvm_rt_bigint_overflow(void);
 pg_noreturn extern void plllvm_rt_div_zero(void);
+extern Datum plllvm_keep(Datum value);
+extern void plllvm_scratch_reset(void);
+extern Datum plllvm_rt_site_call(plllvm_site *site, NullableDatum *args,
+								 bool *isnull);
+pg_noreturn extern void plllvm_rt_site_null(plllvm_site *site);
+
+extern plllvm_frame *plllvm_cur_frame;
+extern void plllvm_frame_push(plllvm_frame *frame, MemoryContext caller);
+extern Datum plllvm_frame_copy_out(plllvm_frame *frame, Datum value,
+								   int16 typlen);
+extern void plllvm_frame_pop(plllvm_frame *frame);
+
+/* host functions that need a frame; NULL-terminated */
+extern const char *const plllvm_frame_helpers[];
 
 typedef struct plllvm_host_symbol
 {
@@ -71,6 +128,9 @@ typedef struct plllvm_function
 	NameData	proname;		/* for errcontext; funccache zeroes a reused
 								 * entry, so nothing here may own memory */
 	PGFunction	addr;
+	bool		needs_frame;	/* true, when the IR uses a frame helper */
+	bool		rettypbyval;
+	int16		rettyplen;
 	struct plllvm_jit_module *mod;	/* code record, never freed; NULL once
 									 * retired */
 } plllvm_function;
@@ -92,5 +152,18 @@ extern plllvm_function *plllvm_compile_get(FunctionCallInfo fcinfo);
 extern void plllvm_compile_unpin(plllvm_function *func);
 extern void plllvm_compile_check_scope(HeapTuple procTup);
 extern void plllvm_compile_check_body(HeapTuple procTup);
+
+/* plllvm_sites.c */
+extern void plllvm_sites_init(void);
+extern char *plllvm_sites_path(HeapTuple procTup);
+extern plllvm_refs *plllvm_refs_begin(int nrefs, Oid collation,
+									  const char *search_path,
+									  bool check_only);
+extern Datum plllvm_refs_add(plllvm_refs *refs, const char *name, int nargs);
+extern void plllvm_refs_resolved(plllvm_refs *refs);
+extern void plllvm_refs_end(plllvm_refs *refs, bool publish);
+extern int	plllvm_refs_sites(plllvm_refs *refs, plllvm_site **sites);
+extern void plllvm_sites_idle(plllvm_refs *refs);
+extern void plllvm_sites_release(plllvm_refs *refs);
 
 #endif							/* PLLLVM_H */

@@ -22,12 +22,17 @@
  * 3) The version and the layout probes are checked against the library
  *    when a session loads the file.
  *
+ * 4) Call sites: the executor's protocol (EEOP_FUNCEXPR) is inline, all
+ *    that is rare is in plllvm_sites.c.
+ *
  */
 #include "postgres.h"
 
 #include "fmgr.h"
 #include "miscadmin.h"
+#include "utils/builtins.h"
 #include "utils/float.h"
+#include "varatt.h"
 
 #include "plllvm.h"
 
@@ -55,6 +60,20 @@ extern int32 plllvm_nargs(FunctionCallInfo fcinfo);
 extern Datum plllvm_return_null(FunctionCallInfo fcinfo);
 extern void plllvm_cfi(void);
 extern void plllvm_check_stack(void);
+extern Datum plllvm_call0(plllvm_site *site, bool *isnull);
+extern Datum plllvm_call1(plllvm_site *site, Datum a0, bool n0, bool *isnull);
+extern Datum plllvm_call2(plllvm_site *site, Datum a0, bool n0,
+						  Datum a1, bool n1, bool *isnull);
+extern Datum plllvm_call3(plllvm_site *site, Datum a0, bool n0,
+						  Datum a1, bool n1, Datum a2, bool n2,
+						  bool *isnull);
+extern Datum plllvm_const(const void *k);
+extern Datum plllvm_cstring_to_text(const char *s);
+extern char *plllvm_text_to_cstring(Datum t);
+extern Datum plllvm_detoast(Datum v);
+extern char *plllvm_vardata_any(Datum v);
+extern int32 plllvm_varsize_any_exhdr(Datum v);
+extern void plllvm_free(Datum v);
 
 /* no bounds checks, as PG_GETARG_* */
 pg_always_inline bool
@@ -112,6 +131,125 @@ plllvm_check_stack(void)
 }
 
 /*
+ * The arguments come in by value and are stored right before the call, so
+ * nothing can re-enter in between.  A busy site is never called again: an
+ * FmgrInfo carries one call at a time (fmgr_security_definer, fmgr_sql).
+ */
+static pg_always_inline Datum
+site_call(plllvm_site *site, NullableDatum *args, int nargs, bool *isnull)
+{
+	FunctionCallInfo fcinfo = site->fcinfo;
+	Datum		result;
+
+	if (unlikely(!site->ready || site->busy || site->userid != GetUserId()))
+		return plllvm_rt_site_call(site, args, isnull);
+
+	if (site->flinfo.fn_strict)
+	{
+		for (int i = 0; i < nargs; i++)
+		{
+			if (args[i].isnull)
+				goto null_result;
+		}
+	}
+	for (int i = 0; i < nargs; i++)
+		fcinfo->args[i] = args[i];
+	fcinfo->isnull = false;
+	site->busy = true;
+	result = FunctionCallInvoke(fcinfo);
+	site->busy = false;
+	if (!fcinfo->isnull)
+	{
+		if (isnull)
+			*isnull = false;
+		return result;
+	}
+
+null_result:
+	if (isnull == NULL)
+		plllvm_rt_site_null(site);
+	*isnull = true;
+	return (Datum) 0;
+}
+
+pg_always_inline Datum
+plllvm_call0(plllvm_site *site, bool *isnull)
+{
+	return site_call(site, NULL, 0, isnull);
+}
+
+pg_always_inline Datum
+plllvm_call1(plllvm_site *site, Datum a0, bool n0, bool *isnull)
+{
+	NullableDatum args[1] = {{a0, n0}};
+
+	return site_call(site, args, 1, isnull);
+}
+
+pg_always_inline Datum
+plllvm_call2(plllvm_site *site, Datum a0, bool n0, Datum a1, bool n1,
+			 bool *isnull)
+{
+	NullableDatum args[2] = {{a0, n0}, {a1, n1}};
+
+	return site_call(site, args, 2, isnull);
+}
+
+pg_always_inline Datum
+plllvm_call3(plllvm_site *site, Datum a0, bool n0, Datum a1, bool n1,
+			 Datum a2, bool n2, bool *isnull)
+{
+	NullableDatum args[3] = {{a0, n0}, {a1, n1}, {a2, n2}};
+
+	return site_call(site, args, 3, isnull);
+}
+
+/* never reached: the compile folds every call into the constant's Datum */
+pg_always_inline Datum
+plllvm_const(const void *k)
+{
+	return *(const Datum *) k;
+}
+
+pg_always_inline Datum
+plllvm_cstring_to_text(const char *s)
+{
+	return PointerGetDatum(cstring_to_text(s));
+}
+
+pg_always_inline char *
+plllvm_text_to_cstring(Datum t)
+{
+	return text_to_cstring((text *) DatumGetPointer(t));
+}
+
+pg_always_inline Datum
+plllvm_detoast(Datum v)
+{
+	return PointerGetDatum(pg_detoast_datum_packed((struct varlena *) DatumGetPointer(v)));
+}
+
+/* of a detoasted value */
+pg_always_inline char *
+plllvm_vardata_any(Datum v)
+{
+	return VARDATA_ANY(DatumGetPointer(v));
+}
+
+pg_always_inline int32
+plllvm_varsize_any_exhdr(Datum v)
+{
+	return (int32) VARSIZE_ANY_EXHDR(DatumGetPointer(v));
+}
+
+/* of a value from plllvm_keep() */
+pg_always_inline void
+plllvm_free(Datum v)
+{
+	pfree(DatumGetPointer(v));
+}
+
+/*
  * Forces the declarations of the out-of-line host functions into the .bc,
  * where declarations in user IR are checked against them.
  */
@@ -122,6 +260,8 @@ void	   *referenced_functions[] =
 	plllvm_rt_int_overflow,
 	plllvm_rt_bigint_overflow,
 	plllvm_rt_div_zero,
+	plllvm_keep,
+	plllvm_scratch_reset,
 	float_overflow_error,
 	float_underflow_error,
 	float_zero_divide_error,

@@ -110,4 +110,102 @@ SELECT * FROM plllvm_function_status('c_one()');
  live  |        2 |       1
 (1 row)
 
+-- a call site is rebuilt only after an invalidation of its callee, and
+-- checked again by another user and after any change of roles; under
+-- debug_discard_caches every call rebuilds (plllvm_cache_1.out)
+CREATE ROLE regress_plllvm_cuser;
+CREATE ROLE regress_plllvm_cgrp;
+GRANT regress_plllvm_cgrp TO regress_plllvm_cuser;
+CREATE FUNCTION c_callee(x int) RETURNS int LANGUAGE sql AS 'SELECT x';
+CREATE FUNCTION c_other() RETURNS int LANGUAGE sql AS 'SELECT 1';
+CREATE FUNCTION c_site(x int) RETURNS int LANGUAGE plllvm STRICT AS $$
+@"c_callee(integer)" = external global i8
+declare i64 @plllvm_call1(ptr, i64, i1, ptr)
+declare i64 @plllvm_arg_i64(ptr, i32)
+define i64 @f(ptr %fcinfo) {
+  %x = call i64 @plllvm_arg_i64(ptr %fcinfo, i32 0)
+  %r = call i64 @plllvm_call1(ptr @"c_callee(integer)", i64 %x, i1 false, ptr null)
+  ret i64 %r
+}
+$$;
+SELECT sum(c_site(i)) FROM generate_series(1, 100) i;
+ sum  
+------
+ 5050
+(1 row)
+
+SELECT prepares = 1 AS one_prepare FROM plllvm_call_sites()
+WHERE owner = 'c_site(int)'::regprocedure;
+ one_prepare 
+-------------
+ t
+(1 row)
+
+ALTER FUNCTION c_other() COST 5;
+SELECT c_site(1);
+ c_site 
+--------
+      1
+(1 row)
+
+SELECT prepares = 1 AS one_prepare FROM plllvm_call_sites()
+WHERE owner = 'c_site(int)'::regprocedure;
+ one_prepare 
+-------------
+ t
+(1 row)
+
+ALTER FUNCTION c_callee(int) COST 5;
+SELECT c_site(1);
+ c_site 
+--------
+      1
+(1 row)
+
+SELECT prepares = 2 AS two_prepares FROM plllvm_call_sites()
+WHERE owner = 'c_site(int)'::regprocedure;
+ two_prepares 
+--------------
+ t
+(1 row)
+
+SELECT checks AS checks0 FROM plllvm_call_sites()
+WHERE owner = 'c_site(int)'::regprocedure \gset
+SET ROLE regress_plllvm_cuser;
+SELECT c_site(1);
+ c_site 
+--------
+      1
+(1 row)
+
+RESET ROLE;
+SELECT checks = :checks0 + 1 AS checked, prepares = 2 AS no_rebuild
+FROM plllvm_call_sites() WHERE owner = 'c_site(int)'::regprocedure;
+ checked | no_rebuild 
+---------+------------
+ t       | t
+(1 row)
+
+SELECT c_site(1);
+ c_site 
+--------
+      1
+(1 row)
+
+REVOKE regress_plllvm_cgrp FROM regress_plllvm_cuser;
+SELECT c_site(1);
+ c_site 
+--------
+      1
+(1 row)
+
+SELECT checks = :checks0 + 3 AS checked, prepares = 2 AS no_rebuild
+FROM plllvm_call_sites() WHERE owner = 'c_site(int)'::regprocedure;
+ checked | no_rebuild 
+---------+------------
+ t       | t
+(1 row)
+
+DROP FUNCTION c_site(int), c_callee(int), c_other();
+DROP ROLE regress_plllvm_cuser, regress_plllvm_cgrp;
 DROP FUNCTION c_sql(), c_one(), c_text(text);

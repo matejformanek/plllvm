@@ -28,6 +28,7 @@ PG_FUNCTION_INFO_V1(plllvm_session_info);
 PG_FUNCTION_INFO_V1(plllvm_code_cache);
 PG_FUNCTION_INFO_V1(plllvm_jit_test);
 PG_FUNCTION_INFO_V1(plllvm_function_status);
+PG_FUNCTION_INFO_V1(plllvm_call_sites);
 
 static bool resident_size(int64 *bytes);
 
@@ -45,6 +46,7 @@ plllvm_session_info(PG_FUNCTION_ARGS)
 
 	InitMaterializedSRF(fcinfo, 0);
 
+	plllvm_jit_retire_dropped();
 	plllvm_jit_get_session_info(&info);
 
 	/* the major version only, the paths as file names */
@@ -88,10 +90,12 @@ plllvm_code_cache(PG_FUNCTION_ARGS)
 
 	InitMaterializedSRF(fcinfo, 0);
 
+	plllvm_jit_retire_dropped();
+
 	for (plllvm_jit_module *mod = plllvm_jit_modules(); mod; mod = mod->next)
 	{
-		Datum		values[16];
-		bool		nulls[16] = {0};
+		Datum		values[18];
+		bool		nulls[18] = {0};
 
 		if (OidIsValid(mod->owner_oid))
 			values[0] = ObjectIdGetDatum(mod->owner_oid);
@@ -118,9 +122,12 @@ plllvm_code_cache(PG_FUNCTION_ARGS)
 		values[12] = Float8GetDatum(mod->emit_ms);
 		values[13] = Float8GetDatum(mod->parse_bc_ms + mod->parse_ms +
 									mod->link_ms + mod->verify_ms +
-									mod->optimize_ms + mod->emit_ms);
+									mod->resolve_ms + mod->optimize_ms +
+									mod->emit_ms);
 		values[14] = BoolGetDatum(mod->retired);
 		values[15] = CStringGetTextDatum(psprintf("%p", mod->addr));
+		values[16] = Float8GetDatum(mod->resolve_ms);
+		values[17] = BoolGetDatum(mod->needs_frame);
 
 		tuplestore_putvalues(rsinfo->setResult, rsinfo->setDesc, values, nulls);
 	}
@@ -163,10 +170,12 @@ plllvm_jit_test(PG_FUNCTION_ARGS)
 
 	InitMaterializedSRF(fcinfo, 0);
 
+	/* there is no function whose path or collation would apply */
 	if (codegen)
-		ok = plllvm_jit_compile(InvalidOid, ir, opt_level, &result);
+		ok = plllvm_jit_compile(InvalidOid, InvalidOid, "pg_catalog, pg_temp",
+								ir, opt_level, &result);
 	else
-		ok = plllvm_jit_check(ir, &result);
+		ok = plllvm_jit_check(ir, "pg_catalog, pg_temp", &result);
 
 	values[0] = BoolGetDatum(ok);
 	if (ok)
@@ -225,6 +234,8 @@ plllvm_function_status(PG_FUNCTION_ARGS)
 	if (get_call_result_type(fcinfo, NULL, &tupdesc) != TYPEFUNC_COMPOSITE)
 		elog(ERROR, "return type must be a row type");
 
+	plllvm_jit_retire_dropped();
+
 	for (plllvm_jit_module *mod = plllvm_jit_modules(); mod; mod = mod->next)
 	{
 		if (!OidIsValid(fn) || mod->owner_oid != fn)
@@ -239,8 +250,6 @@ plllvm_function_status(PG_FUNCTION_ARGS)
 
 	if (newest == NULL)
 		state = "not_compiled";
-	else if (newest->retired)
-		state = "retired";
 	else
 	{
 		HeapTuple	tuple = SearchSysCache1(PROCOID, ObjectIdGetDatum(fn));
@@ -249,8 +258,10 @@ plllvm_function_status(PG_FUNCTION_ARGS)
 			state = "dropped";
 		else
 		{
-			if (HeapTupleHeaderGetRawXmin(tuple->t_data) != newest->owner_xmin ||
-				!ItemPointerEquals(&tuple->t_self, &newest->owner_tid))
+			if (newest->retired)
+				state = "retired";
+			else if (HeapTupleHeaderGetRawXmin(tuple->t_data) != newest->owner_xmin ||
+					 !ItemPointerEquals(&tuple->t_self, &newest->owner_tid))
 				state = "stale";
 			else
 				state = "live";
@@ -263,6 +274,49 @@ plllvm_function_status(PG_FUNCTION_ARGS)
 	values[2] = Int64GetDatum(retired);
 
 	PG_RETURN_DATUM(HeapTupleGetDatum(heap_form_tuple(tupdesc, values, nulls)));
+}
+
+/*
+ * The call sites of the compiled code of this backend
+ */
+Datum
+plllvm_call_sites(PG_FUNCTION_ARGS)
+{
+	ReturnSetInfo *rsinfo = (ReturnSetInfo *) fcinfo->resultinfo;
+
+	InitMaterializedSRF(fcinfo, 0);
+
+	for (plllvm_jit_module *mod = plllvm_jit_modules(); mod; mod = mod->next)
+	{
+		plllvm_site *sites;
+		int			nsites;
+
+		if (mod->refs == NULL)
+			continue;
+
+		nsites = plllvm_refs_sites(mod->refs, &sites);
+		for (int i = 0; i < nsites; i++)
+		{
+			Datum		values[7];
+			bool		nulls[7] = {0};
+
+			if (OidIsValid(mod->owner_oid))
+				values[0] = ObjectIdGetDatum(mod->owner_oid);
+			else
+				nulls[0] = true;
+			values[1] = CStringGetTextDatum(sites[i].signature);
+			values[2] = BoolGetDatum(sites[i].ready);
+			values[3] = BoolGetDatum(sites[i].busy);
+			values[4] = Int64GetDatum(sites[i].prepares);
+			values[5] = Int64GetDatum(sites[i].checks);
+			values[6] = Int64GetDatum(sites[i].reentries);
+
+			tuplestore_putvalues(rsinfo->setResult, rsinfo->setDesc, values,
+								 nulls);
+		}
+	}
+
+	return (Datum) 0;
 }
 
 /*

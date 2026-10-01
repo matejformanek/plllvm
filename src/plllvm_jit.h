@@ -60,11 +60,19 @@ typedef struct plllvm_jit_module
 	double		parse_ms;
 	double		link_ms;
 	double		verify_ms;
+	double		resolve_ms;		/* call sites, constants and symbols */
 	double		optimize_ms;
 	double		emit_ms;
 	void	   *addr;			/* entry point */
+	bool		needs_frame;	/* true, when the IR uses a frame helper */
 	bool		retired;		/* true, when the owner's code was replaced or
 								 * dropped; the code itself stays */
+	uint32		owner_hash;		/* of owner_oid in PROCOID, set by the caller */
+	bool		owner_inval;	/* true, when the owner's row was invalidated
+								 * since the last check */
+	LocalTransactionId owner_inval_lxid;	/* transaction that may have
+											 * dropped the owner, or invalid */
+	struct plllvm_refs *refs;	/* call sites and constants, or NULL */
 	struct plllvm_jit_module *next;
 } plllvm_jit_module;
 
@@ -80,6 +88,7 @@ typedef struct plllvm_jit_result
 	int			ir_instructions;
 	int			helpers_linked;
 	int			cfi_left;		/* -1 when not optimised */
+	bool		needs_frame;
 } plllvm_jit_result;
 
 typedef struct plllvm_jit_session_info
@@ -98,10 +107,14 @@ typedef struct plllvm_jit_session_info
 /* plllvm_jit.c */
 extern void plllvm_jit_session_ensure(void);
 extern void plllvm_jit_get_session_info(plllvm_jit_session_info *info);
-extern bool plllvm_jit_compile(Oid owner_oid, const char *ir, int opt_level,
-							   plllvm_jit_result *result);
-extern bool plllvm_jit_check(const char *ir, plllvm_jit_result *result);
+extern bool plllvm_jit_compile(Oid owner_oid, Oid collation,
+							   const char *search_path, const char *ir,
+							   int opt_level, plllvm_jit_result *result);
+extern bool plllvm_jit_check(const char *ir, const char *search_path,
+							 plllvm_jit_result *result);
 extern void plllvm_jit_retire(plllvm_jit_module *mod);
+extern void plllvm_jit_owner_inval(uint32 hashvalue);
+extern void plllvm_jit_retire_dropped(void);
 extern plllvm_jit_module *plllvm_jit_modules(void);
 
 #endif							/* !__cplusplus */
