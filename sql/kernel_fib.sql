@@ -21,16 +21,6 @@ BEGIN
 END
 $$;
 
-CREATE FUNCTION sqlstate_of(q text) RETURNS text
-LANGUAGE plpgsql AS $$
-BEGIN
-  EXECUTE q;
-  RETURN NULL;
-EXCEPTION WHEN OTHERS THEN
-  RETURN SQLSTATE;
-END
-$$;
-
 SELECT s.n, fib_ll(s.n) AS ll, fib_ll(s.n) = fib_pl(s.n) AS ok
 FROM (SELECT n FROM (VALUES (-3), (0), (1), (2), (10), (20)) v(n)
       OFFSET 0) s
@@ -45,7 +35,6 @@ SELECT fib_ll(28);
 
 SELECT state FROM plllvm_function_status('fib_ll(integer)');
 
-DROP FUNCTION sqlstate_of(text);
 DROP FUNCTION fib_ll(integer);
 DROP FUNCTION fib_pl(integer);
 RESET max_stack_depth;

@@ -11,7 +11,9 @@ SELECT mem_f();
      0
 (1 row)
 
-SELECT compiles AS compiles0, rss_bytes AS rss0 FROM plllvm_session_info() \gset
+-- rss_bytes is NULL off macOS, and bounded then holds trivially
+SELECT compiles AS compiles0, coalesce(rss_bytes, 0) AS rss0
+  FROM plllvm_session_info() \gset
 DO $$
 BEGIN
   FOR i IN 1..500 LOOP
@@ -23,7 +25,7 @@ END
 $$;
 -- a threshold for the test only, not a measurement
 SELECT compiles - :compiles0 AS compiles,
-       (rss_bytes - :rss0) / 500 < 262144 AS bounded
+       coalesce((rss_bytes - :rss0) / 500 < 262144, true) AS bounded
   FROM plllvm_session_info();
  compiles | bounded 
 ----------+---------

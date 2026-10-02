@@ -97,16 +97,6 @@ LANGUAGE plllvm STABLE AS :'ir';
 CREATE FUNCTION lookup_ll_vol(n integer) RETURNS text
 LANGUAGE plllvm VOLATILE AS :'ir';
 
-CREATE FUNCTION sqlstate_of(q text) RETURNS text
-LANGUAGE plpgsql AS $$
-BEGIN
-  EXECUTE q;
-  RETURN NULL;
-EXCEPTION WHEN OTHERS THEN
-  RETURN SQLSTATE;
-END
-$$;
-
 SELECT spi_statements AS st0 FROM plllvm_session_info() \gset
 
 SELECT s.n, lookup_ll(s.n) AS ll, lookup_ll(s.n) = lookup_stab(s.n) AS ok,
@@ -127,7 +117,6 @@ SELECT bool_and(ready) AS ready, bool_and(NOT busy) AS idle
 FROM plllvm_call_sites()
 WHERE owner = 'lookup_ll(integer)'::regprocedure;
 
-DROP FUNCTION sqlstate_of(text);
 DROP FUNCTION lookup_ll(integer), lookup_ll_vol(integer);
 DROP FUNCTION lookup_stab(integer), lookup_vol(integer);
 DROP TABLE item, stock;

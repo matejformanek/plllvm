@@ -179,6 +179,39 @@ SELECT p.proname, s.*
  WHERE p.prolang = (SELECT oid FROM pg_language WHERE lanname = 'plllvm')
  ORDER BY p.proname;
 
+-- a parallel worker loads plllvm, compiles the function and exits
+CREATE FUNCTION par_twice(x int4) RETURNS int4
+LANGUAGE plllvm STRICT PARALLEL SAFE AS $$
+declare i32 @plllvm_arg_i32(ptr, i32)
+
+define i64 @f(ptr %fcinfo) {
+  %x = call i32 @plllvm_arg_i32(ptr %fcinfo, i32 0)
+  %r = mul i32 %x, 2
+  %d = sext i32 %r to i64
+  ret i64 %d
+}
+$$;
+
+CREATE FUNCTION par_raise() RETURNS int4
+LANGUAGE plllvm PARALLEL SAFE AS $$
+declare void @plllvm_error(i32, ptr)
+
+@msg = private constant [5 x i8] c"boom\00"
+
+define i64 @f(ptr %fcinfo) {
+  call void @plllvm_error(i32 0, ptr @msg)
+  unreachable
+}
+$$;
+
+SET debug_parallel_query = on;
+EXPLAIN (COSTS OFF) SELECT par_twice(21);
+SELECT par_twice(21);
+-- the error comes from the worker
+SELECT par_raise();
+RESET debug_parallel_query;
+
+DROP FUNCTION par_twice(int4), par_raise();
 DROP FUNCTION add_i4(int4, int4);
 DROP FUNCTION mul_i8(int8, int8);
 DROP FUNCTION half(float8);

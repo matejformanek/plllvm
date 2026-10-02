@@ -5,16 +5,6 @@
 LOAD 'plllvm';
 SET plllvm.regress_test_mode = on;
 
-CREATE FUNCTION err_of(q text) RETURNS text
-LANGUAGE plpgsql AS $$
-BEGIN
-  EXECUTE q;
-  RETURN 'no error';
-EXCEPTION WHEN OTHERS THEN
-  RETURN SQLSTATE || ': ' || SQLERRM;
-END
-$$;
-
 -- int4pl, int4div, int8pl, float8mul and float8div, checks included
 CREATE FUNCTION i4pl_ll(a int4, b int4) RETURNS int4
 LANGUAGE plllvm STRICT AS $$
@@ -182,8 +172,9 @@ LANGUAGE plpgsql STRICT AS $$ BEGIN RETURN a / b; END $$;
 CREATE FUNCTION raise_pl() RETURNS int8
 LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'boom'; END $$;
 
-SELECT q, err_of(format(q, 'll')) AS ll,
-       err_of(format(q, 'll')) = err_of(format(q, 'pl')) AS same
+SELECT q, coalesce(sqlstate_of(format(q, 'll'), true), 'no error') AS ll,
+       sqlstate_of(format(q, 'll'), true) IS NOT DISTINCT FROM
+         sqlstate_of(format(q, 'pl'), true) AS same
   FROM (VALUES ('SELECT i4pl_%s(2147483647, 1)'),
                ('SELECT i4pl_%s(40, 2)'),
                ('SELECT i4div_%s(-2147483648, -1)'),
@@ -209,7 +200,7 @@ define i64 @f(ptr %fcinfo) {
   unreachable
 }
 $$;
-SELECT err_of('SELECT raise0_ll()');
+SELECT sqlstate_of('SELECT raise0_ll()', true);
 DROP FUNCTION raise0_ll();
 
 -- the PL/LLVM frame shows in the context
@@ -374,7 +365,6 @@ SELECT p.proname, s.*
  WHERE p.prolang = (SELECT oid FROM pg_language WHERE lanname = 'plllvm')
  ORDER BY p.proname;
 
-DROP FUNCTION err_of(text);
 DROP FUNCTION i4pl_ll(int4, int4), i4div_ll(int4, int4), i8pl_ll(int8, int8),
   f8mul_ll(float8, float8), f8div_ll(float8, float8), raise_ll();
 DROP FUNCTION i4pl_pl(int4, int4), i4div_pl(int4, int4), i8pl_pl(int8, int8),

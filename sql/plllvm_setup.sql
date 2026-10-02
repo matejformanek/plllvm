@@ -66,6 +66,19 @@ DROP FUNCTION plllvm_fn();
 -- no inline handler
 DO LANGUAGE plllvm $$ $$;  -- fail
 
+-- for the later tests: the SQLSTATE of q, or NULL if q succeeds;
+-- with_message adds the message
+CREATE FUNCTION sqlstate_of(q text, with_message bool DEFAULT false)
+RETURNS text LANGUAGE plpgsql AS $$
+BEGIN
+  EXECUTE q;
+  RETURN NULL;
+EXCEPTION WHEN OTHERS THEN
+  RETURN CASE WHEN with_message THEN SQLSTATE || ': ' || SQLERRM
+              ELSE SQLSTATE END;
+END
+$$;
+
 -- Clean up
 DROP OWNED BY regress_plllvm_user1;
 DROP USER regress_plllvm_user1;

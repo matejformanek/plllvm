@@ -62,16 +62,6 @@ BEGIN
 END
 $$;
 
-CREATE FUNCTION sqlstate_of(q text) RETURNS text
-LANGUAGE plpgsql AS $$
-BEGIN
-  EXECUTE q;
-  RETURN NULL;
-EXCEPTION WHEN OTHERS THEN
-  RETURN SQLSTATE;
-END
-$$;
-
 SELECT s.n, s.m, ledger_ll(s.n, s.m) AS ll, ledger_ll(s.n, s.m) = ledger_pl(s.n, s.m) AS ok
 FROM (SELECT n, m FROM (VALUES (0, 12), (1, 13), (3, 12), (10, 24), (25, 360), (0, NULL)) v(n, m)
       OFFSET 0) s
@@ -93,6 +83,5 @@ WHERE owner = 'ledger_ll(integer,integer)'::regprocedure;
 
 SELECT state FROM plllvm_function_status('ledger_ll(integer,integer)');
 
-DROP FUNCTION sqlstate_of(text);
 DROP FUNCTION ledger_ll(integer, integer);
 DROP FUNCTION ledger_pl(integer, integer);

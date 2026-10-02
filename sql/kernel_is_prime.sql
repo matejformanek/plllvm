@@ -27,16 +27,6 @@ BEGIN
 END
 $$;
 
-CREATE FUNCTION sqlstate_of(q text) RETURNS text
-LANGUAGE plpgsql AS $$
-BEGIN
-  EXECUTE q;
-  RETURN NULL;
-EXCEPTION WHEN OTHERS THEN
-  RETURN SQLSTATE;
-END
-$$;
-
 SELECT s.n, is_prime_ll(s.n) AS ll, is_prime_ll(s.n) = is_prime_pl(s.n) AS ok
 FROM (SELECT n FROM (VALUES (-7), (0), (1), (2), (3), (4), (9), (97),
                             (7917), (7919), (1000003)) v(n)
@@ -56,6 +46,5 @@ SELECT is_prime_ll(20000003);
 
 SELECT state FROM plllvm_function_status('is_prime_ll(integer)');
 
-DROP FUNCTION sqlstate_of(text);
 DROP FUNCTION is_prime_ll(integer);
 DROP FUNCTION is_prime_pl(integer);
