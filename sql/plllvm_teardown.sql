@@ -7,6 +7,7 @@ SELECT ckpt_pid = (SELECT pid FROM pg_stat_activity
   FROM plllvm_fatal_mark;
 DROP TABLE plllvm_fatal_mark;
 
+DROP FUNCTION sqlstate_of(text, bool);
 DROP EXTENSION plllvm;
 
 SELECT count(*) FROM pg_language WHERE lanname = 'plllvm';

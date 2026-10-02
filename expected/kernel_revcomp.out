@@ -80,15 +80,6 @@ BEGIN
   RETURN ngc::text || '/' || md5(array_to_string(outp, E'\n'));
 END
 $$;
-CREATE FUNCTION sqlstate_of(q text) RETURNS text
-LANGUAGE plpgsql AS $$
-BEGIN
-  EXECUTE q;
-  RETURN NULL;
-EXCEPTION WHEN OTHERS THEN
-  RETURN SQLSTATE;
-END
-$$;
 SELECT s.n, revcomp_ll(s.n) AS ll, revcomp_ll(s.n) = revcomp_pl(s.n) AS ok
 FROM (SELECT n FROM (VALUES (1), (2), (10), (101)) v(n) OFFSET 0) s
 ORDER BY s.n;
@@ -118,6 +109,5 @@ SELECT revcomp_ll(20000);
  381350/c0025aad05da86ef4601852167d811c4
 (1 row)
 
-DROP FUNCTION sqlstate_of(text);
 DROP FUNCTION revcomp_ll(integer);
 DROP FUNCTION revcomp_pl(integer);

@@ -8,8 +8,8 @@ EXTENSION = plllvm
 DATA = plllvm--0.1.sql
 PGFILEDESC = "plllvm - PL/LLVM procedural language"
 
-REGRESS = plllvm_setup \
-		plllvm_types \
+# setup, features, kernels (examples/kernels/*.ll), fatal, teardown
+REGRESS_FEATURES = plllvm_types \
 		plllvm_jit \
 		plllvm_basic \
 		plllvm_validator \
@@ -18,24 +18,24 @@ REGRESS = plllvm_setup \
 		plllvm_cache \
 		plllvm_queryjit \
 		plllvm_memory \
-		kernel_loop \
+		plllvm_calls \
+		plllvm_host_api \
+		plllvm_spi \
+		plllvm_array \
+		plllvm_sessions
+REGRESS_KERNELS = kernel_loop \
 		kernel_fib \
 		kernel_is_prime \
 		kernel_mandelbrot \
-		plllvm_calls \
-		plllvm_host_api \
 		kernel_ledger \
-		kernel_text \
-		plllvm_spi \
-		plllvm_array \
+		kernel_wordscan \
 		kernel_lookup \
 		kernel_nbody \
 		kernel_revcomp \
 		kernel_spectralnorm \
 		kernel_rowudf \
-		kernel_ispras \
-		plllvm_fatal \
-		plllvm_teardown
+		kernel_ispras
+REGRESS = plllvm_setup $(REGRESS_FEATURES) $(REGRESS_KERNELS) plllvm_fatal plllvm_teardown
 
 REGRESS_OPTS = --dbname=$(PL_TESTDB)
 
@@ -163,7 +163,7 @@ endif
 endif
 
 .PHONY: port-ok doctor stage cluster-init cluster-start cluster-stop pgindent \
-	installcheck-discard installcheck-hazard check-host-api kernels check-kernels
+	installcheck-discard installcheck-opt installcheck-hazard check-host-api kernels check-kernels
 
 # 5432, 5433 belong to pg-claude, 5444 to the perf cluster
 port-ok:
@@ -213,6 +213,13 @@ cluster-stop:
 installcheck-discard:
 	$(MAKE) installcheck REGRESS='plllvm_setup plllvm_calls plllvm_cache' \
 		PGOPTIONS='-c debug_discard_caches=1'
+
+# the kernels at the other opt levels, against the same expected output
+installcheck-opt:
+	$(MAKE) installcheck REGRESS='plllvm_setup $(REGRESS_KERNELS)' \
+		PGOPTIONS='-c plllvm.opt_level=0'
+	$(MAKE) installcheck REGRESS='plllvm_setup $(REGRESS_KERNELS)' \
+		PGOPTIONS='-c plllvm.opt_level=3'
 
 # tests that crash the server when their fix regresses, so never part of
 # installcheck: only on a throwaway cluster, with PLLLVM_PORT given

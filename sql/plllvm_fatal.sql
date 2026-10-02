@@ -42,6 +42,14 @@ CREATE FUNCTION fatal_f() RETURNS int8 LANGUAGE plllvm
 AS $$ define i64 @f(ptr %fcinfo) { ret i64 0 } $$;
 SELECT compile_injected(:'conn', 'llvm_fatal', 'SELECT fatal_f()');
 
+-- the same with core's llvmjit loaded in the dying session, whose
+-- shutdown then runs after plllvm's FATAL
+SELECT compile_injected(:'conn', 'llvm_fatal', $$
+  SET jit = on;
+  SET jit_above_cost = 0;
+  SELECT sum(x) FROM generate_series(1, 10) x;
+  SELECT ok FROM plllvm_jit_test('define i64 @f(ptr %p) { ret i64 0 }')$$);
+
 -- neither the server nor this session went down
 SELECT pg_postmaster_start_time() = :'start_time' AS no_restart;
 SELECT ok FROM plllvm_jit_test('define i64 @f(ptr %p) { ret i64 0 }');

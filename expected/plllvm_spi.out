@@ -79,15 +79,6 @@ $ir$ || CASE WHEN wrap IS NULL THEN E'  ret i64 %r\n}\n'
   EXECUTE format('CREATE OR REPLACE FUNCTION %s LANGUAGE plllvm AS %L', fn, ir);
 END
 $mk$;
-CREATE FUNCTION sqlstate_of(q text) RETURNS text
-LANGUAGE plpgsql AS $$
-BEGIN
-  EXECUTE q;
-  RETURN NULL;
-EXCEPTION WHEN OTHERS THEN
-  RETURN SQLSTATE;
-END
-$$;
 -- 1. SPI is connected only for a body that declares a plllvm_spi_ function
 CREATE FUNCTION spi_probe0() RETURNS int LANGUAGE plllvm AS $$
 @sql = private constant [9 x i8] c"SELECT 1\00"
@@ -743,5 +734,5 @@ DROP FUNCTION spi_probe0(), spi_probe1(), spi_s(int), spi_n(int), spi_i2(int),
   seen(text), spi_bad(), spi_bad(int), spi_sub(), spi_types(numeric, int),
   spi_div(int), spi_syntax(), fib_spi(int), pl_mid(int), spi_outer(int),
   spi_sleep(), spi_secret_def(), spi_secret_inv(), spi_later(),
-  mk_spi(text, text, text, text, text, bool, text), sqlstate_of(text);
+  mk_spi(text, text, text, text, text, bool, text);
 DROP ROLE regress_plllvm_spi;

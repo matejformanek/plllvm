@@ -8,7 +8,15 @@ CREATE FUNCTION mem_f() RETURNS int8 LANGUAGE plllvm
 AS $$ define i64 @f(ptr %fcinfo) { ret i64 0 } $$;
 SELECT mem_f();
 
-SELECT compiles AS compiles0, rss_bytes AS rss0 FROM plllvm_session_info() \gset
+-- the bytes of plllvm's own memory contexts
+CREATE FUNCTION mem_plllvm_bytes() RETURNS int8 LANGUAGE sql AS $$
+  SELECT sum(total_bytes)::int8 FROM pg_backend_memory_contexts
+   WHERE name LIKE 'plllvm - %' OR name LIKE 'PL/LLVM %'
+$$;
+
+SELECT compiles AS compiles0, mem_plllvm_bytes() AS ctx0,
+       rss_bytes IS NOT NULL AS have_rss, rss_bytes AS rss0
+  FROM plllvm_session_info() \gset
 
 DO $$
 BEGIN
@@ -20,10 +28,20 @@ BEGIN
 END
 $$;
 
--- a threshold for the test only, not a measurement
-SELECT compiles - :compiles0 AS compiles,
-       (rss_bytes - :rss0) / 500 < 262144 AS bounded
+SELECT compiles - :compiles0 AS compiles, mem_plllvm_bytes() = :ctx0 AS flat
   FROM plllvm_session_info();
+
+-- the code itself lies outside the contexts, so where rss_bytes is known
+-- (macOS) it is bounded too; the output is the same where it is not.  A
+-- threshold for the test only, not a measurement.
+\if :have_rss
+SELECT (rss_bytes - :rss0) / 500 < 262144 AS bounded
+  FROM plllvm_session_info() \gset
+\if :bounded
+\else
+\echo 'the RSS grew by 256 kB or more per replace'
+\endif
+\endif
 SELECT mem_f();
 SELECT * FROM plllvm_function_status('mem_f()');
 
@@ -132,6 +150,6 @@ RESET plllvm.max_resident_compiles;
 SELECT mem_c2();
 SELECT * FROM plllvm_function_status('mem_c2()');
 
-DROP FUNCTION mem_f(), mem_s(), mem_q(), mem_q_ir(int), mem_ctx(text),
+DROP FUNCTION mem_f(), mem_plllvm_bytes(), mem_s(), mem_q(), mem_q_ir(int), mem_ctx(text),
   mem_c1(), mem_c2();
 DROP TABLE mem_t;

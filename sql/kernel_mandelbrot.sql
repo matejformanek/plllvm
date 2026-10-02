@@ -46,16 +46,6 @@ BEGIN
 END
 $$;
 
-CREATE FUNCTION sqlstate_of(q text) RETURNS text
-LANGUAGE plpgsql AS $$
-BEGIN
-  EXECUTE q;
-  RETURN NULL;
-EXCEPTION WHEN OTHERS THEN
-  RETURN SQLSTATE;
-END
-$$;
-
 -- same sizes as bench/ctwins/test/sql/mandelbrot.sql
 SELECT s.n, mandelbrot_ll(s.n) AS ll, mandelbrot_ll(s.n) = mandelbrot_pl(s.n) AS ok
 FROM (SELECT n FROM (VALUES (-3), (0), (1), (2), (7), (50), (101)) v(n)
@@ -76,6 +66,5 @@ SELECT mandelbrot_ll(440);
 
 SELECT state FROM plllvm_function_status('mandelbrot_ll(integer)');
 
-DROP FUNCTION sqlstate_of(text);
 DROP FUNCTION mandelbrot_ll(integer);
 DROP FUNCTION mandelbrot_pl(integer);

@@ -15,3 +15,19 @@ plllvm_calls does not.
 make installcheck-discard runs only the tests above.  plllvm_spi would not
 fit there: its statements are replanned at every execution, and its
 2000-call cases take minutes.
+
+Test names: plllvm_<feature> for a feature of the extension, and
+kernel_<name> for examples/kernels/<name>.ll against its PL/pgSQL original.
+A test of several .ll files, or of one whose name is generic, takes the name
+of its bench kernel instead: kernel_rowudf (line_net.ll, 43_rowudf.sql) and
+kernel_ispras (gt, inc, sumn.ll, 60_ispras2020.sql).
+
+plllvm_setup creates sqlstate_of(q [, with_message]), which the later tests
+share and plllvm_teardown drops.
+
+make installcheck-opt runs the kernel tests at plllvm.opt_level 0 and 3,
+against the same expected output.  It omits plllvm_teardown on purpose:
+pg_regress recreates the database at every run.
+
+plllvm_basic and plllvm_sessions assume that a parallel worker can start and
+that dblink is installed.
