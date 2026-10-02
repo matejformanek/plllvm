@@ -14,9 +14,13 @@
  *    or forget one that is still running, so the entry only points at a
  *    record owned by plllvm_jit.c, and retiring just marks it.
  *
- * 2) A retired entry gets an invalid fn_xmin, so that it never revalidates.
- *    If the same call site calls again after a replace made during its own
- *    call, core funccache warns about a duplicate insert.
+ * 2) funccache reuses an entry found through fn_extra without looking at
+ *    its hash table again, also one it forgot while a call ran it (after a
+ *    replace made during that call).  A compile into it would insert a
+ *    second entry under the key of the one that replaced it, so such an
+ *    entry is looked up by its key instead.  A retired entry also gets an
+ *    invalid fn_xmin, the second guard: if the replace rolls back, the
+ *    entry must not match pg_proc again.
  *
  * 3) The validator never goes through funccache.
  *
@@ -56,10 +60,15 @@ static int	char_position(const char *src, int line, int col);
 plllvm_function *
 plllvm_compile_get(FunctionCallInfo fcinfo)
 {
+	CachedFunction *cfunc = (CachedFunction *) fcinfo->flinfo->fn_extra;
 	plllvm_function *func;
 
+	/* forgotten by funccache (note 2) */
+	if (cfunc != NULL && cfunc->fn_hashkey == NULL)
+		cfunc = NULL;
+
 	func = (plllvm_function *)
-		cached_function_compile(fcinfo, fcinfo->flinfo->fn_extra,
+		cached_function_compile(fcinfo, cfunc,
 								compile_callback, delete_callback,
 								sizeof(plllvm_function), false, false);
 	Assert(func->magic == PLLLVM_FN_MAGIC);
@@ -171,7 +180,7 @@ plllvm_compile_unpin(plllvm_function *func)
 
 	if (func->cfunc.use_count == 0 && func->cfunc.fn_hashkey == NULL)
 	{
-		/* the replace may roll back; never let a retired entry revalidate */
+		/* the second guard of note 2 */
 		func->cfunc.fn_xmin = InvalidTransactionId;
 		delete_callback(&func->cfunc);
 	}

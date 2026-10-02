@@ -84,18 +84,21 @@ $$;
 
 The names are resolved under the function's own `SET search_path`, else
 under `pg_catalog, <its schema>, pg_temp`, never under the caller's path.
-A site is then bound to the callee's OID for the session, with the
-executor's protocol: a strict callee is not called with a NULL argument,
-`EXECUTE` is checked, and an `ALTER`, `GRANT` or role change is seen at the
-next call. A dropped callee is looked up again by its signature. A body
-that uses calls, text or memory helpers runs in a scratch context; a
-by-reference result is copied out of it.
+A site calls with the executor's protocol: a strict callee is not called
+with a NULL argument, `EXECUTE` is checked, and an `ALTER`, `GRANT` or role
+change is seen at the next call. Like a cached plan, a site follows its
+name: after any change of the callee or of a schema, the signature is
+resolved again, and a callee of other argument or result types is an
+ERROR. A body that uses calls, text or memory helpers runs in a scratch
+context; a by-reference result is copied out of it, and must not be a
+null pointer.
 
 A body that declares `plllvm_spi_prepare` runs SQL. A statement lives in a
 slot, an `internal global ptr null` of the body, and is prepared at its
-first use in a backend; its argument and column types are type names. It
-must be one plain SELECT, without `FOR UPDATE` or data-modifying `WITH` at
-the top level; the functions it calls are not restricted. It runs
+first use in a backend; its argument and column types are type names,
+without type modifiers (cast in the statement instead). It must be one
+plain SELECT, without `FOR UPDATE` or data-modifying `WITH` at the top
+level; the functions it calls are not restricted. It runs
 read-only unless the function is VOLATILE, as in PL/pgSQL.
 `plllvm_spi_select_into` runs it as a non-STRICT `SELECT INTO`: the first
 row, or NULLs. A result of other column types than declared is an ERROR.

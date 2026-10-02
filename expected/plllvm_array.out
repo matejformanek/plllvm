@@ -221,7 +221,7 @@ SELECT frame FROM plllvm_code_cache() WHERE owner_oid = 'f8_seq_frame(int)'::reg
 (1 row)
 
 SELECT f8_seq(-1);  -- fail
-ERROR:  array size exceeds the maximum allowed (134217727)
+ERROR:  PL/LLVM array length must not be negative
 CONTEXT:  PL/LLVM function "f8_seq"
 CREATE FUNCTION new_text() RETURNS int LANGUAGE plllvm AS $$
 declare ptr @plllvm_array_new(i32, i32)

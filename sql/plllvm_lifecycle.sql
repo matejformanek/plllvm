@@ -201,6 +201,39 @@ $$;
 SELECT lc_f(i) FROM generate_series(1, 3) i;
 SELECT * FROM plllvm_function_status('lc_f(int4)');
 
+-- replaced through SPI and the new code called there: funccache forgets
+-- the entry of the running call, and the next row of the same call site
+-- uses the new entry instead of compiling next to it
+CREATE FUNCTION lc_dup_body(r int) RETURNS void LANGUAGE plpgsql AS $q$
+BEGIN
+  EXECUTE format('CREATE OR REPLACE FUNCTION lc_dup(n int4) RETURNS int8
+    LANGUAGE plllvm STRICT AS %L', $ir$
+declare i32 @plllvm_arg_i32(ptr, i32)
+declare i32 @SPI_connect()
+declare i32 @SPI_exec(ptr, i64)
+declare i32 @SPI_finish()
+
+@q = private constant [33 x i8] c"SELECT lc_dup_body(2), lc_dup(0)\00"
+
+define i64 @f(ptr %fcinfo) {
+entry:
+  %n = call i32 @plllvm_arg_i32(ptr %fcinfo, i32 0)
+  %spi = icmp eq i32 %n, 1
+  br i1 %spi, label %reenter, label %done
+reenter:
+  call i32 @SPI_connect()
+  call i32 @SPI_exec(ptr @q, i64 0)
+  call i32 @SPI_finish()
+  br label %done
+done:
+  ret i64 $ir$ || r || E'\n}');
+END
+$q$;
+
+SELECT lc_dup_body(1);
+SELECT n, lc_dup(n) FROM (VALUES (1), (0), (1), (0)) v(n);
+SELECT * FROM plllvm_function_status('lc_dup(int4)');
+
 -- a function that drops itself while it runs: its code is retired in the
 -- next transaction
 CREATE FUNCTION lc_dropper() RETURNS int8 LANGUAGE plpgsql AS $$
@@ -236,5 +269,6 @@ SELECT * FROM plllvm_function_status(:'oid');
 SELECT lc_rb();
 
 DROP FUNCTION lc_cyc(), lc_lang(), lc_prep(), lc_rec(int4), lc_rec2(int4),
-  lc_f(int4), lc_rb(), lc_dropper();
-DROP FUNCTION lc_replace_and_call(), lc_replace_and_undo(), lc_replace();
+  lc_f(int4), lc_dup(int4), lc_rb(), lc_dropper();
+DROP FUNCTION lc_replace_and_call(), lc_replace_and_undo(), lc_replace(),
+  lc_dup_body(int);

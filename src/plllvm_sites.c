@@ -10,11 +10,11 @@
  *
  * Notes:
  *
- * 1) Names resolve once per compile, under the function's own search_path,
- *    else "pg_catalog, <its schema>, pg_temp", never under the caller's:
- *    a pooled session must not bind one client's function for another.  A
- *    site is then bound by OID for the session; when its callee is gone,
- *    the signature is resolved again under the same path.
+ * 1) Names resolve under the function's own search_path, else
+ *    "pg_catalog, <its schema>, pg_temp", never under the caller's: a pooled
+ *    session must not bind one client's function for another.  The path is
+ *    fixed at the compile.  As a cached plan, a site follows the name: it is
+ *    resolved again whenever its callee or any schema changes.
  *
  * 2) The fast path of a call is inline in the code (plllvm_types.c).  This
  *    file has the rest: building the FmgrInfo, the EXECUTE check, calls
@@ -78,6 +78,8 @@ static dlist_head published = DLIST_STATIC_INIT(published);
 
 static void procoid_callback(Datum arg, SysCacheIdentifier cacheid,
 							 uint32 hashvalue);
+static void namespace_callback(Datum arg, SysCacheIdentifier cacheid,
+							   uint32 hashvalue);
 static void role_callback(Datum arg, SysCacheIdentifier cacheid,
 						  uint32 hashvalue);
 static void ref_error_callback(void *arg);
@@ -103,13 +105,14 @@ plllvm_sites_init(void)
 
 	/* role membership, superuser and pg_database_owner decide EXECUTE */
 	CacheRegisterSyscacheCallback(PROCOID, procoid_callback, (Datum) 0);
+	CacheRegisterSyscacheCallback(NAMESPACEOID, namespace_callback, (Datum) 0);
 	CacheRegisterSyscacheCallback(AUTHMEMROLEMEM, role_callback, (Datum) 0);
 	CacheRegisterSyscacheCallback(AUTHOID, role_callback, (Datum) 0);
 	CacheRegisterSyscacheCallback(DATABASEOID, role_callback, (Datum) 0);
 }
 
 /*
- * Neither callback may allocate or fail
+ * No callback may allocate or fail
  */
 static void
 procoid_callback(Datum arg, SysCacheIdentifier cacheid, uint32 hashvalue)
@@ -125,6 +128,16 @@ procoid_callback(Datum arg, SysCacheIdentifier cacheid, uint32 hashvalue)
 	}
 
 	plllvm_jit_owner_inval(hashvalue);
+}
+
+/* a renamed or dropped schema may change what any name resolves to */
+static void
+namespace_callback(Datum arg, SysCacheIdentifier cacheid, uint32 hashvalue)
+{
+	dlist_iter	iter;
+
+	dlist_foreach(iter, &published)
+		dlist_container(plllvm_site, node, iter.cur)->ready = false;
 }
 
 static void
@@ -570,33 +583,15 @@ plllvm_rt_site_null(plllvm_site *site)
 }
 
 /*
- * The OID the site's signature stands for now: the bound one while its row
- * has the compiled types, else the signature resolved again
+ * The OID the site's signature stands for now, under the module's path
  */
 static Oid
 site_lookup(plllvm_site *site)
 {
 	HeapTuple	tup;
 	Form_pg_proc proc;
-	Oid			fn_oid = site->fn_oid;
+	Oid			fn_oid;
 	int			level;
-
-	tup = SearchSysCache1(PROCOID, ObjectIdGetDatum(fn_oid));
-	if (HeapTupleIsValid(tup))
-	{
-		proc = (Form_pg_proc) GETSTRUCT(tup);
-		if (proc->pronargs == site->nargs &&
-			proc->prorettype == site->rettype &&
-			memcmp(proc->proargtypes.values, site->argtypes,
-				   site->nargs * sizeof(Oid)) == 0)
-		{
-			/* a reused OID may now be a procedure or return a set */
-			callee_check(fn_oid, proc);
-			ReleaseSysCache(tup);
-			return fn_oid;
-		}
-		ReleaseSysCache(tup);
-	}
 
 	level = path_set(site->search_path);
 	fn_oid = DatumGetObjectId(DirectFunctionCall1(regprocedurein,
@@ -610,11 +605,18 @@ site_lookup(plllvm_site *site)
 
 	callee_check(fn_oid, proc);
 
-	/* the code was compiled for the old result type */
+	/* the code was compiled for the old types */
 	if (proc->prorettype != site->rettype)
 		ereport(ERROR,
 				(errcode(ERRCODE_DATATYPE_MISMATCH),
 				 errmsg("return type of function %s has changed",
+						site->signature),
+				 errhint("Replace the calling PL/LLVM function.")));
+	if (memcmp(proc->proargtypes.values, site->argtypes,
+			   site->nargs * sizeof(Oid)) != 0)
+		ereport(ERROR,
+				(errcode(ERRCODE_DATATYPE_MISMATCH),
+				 errmsg("argument types of function %s have changed",
 						site->signature),
 				 errhint("Replace the calling PL/LLVM function.")));
 

@@ -90,8 +90,8 @@ FROM generate_series(1, 40) g;
  40
 (1 row)
 
--- NULL n fails in array_fill (22004), a negative one there too (54000),
--- 0 at vbv / vv (22012)
+-- NULL n fails in array_fill (22004); a negative one in array_fill (54000)
+-- and in plllvm_array_new (22023); 0 at vbv / vv (22012)
 SELECT s.n,
        sqlstate_of(format('SELECT spectralnorm_ll(n) FROM (SELECT %L::int AS n OFFSET 0) s', s.n)) AS ll,
        sqlstate_of(format('SELECT spectralnorm_pl(n) FROM (SELECT %L::int AS n OFFSET 0) s', s.n)) AS pl
@@ -99,7 +99,7 @@ FROM (VALUES (NULL::int), (-1), (0)) s(n);
  n  |  ll   |  pl   
 ----+-------+-------
     | 22004 | 22004
- -1 | 54000 | 54000
+ -1 | 22023 | 54000
   0 | 22012 | 22012
 (3 rows)
 
