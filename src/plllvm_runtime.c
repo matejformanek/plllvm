@@ -208,7 +208,8 @@ plllvm_array_arg(FunctionCallInfo fcinfo, int32 argno, Oid elemtype)
 	if (fcinfo->args[argno].isnull)
 		ereport(ERROR,
 				(errcode(ERRCODE_NULL_VALUE_NOT_ALLOWED),
-				 errmsg("PL/LLVM array argument %d is null", argno + 1)));
+				 errmsg("argument %d read by \"plllvm_array_arg\" is null", argno),
+				 errdetail("Arguments are numbered from 0.")));
 
 	a = DatumGetArrayTypePCopy(fcinfo->args[argno].value);
 	array_check(a, elemtype);

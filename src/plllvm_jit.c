@@ -255,7 +255,7 @@ plllvm_jit_session_ensure(void)
 	if (stat(path, &st) == 0 && !S_ISREG(st.st_mode))
 		ereport(ERROR,
 				(errcode(ERRCODE_UNDEFINED_FILE),
-				 errmsg("PL/LLVM types file \"%s\" is not a regular file",
+				 errmsg("plllvm types file \"%s\" is not a regular file",
 						plllvm_display_path(path)),
 				 errhint("Check the installation of the plllvm extension, or set plllvm.types_bc_path.")));
 
@@ -328,20 +328,20 @@ plllvm_jit_session_ensure(void)
 		if (open_error != NULL)
 			ereport(ERROR,
 					(errcode(ERRCODE_UNDEFINED_FILE),
-					 errmsg("could not open PL/LLVM types file \"%s\": %s",
+					 errmsg("could not open plllvm types file \"%s\": %s",
 							plllvm_display_path(path), open_error),
 					 errhint("Check the installation of the plllvm extension, or set plllvm.types_bc_path.")));
 		else if (parse_failed)
 			ereport(ERROR,
 					(errcode(ERRCODE_INTERNAL_ERROR),
-					 errmsg("could not parse PL/LLVM types file \"%s\"",
+					 errmsg("could not parse plllvm types file \"%s\"",
 							plllvm_display_path(path)),
 					 parse_error ? errdetail("%s", parse_error) : 0,
 					 errhint("Rebuild and reinstall the plllvm extension.")));
 		else if (incompatible != NULL)
 			ereport(ERROR,
 					(errcode(ERRCODE_INTERNAL_ERROR),
-					 errmsg("incompatible PL/LLVM types file \"%s\"",
+					 errmsg("incompatible plllvm types file \"%s\"",
 							plllvm_display_path(path)),
 					 errdetail("%s", incompatible),
 					 errhint("Rebuild and reinstall the plllvm extension.")));
