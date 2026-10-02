@@ -36,7 +36,7 @@
 #include "utils/float.h"
 #include "varatt.h"
 
-#include "plllvm.h"
+#include "plllvm_host.h"
 
 const uint32 plllvm_types_version = PLLLVM_TYPES_VERSION;
 const uint32 plllvm_types_llvm_major = __clang_major__;

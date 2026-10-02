@@ -88,24 +88,24 @@ ifdef PG_SYSROOT
 PLLLVM_BCFLAGS += -isysroot $(PG_SYSROOT)
 endif
 
-# the .bc and plllvm_jit.o must come from the same sources (see plllvm.h)
-PLLLVM_TYPES_VERSION := $(shell cat src/plllvm_types.c src/plllvm.h | cksum | cut -d' ' -f1)
+# the .bc and plllvm_jit.o must come from the same sources (see plllvm_host.h)
+PLLLVM_TYPES_VERSION := $(shell cat src/plllvm_types.c src/plllvm_host.h | cksum | cut -d' ' -f1)
 
 all: src/plllvm_types.bc
 
-src/plllvm_types.bc: src/plllvm_types.c src/plllvm.h
+src/plllvm_types.bc: src/plllvm_types.c src/plllvm_host.h
 	$(PLLLVM_CLANG) $(PLLLVM_BCFLAGS) $(CPPFLAGS) \
 		-DPLLLVM_TYPES_VERSION=$(PLLLVM_TYPES_VERSION)U -c -o $@ $<
 
 # PGXS sets CPPFLAGS with override, so a plain += would be ignored
 src/plllvm_jit.o: override CPPFLAGS += -DPLLLVM_TYPES_VERSION=$(PLLLVM_TYPES_VERSION)U
-src/plllvm_jit.o: src/plllvm_types.c
+src/plllvm_jit.o: src/plllvm_types.c src/plllvm_host.h
 
 # the .bc of slightly different sources, for the plllvm_types test
-src/plllvm_types_stale.bc: src/plllvm_types.c src/plllvm.h
+src/plllvm_types_stale.bc: src/plllvm_types.c src/plllvm_host.h
 	{ cat $<; echo '/* stale */'; } > $@.tmp
 	$(PLLLVM_CLANG) $(PLLLVM_BCFLAGS) $(CPPFLAGS) -Isrc \
-		-DPLLLVM_TYPES_VERSION=`cat $@.tmp src/plllvm.h | cksum | cut -d' ' -f1`U \
+		-DPLLLVM_TYPES_VERSION=`cat $@.tmp src/plllvm_host.h | cksum | cut -d' ' -f1`U \
 		-x c -c -o $@ $@.tmp
 	rm -f $@.tmp
 

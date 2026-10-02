@@ -75,7 +75,7 @@
 #error "plllvm requires LLVM 22 or later"
 #endif
 
-/* the Makefile sets it, see plllvm.h */
+/* the Makefile sets it, see plllvm_host.h */
 #ifndef PLLLVM_TYPES_VERSION
 #error "PLLLVM_TYPES_VERSION is not defined"
 #endif
