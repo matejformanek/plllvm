@@ -2,12 +2,13 @@
 ;
 ; Every function a PL/LLVM body may declare, with the types the compiler
 ; checks the declarations against.  Datums are i64, C bool is i1.  The
-; inline helpers come from src/plllvm_types.c, the rest from
-; src/plllvm_runtime.c.  Other external symbols resolve against the server.
+; inline helpers are defined in src/plllvm_types.c, the others in
+; src/plllvm_runtime.c, plllvm_sites.c and plllvm_spi.c.  Other external
+; symbols resolve against the server.
 ;
 ; This file is a valid body: sql/plllvm_host_api.sql compiles it.
 
-; --- arguments and result (v0.1a) -------------------------------------------
+; --- arguments and result --------------------------------------------------
 
 ; is argument n NULL
 declare i1 @plllvm_arg_isnull(ptr %fcinfo, i32 %n)
@@ -21,7 +22,7 @@ declare i32 @plllvm_nargs(ptr %fcinfo)
 ; sets the result NULL; return its value from @f
 declare i64 @plllvm_return_null(ptr %fcinfo)
 
-; --- errors and interrupts (v0.1a) ------------------------------------------
+; --- errors and interrupts -------------------------------------------------
 
 ; ERROR with a SQLSTATE packed as MAKE_SQLSTATE and a message; 0 is P0001
 declare void @plllvm_error(i32 %sqlstate, ptr %msg)
@@ -37,7 +38,7 @@ declare void @plllvm_rt_div_zero()
 declare void @plllvm_cfi()
 declare void @plllvm_check_stack()
 
-; --- calls of other functions (v0.1b) ---------------------------------------
+; --- calls of other functions ----------------------------------------------
 ;
 ; A call site is a declared global named by the callee's regprocedure text,
 ; resolved under the function's own search_path, else
@@ -63,7 +64,7 @@ declare i64 @plllvm_call3(ptr %site, i64 %a0, i1 %n0, i64 %a1, i1 %n1, i64 %a2, 
 
 declare i64 @plllvm_const(ptr %k)
 
-; --- text and varlena (v0.1b) -----------------------------------------------
+; --- text and varlena ------------------------------------------------------
 
 ; text from a C string, which must be valid in the server encoding, and back
 declare i64 @plllvm_cstring_to_text(ptr %s)
@@ -73,7 +74,7 @@ declare i64 @plllvm_detoast(i64 %v)
 declare ptr @plllvm_vardata_any(i64 %v)
 declare i32 @plllvm_varsize_any_exhdr(i64 %v)
 
-; --- memory (v0.1b) ----------------------------------------------------------
+; --- memory ----------------------------------------------------------------
 ;
 ; A body that declares a call, text or memory helper (all above except
 ; @plllvm_const, @plllvm_vardata_any and @plllvm_varsize_any_exhdr) runs in
@@ -87,15 +88,15 @@ declare void @plllvm_free(i64 %v)
 ; frees everything allocated in the scratch so far
 declare void @plllvm_scratch_reset()
 
-; --- SQL statements (v0.1c) --------------------------------------------------
+; --- SQL statements --------------------------------------------------------
 ;
 ; A body that declares a @plllvm_spi_ function runs connected to SPI, in a
 ; frame.  A statement is one plain SELECT; the functions it calls are not
 ; restricted.  It runs read-only unless the function is VOLATILE, as in
 ; PL/pgSQL.  The slot is an internal global ptr, null at first:
 ; @plllvm_spi_prepare fills it on the first call in a backend.  The types
-; are comma-separated names, as in "numeric(5,2), int4"; the result must
-; have the declared column types.  NullableDatum is { i64, i8 },
+; are comma-separated names without type modifiers, as in "numeric, int4";
+; the result must have the declared column types.  NullableDatum is { i64, i8 },
 ; %struct.NullableDatum of plllvm_types.bc.
 
 ; (slot, sql, argtypes, coltypes) -> statement; each statement has a slot
@@ -107,7 +108,7 @@ declare ptr @plllvm_spi_prepare(ptr %slot, ptr %sql, ptr %argtypes, ptr %coltype
 ; @plllvm_keep: free them with @plllvm_free.
 declare i32 @plllvm_spi_select_into(ptr %fcinfo, ptr %stmt, ptr %args, ptr %out)
 
-; --- arrays (v0.1c) ----------------------------------------------------------
+; --- arrays ----------------------------------------------------------------
 ;
 ; Flat one-dimensional (or empty) arrays of int4, int8 or float8 (element
 ; type OIDs 23, 20, 701), without NULL elements, allocated in the current
