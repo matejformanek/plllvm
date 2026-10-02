@@ -29,9 +29,9 @@ CREATE FUNCTION plllvm_code_cache()
   RETURNS TABLE(owner_oid regprocedure, symbol text, gen int8, opt_level int4,
                 ir_instructions int4, helpers_linked int4, cfi_left int4,
                 parse_bc_ms float8, parse_ms float8, link_ms float8,
-                verify_ms float8, optimize_ms float8, emit_ms float8,
-                total_ms float8, retired bool, code_addr text,
-                resolve_ms float8, frame bool)
+                verify_ms float8, resolve_ms float8, optimize_ms float8,
+                emit_ms float8, total_ms float8, retired bool,
+                code_addr text, frame bool)
   LANGUAGE c AS 'MODULE_PATHNAME';
 
 REVOKE ALL ON FUNCTION plllvm_code_cache() FROM PUBLIC;
