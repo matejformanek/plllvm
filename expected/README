@@ -26,7 +26,8 @@ plllvm_setup creates sqlstate_of(q [, with_message]), which the later tests
 share and plllvm_teardown drops.
 
 make installcheck-opt runs the kernel tests at plllvm.opt_level 0 and 3,
-against the same expected output.
+against the same expected output.  It omits plllvm_teardown on purpose:
+pg_regress recreates the database at every run.
 
 plllvm_basic and plllvm_sessions assume that a parallel worker can start and
 that dblink is installed.
