@@ -65,7 +65,7 @@ declare i64 @plllvm_const(ptr %k)
 
 ; --- text and varlena (v0.1b) -----------------------------------------------
 
-; text from a C string, and back
+; text from a C string, which must be valid in the server encoding, and back
 declare i64 @plllvm_cstring_to_text(ptr %s)
 declare ptr @plllvm_text_to_cstring(i64 %t)
 ; detoasted value; data and size of a detoasted value
@@ -82,7 +82,7 @@ declare i32 @plllvm_varsize_any_exhdr(i64 %v)
 
 ; copy of a varlena in the caller's context, which outlives the scratch
 declare i64 @plllvm_keep(i64 %v)
-; pfree of a value from @plllvm_keep
+; pfree of a value from @plllvm_keep; nothing for 0 (a NULL column)
 declare void @plllvm_free(i64 %v)
 ; frees everything allocated in the scratch so far
 declare void @plllvm_scratch_reset()
@@ -118,7 +118,7 @@ declare i32 @plllvm_spi_select_into(ptr %fcinfo, ptr %stmt, ptr %args, ptr %out)
 ; argument n as an array of the element type: a private copy, which
 ; @plllvm_array_set_* may change.  It is made at each call.
 declare ptr @plllvm_array_arg(ptr %fcinfo, i32 %n, i32 %elemtype)
-; n zeros, lower bound 1
+; n zeros, lower bound 1; n must not be negative
 declare ptr @plllvm_array_new(i32 %elemtype, i32 %n)
 ; copy of an array, also of one a call returned
 declare ptr @plllvm_array_copy(ptr %a)

@@ -30,6 +30,7 @@
 
 #include "catalog/pg_type_d.h"
 #include "fmgr.h"
+#include "mb/pg_wchar.h"
 #include "miscadmin.h"
 #include "utils/builtins.h"
 #include "utils/float.h"
@@ -220,10 +221,15 @@ plllvm_const(const void *k)
 	return *(const Datum *) k;
 }
 
+/* unlike cstring_to_text(), checks the encoding: IR may build any bytes */
 pg_always_inline Datum
 plllvm_cstring_to_text(const char *s)
 {
-	return PointerGetDatum(cstring_to_text(s));
+	int			len = strlen(s);
+
+	(void) pg_verifymbstr(s, len, false);
+
+	return PointerGetDatum(cstring_to_text_with_len(s, len));
 }
 
 pg_always_inline char *
@@ -251,11 +257,12 @@ plllvm_varsize_any_exhdr(Datum v)
 	return (int32) VARSIZE_ANY_EXHDR(DatumGetPointer(v));
 }
 
-/* of a value from plllvm_keep() */
+/* of a value from plllvm_keep(), or of a NULL column (0) */
 pg_always_inline void
 plllvm_free(Datum v)
 {
-	pfree(DatumGetPointer(v));
+	if (DatumGetPointer(v) != NULL)
+		pfree(DatumGetPointer(v));
 }
 
 /*

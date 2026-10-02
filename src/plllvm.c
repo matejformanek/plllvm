@@ -232,9 +232,16 @@ plllvm_call_handler(PG_FUNCTION_ARGS)
 	{
 		retval = func->addr(fcinfo);
 		if (!func->rettypbyval && !fcinfo->isnull)
+		{
+			if (DatumGetPointer(retval) == NULL)
+				ereport(ERROR,
+						(errcode(ERRCODE_NULL_VALUE_NOT_ALLOWED),
+						 errmsg("PL/LLVM function returned a null pointer as its result"),
+						 errhint("Return NULL with plllvm_return_null().")));
 			retval = func->needs_frame ?
 				plllvm_frame_copy_out(&frame, retval, func->rettyplen) :
 				datumCopy(retval, false, func->rettyplen);
+		}
 	}
 	PG_CATCH();
 	{

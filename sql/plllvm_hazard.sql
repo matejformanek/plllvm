@@ -1,0 +1,60 @@
+--
+-- Tests that crash the server when their fix regresses (installcheck-hazard,
+-- on a throwaway cluster only)
+--
+LOAD 'plllvm';
+SET plllvm.regress_test_mode = on;
+
+-- a by-reference result that is a null pointer, not a NULL
+CREATE FUNCTION hz_upper(t text) RETURNS text LANGUAGE plllvm AS $$
+@"upper(text)" = external global i8
+declare i64 @plllvm_arg_i64(ptr, i32)
+declare i1 @plllvm_arg_isnull(ptr, i32)
+declare i64 @plllvm_call1(ptr, i64, i1, ptr)
+define i64 @f(ptr %fcinfo) {
+  %isnull = alloca i1
+  %t = call i64 @plllvm_arg_i64(ptr %fcinfo, i32 0)
+  %n = call i1 @plllvm_arg_isnull(ptr %fcinfo, i32 0)
+  %r = call i64 @plllvm_call1(ptr @"upper(text)", i64 %t, i1 %n, ptr %isnull)
+  ret i64 %r
+}
+$$;
+SELECT hz_upper('a');
+SELECT hz_upper(NULL);  -- fail
+
+-- without a frame
+CREATE FUNCTION hz_zero() RETURNS text LANGUAGE plllvm AS $$
+define i64 @f(ptr %fcinfo) {
+  ret i64 0
+}
+$$;
+SELECT hz_zero();  -- fail
+
+-- plllvm_free of a NULL column
+CREATE TABLE hz_t (i int, s text);
+INSERT INTO hz_t VALUES (1, 'one');
+CREATE FUNCTION hz_free(i int) RETURNS int LANGUAGE plllvm STRICT STABLE AS $$
+@q.sql = private constant [32 x i8] c"SELECT s FROM hz_t WHERE i = $1\00"
+@q.args = private constant [5 x i8] c"int4\00"
+@q.cols = private constant [5 x i8] c"text\00"
+@q = internal global ptr null
+%struct.NullableDatum = type { i64, i8 }
+declare ptr @plllvm_spi_prepare(ptr, ptr, ptr, ptr)
+declare i32 @plllvm_spi_select_into(ptr, ptr, ptr, ptr)
+declare i64 @plllvm_arg_i64(ptr, i32)
+declare void @plllvm_free(i64)
+define i64 @f(ptr %fcinfo) {
+  %args = alloca %struct.NullableDatum
+  %out = alloca %struct.NullableDatum
+  %i = call i64 @plllvm_arg_i64(ptr %fcinfo, i32 0)
+  store %struct.NullableDatum zeroinitializer, ptr %args
+  store i64 %i, ptr %args
+  %stmt = call ptr @plllvm_spi_prepare(ptr @q, ptr @q.sql, ptr @q.args, ptr @q.cols)
+  %rows = call i32 @plllvm_spi_select_into(ptr %fcinfo, ptr %stmt, ptr %args, ptr %out)
+  %v = load i64, ptr %out
+  call void @plllvm_free(i64 %v)
+  %r = sext i32 %rows to i64
+  ret i64 %r
+}
+$$;
+SELECT hz_free(1), hz_free(2);

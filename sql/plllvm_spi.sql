@@ -227,11 +227,20 @@ SELECT spi_sub();
 SELECT mk_spi('spi_sub() RETURNS int STABLE',
               'SELECT i FROM (SELECT i FROM spi_t WHERE i = 1 FOR UPDATE) s', '', 'int4');
 SELECT spi_sub();  -- fail
+-- no typmods: they would not be applied
 SELECT mk_spi('spi_types(a numeric, b int) RETURNS numeric STABLE',
               'SELECT $1 + $2', 'numeric(5,2), int4', 'numeric');
-SELECT spi_types(1.25, 2);
+SELECT spi_types(1.25, 2);  -- fail
+SELECT mk_spi('spi_types(a numeric, b int) RETURNS numeric STABLE',
+              'SELECT $1 + $2', 'numeric, int4', 'varchar(3)');
+SELECT spi_types(1.25, 2);  -- fail
+SELECT mk_spi('spi_types(a numeric, b int) RETURNS numeric STABLE',
+              'SELECT $1::numeric(5,2) + $2', 'numeric, int4', 'numeric');
+SELECT spi_types(1.255, 2);
 SELECT mk_spi('spi_bad() RETURNS int STABLE', 'SELECT 1', '', 'nosuchtype');
 SELECT spi_bad();  -- fail
+SELECT mk_spi('spi_bad(a int) RETURNS int STABLE', 'SELECT $1', 'int4, numeric(5,2', 'int4');
+SELECT spi_bad(1);  -- fail
 SELECT mk_spi('spi_bad(a int) RETURNS int STABLE', 'SELECT $2', 'int4', 'int4');
 SELECT spi_bad(1);  -- fail
 SELECT mk_spi('spi_bad() RETURNS int STABLE', 'SELECT 1, 2', '', 'int4');

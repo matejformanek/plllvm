@@ -51,6 +51,7 @@ static int64 n_statements = 0;
 
 static void stmt_error_callback(void *arg);
 static List *type_list(const char *types);
+static void type_error_callback(void *arg);
 static void check_plain_select(SPIPlanPtr plan, const char *sql);
 static void check_result(List *coltypes, TupleDesc tupdesc, const char *sql);
 
@@ -210,8 +211,9 @@ stmt_error_callback(void *arg)
 }
 
 /*
- * The OIDs of a comma-separated list of type names; commas inside
- * parentheses, as in numeric(5,2), do not separate
+ * The OIDs of a comma-separated list of type names.  Commas inside
+ * parentheses do not separate, so that numeric(5,2) is refused as one name:
+ * a typmod would not be applied to the values.
  */
 static List *
 type_list(const char *types)
@@ -226,6 +228,7 @@ type_list(const char *types)
 		char	   *name;
 		Oid			typid;
 		int32		typmod;
+		ErrorContextCallback errcallback;
 
 		while (*p != '\0' && (*p != ',' || depth > 0))
 		{
@@ -237,7 +240,17 @@ type_list(const char *types)
 		}
 
 		name = pnstrdup(start, p - start);
+		errcallback.callback = type_error_callback;
+		errcallback.arg = name;
+		errcallback.previous = error_context_stack;
+		error_context_stack = &errcallback;
 		parseTypeString(name, &typid, &typmod, NULL);
+		error_context_stack = errcallback.previous;
+		if (typmod != -1)
+			ereport(ERROR,
+					(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+					 errmsg("PL/LLVM statement types cannot have type modifiers"),
+					 errhint("Cast in the statement, e.g. $1::numeric(5,2).")));
 		result = lappend_oid(result, typid);
 		pfree(name);
 
@@ -246,6 +259,20 @@ type_list(const char *types)
 	}
 
 	return result;
+}
+
+/* a syntax error points into the type name, not into the caller's query */
+static void
+type_error_callback(void *arg)
+{
+	int			pos = geterrposition();
+
+	if (pos > 0)
+	{
+		errposition(0);
+		internalerrposition(pos);
+		internalerrquery((const char *) arg);
+	}
 }
 
 /*

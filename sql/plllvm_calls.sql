@@ -241,16 +241,42 @@ SELECT c_priv(4);
 RESET ROLE;
 SELECT c_priv(4);
 
--- 10. sites are bound by OID: a renamed callee is still called, a new
--- compile does not find it
+-- 10. sites follow names, as cached plans do: after a rename of the callee
+-- or of any schema, the signature is resolved again
 CREATE FUNCTION rn(x int) RETURNS int LANGUAGE sql AS 'SELECT x';
 SELECT mk_ll('c_rn(x int)', 'int', 'rn(integer)', 1);
 SELECT c_rn(5);
 ALTER FUNCTION rn(int) RENAME TO rn2;
+SELECT c_rn(5);  -- fail
+CREATE FUNCTION rn(x int) RETURNS int LANGUAGE sql AS 'SELECT -x';
 SELECT c_rn(5);
-\set VERBOSITY terse
-SELECT mk_ll('c_rn(x int)', 'int', 'rn(integer)', 1);
-\set VERBOSITY default
+CREATE SCHEMA zz;
+CREATE FUNCTION zz.cal(x int) RETURNS int LANGUAGE sql AS 'SELECT 10';
+SELECT mk_ll('c_cal(x int)', 'int', 'zz.cal(integer)', 1);
+SELECT c_cal(0);
+ALTER SCHEMA zz RENAME TO yy;
+SELECT c_cal(0);  -- fail
+CREATE SCHEMA zz;
+CREATE FUNCTION zz.cal(x int) RETURNS int LANGUAGE sql AS 'SELECT -666';
+SELECT c_cal(0);
+-- the default path follows a rename of the function's own schema
+CREATE SCHEMA ow;
+CREATE FUNCTION ow.sib(x int) RETURNS int LANGUAGE sql AS 'SELECT x * 3';
+SELECT mk_ll('ow.c_sib(x int)', 'int', 'sib(integer)', 1);
+SELECT ow.c_sib(2);
+ALTER SCHEMA ow RENAME TO ow2;
+SELECT ow2.c_sib(2);
+-- the code was compiled for the old argument types
+CREATE SCHEMA ta;
+CREATE DOMAIN ta.d AS int;
+CREATE FUNCTION tf(x ta.d) RETURNS int LANGUAGE sql AS 'SELECT 1';
+SELECT mk_ll('c_tf(x int)', 'int', 'tf(ta.d)', 1);
+SELECT c_tf(0);
+ALTER SCHEMA ta RENAME TO tb;
+CREATE SCHEMA ta;
+CREATE DOMAIN ta.d AS int;
+CREATE FUNCTION tf(x ta.d) RETURNS int LANGUAGE sql AS 'SELECT 2';
+SELECT c_tf(0);  -- fail
 
 -- 11. a dropped callee is looked up again by its signature
 CREATE FUNCTION dr(x int) RETURNS int LANGUAGE sql AS 'SELECT x + 100';
@@ -383,15 +409,39 @@ FROM c_toast;
 DROP TABLE c_toast;
 DROP FUNCTION c_keep(text);
 
+-- 17. text from a C string must be valid in the server encoding
+CREATE FUNCTION c_text(ok bool) RETURNS text LANGUAGE plllvm STRICT AS $$
+@good = private constant [4 x i8] c"a\C5\BE\00"
+@bad = private constant [4 x i8] c"a\FF\FE\00"
+declare i1 @plllvm_arg_bool(ptr, i32)
+declare i64 @plllvm_cstring_to_text(ptr)
+define i64 @f(ptr %fcinfo) {
+  %ok = call i1 @plllvm_arg_bool(ptr %fcinfo, i32 0)
+  %s = select i1 %ok, ptr @good, ptr @bad
+  %t = call i64 @plllvm_cstring_to_text(ptr %s)
+  ret i64 %t
+}
+$$;
+SELECT getdatabaseencoding() = 'UTF8' AS utf8 \gset
+\if :utf8
+SELECT c_text(true);
+SELECT c_text(false);  -- fail
+\endif
+DROP FUNCTION c_text(bool);
+
 DROP FUNCTION mk_ll(text, text, text, int, bool, text), mk_k(text, text, text);
 DROP FUNCTION c_add(int, int), c_nadd(numeric, numeric), c_point(),
   c_ktext(), c_knum(), c_unknown(int), c_strict(int), c_lax(int), c_nonull(int),
-  c_who(), c_wm(), c_rp(int), c_priv(int), c_rn(int), c_dr(int), div0(int, int),
+  c_who(), c_wm(), c_rp(int), c_priv(int), c_rn(int), c_cal(int), c_tf(int),
+  c_dr(int), div0(int, int),
   via_site(int), lower_ll(text), lower_const(), c_seven(), c_kint();
 DROP FUNCTION n_strict(int), n_lax(int), who(), wm(), rp(int), priv(int),
-  rn2(int), dr(int), sqlrec(int), c_rec(), c_stale(int), g_stale(int);
+  rn(int), rn2(int), zz.cal(int), yy.cal(int), tf(ta.d), tf(tb.d), dr(int),
+  sqlrec(int), c_rec(), c_stale(int), g_stale(int);
 DROP PROCEDURE c_proc();
-DROP DOMAIN c_posint;
+DROP DOMAIN c_posint, ta.d, tb.d;
+DROP FUNCTION ow2.c_sib(int), ow2.sib(int);
+DROP SCHEMA zz, yy, ta, tb, ow2;
 DROP SCHEMA s1, s2 CASCADE;
 DROP ROLE regress_plllvm_owner1, regress_plllvm_owner2, regress_plllvm_user,
   regress_plllvm_grp, regress_plllvm_su;

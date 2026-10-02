@@ -163,7 +163,7 @@ endif
 endif
 
 .PHONY: port-ok doctor stage cluster-init cluster-start cluster-stop pgindent \
-	installcheck-discard check-host-api kernels check-kernels
+	installcheck-discard installcheck-hazard check-host-api kernels check-kernels
 
 # 5432, 5433 belong to pg-claude, 5444 to the perf cluster
 port-ok:
@@ -213,6 +213,14 @@ cluster-stop:
 installcheck-discard:
 	$(MAKE) installcheck REGRESS='plllvm_setup plllvm_calls plllvm_cache' \
 		PGOPTIONS='-c debug_discard_caches=1'
+
+# tests that crash the server when their fix regresses, so never part of
+# installcheck: only on a throwaway cluster, with PLLLVM_PORT given
+installcheck-hazard: port-ok
+	@case "$(origin PLLLVM_PORT):$(PLLLVM_PORT)" in file:*|*:|*:544[2-5]) \
+	  echo "installcheck-hazard needs the PLLLVM_PORT of a throwaway cluster" >&2; \
+	  exit 1;; esac
+	$(MAKE) installcheck REGRESS='plllvm_setup plllvm_hazard'
 
 # runtime functions that only the inline helpers call
 HOST_API_INTERNAL = plllvm_rt_site_call plllvm_rt_site_null plllvm_rt_array_access
