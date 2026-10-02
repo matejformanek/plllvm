@@ -143,6 +143,7 @@ plllvm_jit_test(PG_FUNCTION_ARGS)
 {
 	ReturnSetInfo *rsinfo = (ReturnSetInfo *) fcinfo->resultinfo;
 	plllvm_jit_result result;
+	plllvm_path path;
 	char	   *ir;
 	int			opt_level = plllvm_opt_level;
 	bool		codegen;
@@ -170,11 +171,13 @@ plllvm_jit_test(PG_FUNCTION_ARGS)
 	InitMaterializedSRF(fcinfo, 0);
 
 	/* there is no function whose path or collation would apply */
+	path.search_path = "pg_catalog, pg_temp";
+	path.nspoid = InvalidOid;
 	if (codegen)
-		ok = plllvm_jit_compile(InvalidOid, InvalidOid, "pg_catalog, pg_temp",
-								-1, ir, opt_level, &result);
+		ok = plllvm_jit_compile(InvalidOid, InvalidOid, &path, -1, ir,
+								opt_level, &result);
 	else
-		ok = plllvm_jit_check(ir, "pg_catalog, pg_temp", -1, &result);
+		ok = plllvm_jit_check(ir, &path, -1, &result);
 
 	values[0] = BoolGetDatum(ok);
 	if (ok)

@@ -108,10 +108,10 @@ typedef struct plllvm_jit_session_info
 /* plllvm_jit.c */
 extern void plllvm_jit_get_session_info(plllvm_jit_session_info *info);
 extern bool plllvm_jit_compile(Oid owner_oid, Oid collation,
-							   const char *search_path, int nargs,
+							   const struct plllvm_path *path, int nargs,
 							   const char *ir, int opt_level,
 							   plllvm_jit_result *result);
-extern bool plllvm_jit_check(const char *ir, const char *search_path,
+extern bool plllvm_jit_check(const char *ir, const struct plllvm_path *path,
 							 int nargs, plllvm_jit_result *result);
 extern void plllvm_jit_release(plllvm_jit_module *mod);
 extern plllvm_jit_module *plllvm_jit_modules(void);

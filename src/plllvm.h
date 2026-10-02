@@ -31,6 +31,13 @@ typedef struct plllvm_frame
 /* the sites and constants of one compile (plllvm_sites.c) */
 typedef struct plllvm_refs plllvm_refs;
 
+/* where the names of a function's IR resolve (plllvm_sites.c, note 1) */
+typedef struct plllvm_path
+{
+	const char *search_path;	/* the function's own setting, or NULL */
+	Oid			nspoid;			/* else pg_catalog, this schema, pg_temp */
+} plllvm_path;
+
 /* plllvm_runtime.c */
 extern plllvm_frame *plllvm_cur_frame;
 extern void plllvm_frame_push(plllvm_frame *frame, MemoryContext caller,
@@ -95,9 +102,9 @@ extern void plllvm_spi_free(struct plllvm_spi_stmt *stmts);
 
 /* plllvm_sites.c */
 extern void plllvm_sites_init(void);
-extern char *plllvm_sites_path(HeapTuple procTup);
+extern void plllvm_sites_path(HeapTuple procTup, plllvm_path *path);
 extern plllvm_refs *plllvm_refs_begin(int nrefs, Oid collation,
-									  const char *search_path,
+									  const plllvm_path *path,
 									  bool check_only);
 extern Datum plllvm_refs_add(plllvm_refs *refs, const char *name, int nargs);
 extern void plllvm_refs_resolved(plllvm_refs *refs);

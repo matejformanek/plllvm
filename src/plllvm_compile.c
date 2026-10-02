@@ -86,7 +86,7 @@ compile_callback(FunctionCallInfo fcinfo, HeapTuple procTup,
 	CompileErrorArg cbarg;
 	ErrorContextCallback errcallback;
 	char	   *src;
-	char	   *path;
+	plllvm_path path;
 	int16		rettyplen;
 	bool		rettypbyval;
 
@@ -105,11 +105,11 @@ compile_callback(FunctionCallInfo fcinfo, HeapTuple procTup,
 	/* on ERROR, these go with the memory context of the call */
 	src = TextDatumGetCString(SysCacheGetAttrNotNull(PROCOID, procTup,
 													 Anum_pg_proc_prosrc));
-	path = plllvm_sites_path(procTup);
+	plllvm_sites_path(procTup, &path);
 	get_typlenbyval(procStruct->prorettype, &rettyplen, &rettypbyval);
 
 	if (!plllvm_jit_compile(fcinfo->flinfo->fn_oid, hashkey->inputCollation,
-							path, procStruct->pronargs, src, plllvm_opt_level,
+							&path, procStruct->pronargs, src, plllvm_opt_level,
 							&r))
 		report_jit_error(&r, src);
 
@@ -240,6 +240,7 @@ plllvm_compile_check_body(HeapTuple procTup)
 	CompileErrorArg cbarg;
 	ErrorContextCallback errcallback;
 	char	   *src;
+	plllvm_path path;
 
 	src = TextDatumGetCString(SysCacheGetAttrNotNull(PROCOID, procTup,
 													 Anum_pg_proc_prosrc));
@@ -251,8 +252,8 @@ plllvm_compile_check_body(HeapTuple procTup)
 	errcallback.previous = error_context_stack;
 	error_context_stack = &errcallback;
 
-	if (!plllvm_jit_check(src, plllvm_sites_path(procTup),
-						  procStruct->pronargs, &r))
+	plllvm_sites_path(procTup, &path);
+	if (!plllvm_jit_check(src, &path, procStruct->pronargs, &r))
 		report_jit_error(&r, src);
 
 	error_context_stack = errcallback.previous;

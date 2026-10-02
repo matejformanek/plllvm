@@ -72,7 +72,7 @@ typedef struct plllvm_site
 	Oid			collation;
 	MemoryContext mcxt;			/* fn_mcxt, replaced at each rebuild */
 	const char *signature;		/* as written in the IR */
-	const char *search_path;	/* the module's resolution path */
+	const struct plllvm_path *path; /* the module's resolution path */
 	int64		prepares;		/* for plllvm_call_sites() */
 	int64		checks;
 	int64		reentries;

@@ -303,6 +303,7 @@ plllvm_host_symbol
 plllvm_jit_module
 plllvm_jit_result
 plllvm_jit_session_info
+plllvm_path
 plllvm_refs
 plllvm_site
 plllvm_spi_stmt
