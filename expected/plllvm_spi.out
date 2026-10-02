@@ -450,6 +450,7 @@ SELECT spi_sub();  -- fail
 ERROR:  SELECT FOR UPDATE is not allowed in a non-volatile function
 CONTEXT:  SQL statement "SELECT i FROM (SELECT i FROM spi_t WHERE i = 1 FOR UPDATE) s"
 PL/LLVM function "spi_sub"
+-- no typmods: they would not be applied
 SELECT mk_spi('spi_types(a numeric, b int) RETURNS numeric STABLE',
               'SELECT $1 + $2', 'numeric(5,2), int4', 'numeric');
  mk_spi 
@@ -457,10 +458,34 @@ SELECT mk_spi('spi_types(a numeric, b int) RETURNS numeric STABLE',
  
 (1 row)
 
-SELECT spi_types(1.25, 2);
+SELECT spi_types(1.25, 2);  -- fail
+ERROR:  PL/LLVM statement types cannot have type modifiers
+HINT:  Cast in the statement, e.g. $1::numeric(5,2).
+CONTEXT:  SQL statement "SELECT $1 + $2"
+PL/LLVM function "spi_types"
+SELECT mk_spi('spi_types(a numeric, b int) RETURNS numeric STABLE',
+              'SELECT $1 + $2', 'numeric, int4', 'varchar(3)');
+ mk_spi 
+--------
+ 
+(1 row)
+
+SELECT spi_types(1.25, 2);  -- fail
+ERROR:  PL/LLVM statement types cannot have type modifiers
+HINT:  Cast in the statement, e.g. $1::numeric(5,2).
+CONTEXT:  SQL statement "SELECT $1 + $2"
+PL/LLVM function "spi_types"
+SELECT mk_spi('spi_types(a numeric, b int) RETURNS numeric STABLE',
+              'SELECT $1::numeric(5,2) + $2', 'numeric, int4', 'numeric');
+ mk_spi 
+--------
+ 
+(1 row)
+
+SELECT spi_types(1.255, 2);
  spi_types 
 -----------
-      3.25
+      3.26
 (1 row)
 
 SELECT mk_spi('spi_bad() RETURNS int STABLE', 'SELECT 1', '', 'nosuchtype');
@@ -472,6 +497,20 @@ SELECT mk_spi('spi_bad() RETURNS int STABLE', 'SELECT 1', '', 'nosuchtype');
 SELECT spi_bad();  -- fail
 ERROR:  type "nosuchtype" does not exist
 CONTEXT:  SQL statement "SELECT 1"
+PL/LLVM function "spi_bad"
+SELECT mk_spi('spi_bad(a int) RETURNS int STABLE', 'SELECT $1', 'int4, numeric(5,2', 'int4');
+ mk_spi 
+--------
+ 
+(1 row)
+
+SELECT spi_bad(1);  -- fail
+ERROR:  syntax error at end of input
+LINE 1:  numeric(5,2
+                    ^
+QUERY:   numeric(5,2
+CONTEXT:  invalid type name " numeric(5,2"
+SQL statement "SELECT $1"
 PL/LLVM function "spi_bad"
 SELECT mk_spi('spi_bad(a int) RETURNS int STABLE', 'SELECT $2', 'int4', 'int4');
  mk_spi 

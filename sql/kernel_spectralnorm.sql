@@ -83,8 +83,8 @@ ORDER BY s.n;
 SELECT count(*) FILTER (WHERE spectralnorm_ll(g) = spectralnorm_pl(g)) AS ok
 FROM generate_series(1, 40) g;
 
--- NULL n fails in array_fill (22004), a negative one there too (54000),
--- 0 at vbv / vv (22012)
+-- NULL n fails in array_fill (22004); a negative one in array_fill (54000)
+-- and in plllvm_array_new (22023); 0 at vbv / vv (22012)
 SELECT s.n,
        sqlstate_of(format('SELECT spectralnorm_ll(n) FROM (SELECT %L::int AS n OFFSET 0) s', s.n)) AS ll,
        sqlstate_of(format('SELECT spectralnorm_pl(n) FROM (SELECT %L::int AS n OFFSET 0) s', s.n)) AS pl

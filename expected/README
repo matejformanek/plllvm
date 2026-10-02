@@ -7,8 +7,8 @@ Messages of LLVM itself (parser, verifier) appear only in plllvm_jit and
 plllvm_validator; another LLVM major may need _1.out files for these two.
 
 A function's entry is revalidated by the xmin and ctid of its pg_proc row
-alone.  Call sites are invalidated by PROCOID, AUTHMEMROLEMEM, AUTHOID and
-DATABASEOID callbacks; under debug_discard_caches only the site counters
+alone.  Call sites are invalidated by PROCOID, NAMESPACEOID, AUTHMEMROLEMEM,
+AUTHOID and DATABASEOID callbacks; under debug_discard_caches only the site counters
 of plllvm_cache change, and make installcheck-discard checks that
 plllvm_calls does not.
 

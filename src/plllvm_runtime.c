@@ -219,6 +219,10 @@ plllvm_array_new(Oid elemtype, int32 n)
 	Size		nbytes;
 	ArrayType  *a;
 
+	if (n < 0)
+		ereport(ERROR,
+				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+				 errmsg("PL/LLVM array length must not be negative")));
 	if (n == 0)
 		return construct_empty_array(elemtype);
 
