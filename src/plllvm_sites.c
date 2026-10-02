@@ -93,8 +93,6 @@ static int	path_set(const char *search_path);
 static Oid	site_lookup(plllvm_site *site);
 static void rebuild(plllvm_site *site);
 static void execute_check(Oid fn_oid);
-static Datum call(plllvm_site *site, FunctionCallInfo fcinfo,
-				  NullableDatum *args, bool *isnull);
 static Datum call_reentrant(plllvm_site *site, NullableDatum *args,
 							bool *isnull);
 
@@ -595,7 +593,8 @@ plllvm_rt_site_call(plllvm_site *site, NullableDatum *args, bool *isnull)
 	/* the busy site names itself (note 5) */
 	error_context_stack = errcallback.previous;
 
-	return call(site, site->fcinfo, args, isnull);
+	return plllvm_site_invoke(site, site->fcinfo, site->flinfo.fn_strict, true,
+							  args, site->nargs, isnull);
 }
 
 void
@@ -705,46 +704,6 @@ execute_check(Oid fn_oid)
 }
 
 /*
- * The inline protocol, out of line; only the site's own fcinfo marks the
- * site busy
- */
-static Datum
-call(plllvm_site *site, FunctionCallInfo fcinfo, NullableDatum *args,
-	 bool *isnull)
-{
-	bool		own = (fcinfo == site->fcinfo);
-	Datum		result = (Datum) 0;
-	bool		resultnull = true;
-
-	if (fcinfo->flinfo->fn_strict)
-	{
-		for (int i = 0; i < site->nargs; i++)
-		{
-			if (args[i].isnull)
-				goto out;
-		}
-	}
-
-	for (int i = 0; i < site->nargs; i++)
-		fcinfo->args[i] = args[i];
-	fcinfo->isnull = false;
-	if (own)
-		site->busy = true;
-	result = FunctionCallInvoke(fcinfo);
-	if (own)
-		site->busy = false;
-	resultnull = fcinfo->isnull;
-
-out:
-	if (resultnull && isnull == NULL)
-		plllvm_rt_site_null(site);
-	if (isnull != NULL)
-		*isnull = resultnull;
-
-	return resultnull ? (Datum) 0 : result;
-}
-
-/*
  * A call while the site's FmgrInfo is in use.  The callee still runs in the
  * caller's context, where its result must stay; its FmgrInfo goes after the
  * call (on ERROR, with the scratch).
@@ -770,7 +729,8 @@ call_reentrant(plllvm_site *site, NullableDatum *args, bool *isnull)
 							 NULL, NULL);
 	site->reentries++;
 
-	result = call(site, fcinfo, args, isnull);
+	result = plllvm_site_invoke(site, fcinfo, flinfo->fn_strict, false,
+								args, site->nargs, isnull);
 
 	MemoryContextDelete(cxt);
 

@@ -96,6 +96,49 @@ extern ArrayType *plllvm_array_new(Oid elemtype, int32 n);
 extern ArrayType *plllvm_array_copy(ArrayType *a);
 pg_noreturn extern void plllvm_rt_array_access(ArrayType *a, Oid elemtype);
 
+/*
+ * The executor's call protocol (EEOP_FUNCEXPR) for a site: inline in the
+ * code (plllvm_types.c), out of line in plllvm_sites.c.  strict is the flag
+ * of fcinfo's FmgrInfo, and only the site's own fcinfo (own) marks the site
+ * busy.  The arguments come in by value and are stored right before the
+ * call, so nothing can re-enter in between.
+ */
+static pg_always_inline Datum
+plllvm_site_invoke(plllvm_site *site, FunctionCallInfo fcinfo, bool strict,
+				   bool own, NullableDatum *args, int nargs, bool *isnull)
+{
+	Datum		result;
+
+	if (strict)
+	{
+		for (int i = 0; i < nargs; i++)
+		{
+			if (args[i].isnull)
+				goto null_result;
+		}
+	}
+	for (int i = 0; i < nargs; i++)
+		fcinfo->args[i] = args[i];
+	fcinfo->isnull = false;
+	if (own)
+		site->busy = true;
+	result = FunctionCallInvoke(fcinfo);
+	if (own)
+		site->busy = false;
+	if (!fcinfo->isnull)
+	{
+		if (isnull)
+			*isnull = false;
+		return result;
+	}
+
+null_result:
+	if (isnull == NULL)
+		plllvm_rt_site_null(site);
+	*isnull = true;
+	return (Datum) 0;
+}
+
 /* plllvm_spi.c */
 extern void *plllvm_spi_prepare(void **slot, const char *sql,
 								const char *argtypes, const char *coltypes);
