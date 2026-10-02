@@ -37,9 +37,9 @@ declare void @plllvm_cfi()
 declare void @plllvm_check_stack()
 declare void @plllvm_error(i32, ptr)
 declare void @plllvm_notice(ptr)
-declare void @plllvm_rt_int_overflow()
-declare void @plllvm_rt_bigint_overflow()
-declare void @plllvm_rt_div_zero()
+declare void @plllvm_int_overflow()
+declare void @plllvm_bigint_overflow()
+declare void @plllvm_div_zero()
 declare void @float_overflow_error()
 declare void @float_underflow_error()
 declare void @float_zero_divide_error()
@@ -68,13 +68,13 @@ e1:
   call void @plllvm_error(i32 %a, ptr @msg)
   unreachable
 e2:
-  call void @plllvm_rt_int_overflow()
+  call void @plllvm_int_overflow()
   unreachable
 e3:
-  call void @plllvm_rt_bigint_overflow()
+  call void @plllvm_bigint_overflow()
   unreachable
 e4:
-  call void @plllvm_rt_div_zero()
+  call void @plllvm_div_zero()
   unreachable
 e5:
   call void @float_overflow_error()

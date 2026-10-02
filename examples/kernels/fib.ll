@@ -14,7 +14,7 @@ declare i32 @plllvm_arg_i32(ptr, i32)
 declare void @plllvm_cfi()
 declare void @plllvm_check_stack()
 declare void @plllvm_error(i32, ptr) noreturn
-declare void @plllvm_rt_int_overflow() noreturn
+declare void @plllvm_int_overflow() noreturn
 
 declare { i32, i1 } @llvm.sadd.with.overflow.i32(i32, i32)
 
@@ -61,6 +61,6 @@ ok:
   ret i32 %r
 
 overflow:
-  call void @plllvm_rt_int_overflow()
+  call void @plllvm_int_overflow()
   unreachable
 }

@@ -117,15 +117,15 @@ plllvm_code_cache(PG_FUNCTION_ARGS)
 		values[8] = Float8GetDatum(mod->parse_ms);
 		values[9] = Float8GetDatum(mod->link_ms);
 		values[10] = Float8GetDatum(mod->verify_ms);
-		values[11] = Float8GetDatum(mod->optimize_ms);
-		values[12] = Float8GetDatum(mod->emit_ms);
-		values[13] = Float8GetDatum(mod->parse_bc_ms + mod->parse_ms +
+		values[11] = Float8GetDatum(mod->resolve_ms);
+		values[12] = Float8GetDatum(mod->optimize_ms);
+		values[13] = Float8GetDatum(mod->emit_ms);
+		values[14] = Float8GetDatum(mod->parse_bc_ms + mod->parse_ms +
 									mod->link_ms + mod->verify_ms +
 									mod->resolve_ms + mod->optimize_ms +
 									mod->emit_ms);
-		values[14] = BoolGetDatum(mod->released);
-		values[15] = CStringGetTextDatum(psprintf("%p", mod->addr));
-		values[16] = Float8GetDatum(mod->resolve_ms);
+		values[15] = BoolGetDatum(mod->released);
+		values[16] = CStringGetTextDatum(psprintf("%p", mod->addr));
 		values[17] = BoolGetDatum(mod->needs_frame);
 
 		tuplestore_putvalues(rsinfo->setResult, rsinfo->setDesc, values, nulls);

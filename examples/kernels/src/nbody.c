@@ -44,7 +44,7 @@
 extern ArrayType *plllvm_array_new(Oid elemtype, int32 n);
 extern float8 plllvm_array_get_f64(ArrayType *a, int32 i);
 extern void plllvm_array_set_f64(ArrayType *a, int32 i, float8 v);
-pg_noreturn extern void plllvm_rt_int_overflow(void);
+pg_noreturn extern void plllvm_int_overflow(void);
 
 extern Datum f(PG_FUNCTION_ARGS);
 
@@ -76,7 +76,7 @@ int4_add(int32 a, int32 b)
 	int32		r;
 
 	if (unlikely(pg_add_s32_overflow(a, b, &r)))
-		plllvm_rt_int_overflow();
+		plllvm_int_overflow();
 	return r;
 }
 

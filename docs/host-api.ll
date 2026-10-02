@@ -29,9 +29,9 @@ declare void @plllvm_error(i32 %sqlstate, ptr %msg)
 ; NOTICE with a message
 declare void @plllvm_notice(ptr %msg)
 ; the ERRORs of int4pl, int8pl and int4div
-declare void @plllvm_rt_int_overflow()
-declare void @plllvm_rt_bigint_overflow()
-declare void @plllvm_rt_div_zero()
+declare void @plllvm_int_overflow()
+declare void @plllvm_bigint_overflow()
+declare void @plllvm_div_zero()
 ; CHECK_FOR_INTERRUPTS() and check_stack_depth().  With plllvm.auto_checks
 ; the compiler adds them where a loop or a recursion has none; calling them
 ; chooses where they go.
@@ -167,15 +167,15 @@ error:
   unreachable
 
 int_overflow:
-  call void @plllvm_rt_int_overflow()
+  call void @plllvm_int_overflow()
   unreachable
 
 bigint_overflow:
-  call void @plllvm_rt_bigint_overflow()
+  call void @plllvm_bigint_overflow()
   unreachable
 
 div_zero:
-  call void @plllvm_rt_div_zero()
+  call void @plllvm_div_zero()
   unreachable
 
 null_result:

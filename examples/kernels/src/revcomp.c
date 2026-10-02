@@ -39,7 +39,7 @@
 #define LINE 60
 
 /* the host API used here (docs/host-api.ll) */
-pg_noreturn extern void plllvm_rt_int_overflow(void);
+pg_noreturn extern void plllvm_int_overflow(void);
 
 extern Datum f(PG_FUNCTION_ARGS);
 
@@ -57,7 +57,7 @@ int4_add(int32 a, int32 b)
 	int32		r;
 
 	if (unlikely(pg_add_s32_overflow(a, b, &r)))
-		plllvm_rt_int_overflow();
+		plllvm_int_overflow();
 	return r;
 }
 
@@ -67,7 +67,7 @@ int4_mul(int32 a, int32 b)
 	int32		r;
 
 	if (unlikely(pg_mul_s32_overflow(a, b, &r)))
-		plllvm_rt_int_overflow();
+		plllvm_int_overflow();
 	return r;
 }
 

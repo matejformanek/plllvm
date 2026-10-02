@@ -89,8 +89,8 @@ declare zeroext i1 @plllvm_arg_isnull(ptr, i32)
 declare i32 @plllvm_arg_i32(ptr, i32)
 declare void @plllvm_cfi()
 declare void @plllvm_error(i32, ptr) noreturn
-declare void @plllvm_rt_int_overflow() noreturn
-declare void @plllvm_rt_bigint_overflow() noreturn
+declare void @plllvm_int_overflow() noreturn
+declare void @plllvm_bigint_overflow() noreturn
 declare i64 @plllvm_call1(ptr, i64, i1, ptr)
 declare i64 @plllvm_call2(ptr, i64, i1, i64, i1, ptr)
 declare i64 @plllvm_const(ptr)
@@ -442,7 +442,7 @@ ok:
   %v = extractvalue { i32, i1 } %r, 0
   ret i32 %v
 overflow:
-  call void @plllvm_rt_int_overflow()
+  call void @plllvm_int_overflow()
   unreachable
 }
 
@@ -454,7 +454,7 @@ ok:
   %v = extractvalue { i64, i1 } %r, 0
   ret i64 %v
 overflow:
-  call void @plllvm_rt_bigint_overflow()
+  call void @plllvm_bigint_overflow()
   unreachable
 }
 
@@ -466,6 +466,6 @@ ok:
   %v = extractvalue { i64, i1 } %r, 0
   ret i64 %v
 overflow:
-  call void @plllvm_rt_bigint_overflow()
+  call void @plllvm_bigint_overflow()
   unreachable
 }

@@ -10,23 +10,23 @@ SET plllvm.regress_test_mode = on;
 -- a .bc built from other sources is refused
 SET plllvm.types_bc_path = :'stale';
 SELECT llvm_version FROM plllvm_session_info();  -- fail
-ERROR:  incompatible PL/LLVM types file "plllvm_types_stale.bc"
+ERROR:  incompatible plllvm types file "plllvm_types_stale.bc"
 DETAIL:  The file was built from other plllvm sources than the library.
 HINT:  Rebuild and reinstall the plllvm extension.
 -- so are a file that is not bitcode and a missing file
 SET plllvm.types_bc_path = :'notbc';
 SELECT llvm_version FROM plllvm_session_info();  -- fail
-ERROR:  could not parse PL/LLVM types file "plllvm.control"
+ERROR:  could not parse plllvm types file "plllvm.control"
 DETAIL:  Invalid bitcode signature
 HINT:  Rebuild and reinstall the plllvm extension.
 SET plllvm.types_bc_path = '/nonexistent/plllvm_types.bc';
 SELECT llvm_version FROM plllvm_session_info();  -- fail
-ERROR:  could not open PL/LLVM types file "plllvm_types.bc": No such file or directory
+ERROR:  could not open plllvm types file "plllvm_types.bc": No such file or directory
 HINT:  Check the installation of the plllvm extension, or set plllvm.types_bc_path.
 -- and a directory; LLVM would read a FIFO or a device without end
 SET plllvm.types_bc_path = :'dir';
 SELECT llvm_version FROM plllvm_session_info();  -- fail
-ERROR:  PL/LLVM types file "src" is not a regular file
+ERROR:  plllvm types file "src" is not a regular file
 HINT:  Check the installation of the plllvm extension, or set plllvm.types_bc_path.
 -- the default, next to the library, works after the failed attempts
 RESET plllvm.types_bc_path;
