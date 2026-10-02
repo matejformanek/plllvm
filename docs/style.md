@@ -1,7 +1,5 @@
 # plllvm C code style
 
-Condensed in the thesis plan `notes/plans/plllvm-v0.1.md` §0d (thesis notes repo). The plan wins on conflict; points where it differs are marked **Superseded by plan:**.
-
 52 rules, each with its source. Each rule says whether it follows Pavel Stěhule's own code or PostgreSQL core; core wins where Pavel is inconsistent.
 
 ## Sources
@@ -10,9 +8,8 @@ Condensed in the thesis plan `notes/plans/plllvm-v0.1.md` §0d (thesis notes rep
 
 ## A. Files and banners
 1. **Banner (follow Pavel).** Use dashes, the file name, a tab-indented one-line purpose, an author/year line, then dashes. Put an optional numbered `Notes:` block after the closing dash line. PC plpgsql_check.c:1-24, profiler.c:1-10.
-   ` * plllvm_jit.c` / ` *\t\t\t  own ORC LLJIT runtime` / ` * by Matej Manek 2026`
+   ` * plllvm_jit.c` / ` *\t\t\t  own ORC LLJIT runtime` / ` * by Matěj Formánek 2026`
    Core uses `Portions Copyright… IDENTIFICATION <path>` instead (llvmjit.c:1-12). Use Pavel's form. Only add `IDENTIFICATION` if the code is meant to go upstream.
-   > **Superseded by plan:** the author line is `by Matěj Formánek 2026` (plan §0d).
 2. **`plllvm_types.c` banner (copy core).** Explain that the file is never linked and is only turned into bitcode ("NB: This file will not be linked into the server…"), and that its types must stay non-static. llvmjit_types.c:1-25, 43-45.
 3. **Include order (core rule).** Every `.c` file starts with `#include "postgres.h"`, then a blank line, then other PG headers in alphabetical order. LLVM-C headers go after those, with `#if LLVM_VERSION_MAJOR` gates where needed. llvmjit.c:14-30; PC fextra_cache.c:11-13.
    PC's main `.c` files instead rely on `plpgsql_check.h` pulling in postgres.h (PC plpgsql_check.h:1). Don't copy that; follow core.
@@ -24,15 +21,13 @@ Condensed in the thesis plan `notes/plans/plllvm-v0.1.md` §0d (thesis notes rep
 
 ## B. Naming
 7. **Exported symbols** take the module prefix in snake_case, like PC `plpgsql_check_*` and the newer short `plch_*` (PC plpgsql_check.h:221-436). Core LLVM uses `llvm_*` (llvmjit.h:103-118).
-   Use `plllvm_` for everything exported: `plllvm_call_handler`, `plllvm_validator`, `plllvm_inline_handler`, `plllvm_jit_compile()`, `plllvm_enter_fatal_on_oom()`.
-   > **Superseded by plan:** there is no `plllvm_inline_handler` in v0.1 (plan §1/D6: PostgreSQL's own "does not support inline code execution" ERROR is used).
+   Use `plllvm_` for everything exported: `plllvm_call_handler`, `plllvm_validator`, `plllvm_jit_compile()`, `plllvm_enter_fatal_on_oom()`. There is no inline handler: `DO` gets PostgreSQL's own "does not support inline code execution" ERROR.
 8. **Static helpers** are unprefixed snake_case: `pin_func`, `func_stats_ht_init` (PC fextra_cache.c:75; profiler.c:684). Pavel sometimes uses CamelCase for callbacks and hash code (`fextra_CacheObjectCallback`, `plpgsql_check_HashTableInit`). Don't mix the two styles in new code.
 9. **Struct typedefs.** Pavel names module structs in lowercase with the prefix and gives every struct a tag (PC plpgsql_check.h:87-133: `typedef struct plpgsql_check_info {…} plpgsql_check_info;`). Plain data records use CamelCase (`FuncStats`, profiler.c:47). Core PLs use `plperl_proc_desc` or `PLpgSQL_function`.
-   Use `typedef struct plllvm_function { CachedFunction cfunc; … } plllvm_function;`.
-   > **Decided (2026-10-01):** module structs use this lowercase tagged form (`plllvm_function`, …), with a checked `PLLLVM_FN_MAGIC` field; plain records are CamelCase. The `PlllvmFunction` spelling in plan §5b is not used.
+   Types declared in a header are lowercase, prefixed and tagged: `typedef struct plllvm_function { CachedFunction cfunc; … } plllvm_function;`, `plllvm_jit_module`, `plllvm_site`. Types local to one file are CamelCase: `JitCode`, `IrRef`.
 10. **Global variables.** GUC variables are named `prefix_<gucname>` and declared `extern` in the module header (PC plpgsql_check.h:298-304, 399-403). Function-pointer typedefs end in `_t` and the pointers in `_p` (PC plpgsql_check.c:115-121).
 11. **Magic field for `fn_extra` structs (Pavel).** `#define CI_MAGIC 2023042922` plus `int ci_magic;` as the first field, checked with `Assert`/`if` before use. PC plpgsql_check.h:147-151; pldbgapi3.c:40, 507.
-   > **Superseded by plan:** name it `PLLLVM_FN_MAGIC` (plan §0d). Because funccache requires `CachedFunction cfunc` to be the first field, the magic goes right after it.
+   plllvm's is `PLLLVM_FN_MAGIC`. funccache requires `CachedFunction cfunc` to be the first field, so the magic goes right after it.
 
 ## C. Comments
 12. **Block comment before every non-trivial function.** Pavel often uses a short title line and leaves a trailing blank ` *`: `/*\n * Validate function result description\n *\n */` (PC tablefunc.c:41-44). Core is a plain prose paragraph (llvmjit_error.cpp:36-53). Older core style uses `/* ---------- name … ---------- */` (pl_handler.c:214-220, pl_comp.c:95-104); don't use that in new code.
@@ -60,8 +55,7 @@ Condensed in the thesis plan `notes/plans/plllvm-v0.1.md` §0d (thesis notes rep
 23. **Error-context callbacks for compile and exec (core and PSM).** Push and pop `ErrorContextCallback` like this (pl_comp.c:212-217, 889-911; plperl.c:4139-4165; PSM compiler.c:4705-4715):
     `plerrcontext.callback = plllvm_compile_error_callback; plerrcontext.arg = &cbarg; plerrcontext.previous = error_context_stack;`
     Wording: `errcontext("compilation of PL/LLVM function \"%s\"", name)` and `errcontext("PL/LLVM function \"%s\"", name)`. In validator mode, call `function_parse_error_transpose()` first.
-24. **Translation.** Call `pg_bindtextdomain(TEXTDOMAIN)` in `_PG_init` (PC plpgsql_check.c:211; pl_handler.c:156). It needs a `-DTEXTDOMAIN` define in the build. You can skip it if you don't ship translations.
-   > **Superseded by plan:** NLS is skipped (no translations; contrib doesn't), so no `pg_bindtextdomain` (plan §0d).
+24. **Translation.** Pavel and the core PLs call `pg_bindtextdomain(TEXTDOMAIN)` in `_PG_init` (PC plpgsql_check.c:211; pl_handler.c:156), with a `-DTEXTDOMAIN` define in the build. plllvm ships no translations, as contrib does not, so it does neither.
 
 ## E. Memory
 25. **One context per compiled function.** Create it as a child of `CurrentMemoryContext`. Move it under `CacheMemoryContext` with `MemoryContextSetParent` only after compilation succeeds, so a failed compile doesn't leak. Name it with `MemoryContextSetIdentifier(cxt, fn_signature)`. pl_comp.c:230-245, 718; plperl.c:2784-2795.
@@ -83,8 +77,7 @@ Condensed in the thesis plan `notes/plans/plllvm-v0.1.md` §0d (thesis notes rep
 35. **`_PG_init`** starts with `static bool inited = false; if (inited) return;` and sets `inited = true;` at the end (both PC plpgsql_check.c:206-209, 519 and pl_handler.c:150-154). Register a syscache callback with `CacheRegisterSyscacheCallback(PROCOID, cb, (Datum) 0)` only if you keep your own cache beyond funccache (PC fextra_cache.c:164).
 
 ## G. GUCs
-36. **Names and contexts.** Name them `plllvm.<name>`, defined in `_PG_init` with one argument per line and `NULL, NULL, NULL` hooks (PC plpgsql_check.c:268-465). Use `PGC_USERSET` normally and `PGC_SUSET` for anything that affects security or diagnostics (PC :345; PSM handler.c:33-55).
-   > **Superseded by plan:** plllvm's GUCs are `PGC_SUSET` unless noted; only `plllvm.regress_test_mode` is `PGC_USERSET` (plan §4, §5a, §5b).
+36. **Names and contexts.** Name them `plllvm.<name>`, defined in `_PG_init` with one argument per line and `NULL, NULL, NULL` hooks (PC plpgsql_check.c:268-465). Pavel uses `PGC_USERSET` normally and `PGC_SUSET` for anything that affects security or diagnostics (PC :345; PSM handler.c:33-55). In an untrusted language every plllvm GUC affects one or the other, so all are `PGC_SUSET` except `plllvm.regress_test_mode` (`PGC_USERSET`).
 37. **Integer GUCs** state bounds and units: `1024, 10, 2048, PGC_USERSET, GUC_UNIT_KB` (PC plpgsql_check.c:442-449). **Enum GUCs** use a `static const struct config_enum_entry xxx_options[] = {…, {NULL, 0, false}};` table (PC :58-91).
 38. **Description wording.** Pavel's are lowercase ("when is true, then … are showed", PC :285-299) with no `gettext_noop`. Core uses `gettext_noop("Capitalized sentence.")` (pl_handler.c:159-184), and the `plpgsql.*` GUCs in core are written that way. Use the core form.
 39. **Reserve the prefix** with `MarkGUCPrefixReserved("plllvm")` (pl_handler.c:203). Pavel's `EmitWarningsOnPlaceholders` (PC :467) is only an alias kept for old versions.

@@ -6,8 +6,7 @@
  *
  * by Matěj Formánek 2026
  *
- * Derived from scratch/spikes/plllvm-v1@3ac7fd6 (plllvm_error.cpp), which
- * copies src/backend/jit/llvm/llvmjit_error.cpp (PostgreSQL 9510a826e4a).
+ * Copies src/backend/jit/llvm/llvmjit_error.cpp (PostgreSQL 9510a826e4a).
  *
  *-------------------------------------------------------------------------
  *

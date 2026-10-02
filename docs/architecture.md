@@ -12,14 +12,25 @@ language only; everything else depends on the thesis plan.
 | `src/plllvm_jit.h` | the LLVM-facing API, the only header shared with C++ |
 | `src/plllvm_error.cpp` | fatal-on-OOM sections (copy of core's `llvmjit_error.cpp`) |
 | `src/plllvm_types.c` | inline host helpers and the version and layout constants, compiled to `plllvm_types.bc` only |
-| `src/plllvm_runtime.c` | out-of-line host functions and the JIT symbol table |
+| `src/plllvm_runtime.c` | out-of-line host functions for errors, memory and arrays; frames; the JIT symbol table |
 | `src/plllvm_jit.c` | LLVM session (checks `plllvm_types.bc`, target machine); LLJIT, compile pipeline, symbols, timings |
-| `src/plllvm_compile.c` | funccache callbacks, signature and scope checks (PR 3) |
-| `src/plllvm_spi.c` | read-only prepared statements: prepare into a slot, SELECT INTO, result checks |
-| `src/plllvm_sites.c` | call sites and constants: resolution, rebuild, EXECUTE checks, invalidation callbacks |
-| `src/plllvm_stats.c` | `plllvm_session_info()`, `plllvm_code_cache()`, `plllvm_jit_test()`, `plllvm_function_status()` (PR 3) |
+| `src/plllvm_compile.c` | funccache callbacks, signature and scope checks |
+| `src/plllvm_spi.c` | read-only prepared statements: prepare into a slot, SELECT INTO, result checks (`plllvm_spi_*` host functions) |
+| `src/plllvm_sites.c` | call sites and constants: resolution, rebuild, EXECUTE checks, invalidation callbacks (`plllvm_rt_site_*` host functions) |
+| `src/plllvm_stats.c` | `plllvm_session_info()`, `plllvm_code_cache()`, `plllvm_call_sites()`, `plllvm_jit_test()`, `plllvm_function_status()` |
 
 Only `plllvm_jit.c` and `plllvm_error.cpp` include LLVM headers.
+
+## Terms
+
+* **module**, **compile**: the code of one successful compile
+  (`plllvm_jit_module`, in `plllvm_jit.c` wrapped as `JitCode` with its
+  resource tracker); one row of `plllvm_code_cache()`.
+* **released** (counted as **retired**): no funccache entry points at the
+  module any more; the next compile frees it.
+* **refs**: the call sites and constants of one module (`plllvm_refs`).
+* **site**: one call site, its FmgrInfo and fcinfo (`plllvm_site`).
+* **frame**: the scratch context of a running call (`plllvm_frame`).
 
 ## Runtime (v0.1)
 
@@ -29,7 +40,9 @@ Only `plllvm_jit.c` and `plllvm_error.cpp` include LLVM headers.
   defined as absolute symbols.
 * Each compile gets a fresh `LLVMContext`: parse `plllvm_types.bc` (helpers
   become `linkonce_odr`), parse the user IR, check the entry `@f`, the size
-  and the user's declarations against the helpers, link, rename the entry to
+  and the user's declarations against the helpers, add the interrupt and
+  stack checks its loops and recursions lack (`plllvm.auto_checks`), link,
+  rename the entry to
   `plllvm_<oid>_<gen>`, internalise, verify, resolve every declaration,
   optimise, add with its own resource tracker, look up.
 * When its funccache entry lets go of a module (the entry is stale and no

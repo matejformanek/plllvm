@@ -32,9 +32,10 @@
  *
  * 5) The errcontext of a call costs the fast path nothing: on ERROR, the
  *    busy site is the running call.  That holds only while one call of the
- *    code runs and no ERROR has left a flag behind (note 3): an ERROR
- *    leaving a call under another one drops the line until the code is
- *    idle.  The slow path pushes a callback of its own.
+ *    code runs and no ERROR has left a flag behind (note 3).  After an
+ *    ERROR leaves a call while an outer call of the same code runs, the
+ *    errcontext names no site until no call of the code runs.  The slow
+ *    path pushes a callback of its own.
  *
  */
 #include "postgres.h"
@@ -154,7 +155,8 @@ role_callback(Datum arg, SysCacheIdentifier cacheid, uint32 hashvalue)
  * its schema between pg_catalog and pg_temp (pg_temp last, so that a
  * temporary type cannot shadow a catalog one).  The latter is returned as
  * PATH_NSP and the schema's OID, which path_set() turns into the path of
- * the schema's current name.  A search_path setting never starts with it.
+ * the schema's current name.  A setting starting with PATH_NSP is misread
+ * as this marker.
  */
 #define PATH_NSP '\001'
 

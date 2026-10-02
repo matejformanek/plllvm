@@ -6,7 +6,7 @@ version 1 calling convention. It is written for a master's thesis on JIT
 compilation of PL/pgSQL (FIT ČVUT, supervisor Pavel Stěhule) and needs no
 changes to PostgreSQL.
 
-**Status: v0.1 in progress.** Functions in `LANGUAGE plllvm` are checked at
+**Status: v0.1.** Functions in `LANGUAGE plllvm` are checked at
 `CREATE FUNCTION`, compiled with plllvm's own LLJIT at their first call in a
 session, and run. `examples/kernels/` has the benchmark kernels of the thesis
 except neword (see Limits): twelve written by hand in IR and two compiled
@@ -53,8 +53,8 @@ $$;
 `@f` returns the result Datum: integers sign-extended to `i64`, `float8` as
 its bits (`bitcast`), `bool` as 0 or 1. The IR handles NULL arguments of a
 non-STRICT function itself (`plllvm_arg_isnull`, `plllvm_return_null`).
-Declarations of the host API (`src/plllvm_types.c`, `src/plllvm_runtime.c`)
-are checked against it; other external symbols resolve against the server
+Declarations of host API functions (`docs/host-api.ll`) are checked against
+the extension's own; other external symbols resolve against the server
 process. Names starting with `plllvm_` cannot be defined. Only `@f` is
 seen outside the body, so module asm, aliases, ifuncs and `llvm.*` globals
 other than `llvm.used`, `llvm.compiler.used` and empty constructor lists are
@@ -306,7 +306,9 @@ make PG_CONFIG=.../code/install-jit/bin/pg_config stage cluster-start installche
 `make pgindent` formats the C sources (`docs/style.md`). `make check-host-api`
 (part of `installcheck`) checks that `docs/host-api.ll` declares the whole
 host API; `make installcheck-discard` runs the call-site tests under
-`debug_discard_caches`. `make kernels` compiles `examples/kernels/src/*.c`
+`debug_discard_caches`; `make installcheck-hazard PLLLVM_PORT=<port>` runs
+the tests that crash the server if their fix regresses, on a throwaway
+cluster only. `make kernels` compiles `examples/kernels/src/*.c`
 to IR with the install-perf headers, and `make check-kernels` checks that
 the committed `.ll` files are up to date.
 

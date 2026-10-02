@@ -11,7 +11,9 @@
  * Notes:
  *
  * 1) These are the cold paths of the host API, kept out of line so that the
- *    stock messages exist once.  The inline helpers are in plllvm_types.c.
+ *    stock messages exist once.  The inline helpers are in plllvm_types.c;
+ *    the out-of-line functions of call sites are in plllvm_sites.c, those
+ *    of SQL statements in plllvm_spi.c.  The symbol table below lists all.
  *
  * 2) The library is built with -fvisibility=hidden, so the JIT cannot find
  *    these functions with dlsym().  It defines them from plllvm_host_symbols
@@ -240,7 +242,7 @@ plllvm_array_new(Oid elemtype, int32 n)
 	return a;
 }
 
-/* also of an array a call returned, which may be toasted or expanded */
+/* copy of an array; it may come from a call and be toasted or expanded */
 ArrayType *
 plllvm_array_copy(ArrayType *a)
 {

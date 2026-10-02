@@ -244,7 +244,7 @@ plllvm_detoast(Datum v)
 	return PointerGetDatum(pg_detoast_datum_packed((struct varlena *) DatumGetPointer(v)));
 }
 
-/* of a detoasted value */
+/* data and size of a detoasted value, as plllvm_detoast() returns */
 pg_always_inline char *
 plllvm_vardata_any(Datum v)
 {
@@ -257,7 +257,7 @@ plllvm_varsize_any_exhdr(Datum v)
 	return (int32) VARSIZE_ANY_EXHDR(DatumGetPointer(v));
 }
 
-/* of a value from plllvm_keep(), or of a NULL column (0) */
+/* frees a value from plllvm_keep(); 0, a NULL column, is ignored */
 pg_always_inline void
 plllvm_free(Datum v)
 {

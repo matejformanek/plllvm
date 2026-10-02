@@ -196,8 +196,9 @@ plllvm_subxact_callback(SubXactEvent event, SubTransactionId mySubid,
  *   still exists (a frame's scratch, or the module data of a constant),
  *   and the frame is popped before the unpin, so that nothing runs in a
  *   context about to be deleted;
- * - an ERROR under another call of the code may leave busy sites behind,
- *   which the errcontext of that call must not name.
+ * - an ERROR that leaves this call while an outer call of the same code
+ *   runs leaves the busy flags of its sites set; marking the sites unsure
+ *   keeps the outer call's errcontext from naming one of them.
  */
 Datum
 plllvm_call_handler(PG_FUNCTION_ARGS)
@@ -268,7 +269,7 @@ plllvm_call_handler(PG_FUNCTION_ARGS)
 	return retval;
 }
 
-/* on success and on ERROR */
+/* ends a call, on success and on ERROR alike */
 static void
 call_end(plllvm_function *func, plllvm_frame *frame)
 {
