@@ -27,7 +27,6 @@ extern void plllvm_enter_fatal_on_oom(void);
 extern void plllvm_leave_fatal_on_oom(void);
 extern bool plllvm_in_fatal_on_oom(void);
 extern void plllvm_reset_after_error(void);
-extern void plllvm_assert_in_fatal_section(void);
 
 /* values of plllvm.debug_inject */
 #define PLLLVM_INJECT_NONE			0
@@ -107,7 +106,6 @@ typedef struct plllvm_jit_session_info
 } plllvm_jit_session_info;
 
 /* plllvm_jit.c */
-extern void plllvm_jit_session_ensure(void);
 extern void plllvm_jit_get_session_info(plllvm_jit_session_info *info);
 extern bool plllvm_jit_compile(Oid owner_oid, Oid collation,
 							   const char *search_path, int nargs,

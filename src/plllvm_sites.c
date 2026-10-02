@@ -58,7 +58,6 @@
 #include "utils/syscache.h"
 
 #include "plllvm.h"
-#include "plllvm_jit.h"
 
 struct plllvm_refs
 {

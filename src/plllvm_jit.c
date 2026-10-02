@@ -131,6 +131,7 @@ static int	n_unfreed = 0;		/* released, not yet freed */
  */
 static char *diag_error = NULL;
 
+static void plllvm_jit_session_ensure(void);
 static void types_bc_locate(char *path);
 static char *types_module_check(LLVMModuleRef mod, unsigned llvm_major);
 static char *target_machine_create(void);
@@ -217,7 +218,7 @@ static char *llvm_error_message(LLVMErrorRef error);
  * A failed attempt leaves nothing behind, so it is retried on the next
  * call, e.g. after plllvm.types_bc_path was fixed.
  */
-void
+static void
 plllvm_jit_session_ensure(void)
 {
 	char		path[MAXPGPATH];
