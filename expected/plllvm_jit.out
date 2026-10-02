@@ -231,6 +231,24 @@ $ir$, codegen => false);
 (1 row)
 
 SELECT ok, sqlstate, message, detail FROM plllvm_jit_test($ir$
+define void @"llvm.foo"() { ret void }
+define i64 @f(ptr %p) { ret i64 0 }
+$ir$, codegen => false);
+ ok | sqlstate |              message              |                       detail                       
+----+----------+-----------------------------------+----------------------------------------------------
+ f  | 42P13    | the IR must not define "llvm.foo" | Names starting with "llvm." are reserved for LLVM.
+(1 row)
+
+SELECT ok, sqlstate, message, detail FROM plllvm_jit_test($ir$
+define void @llvm.trap() { ret void }
+define i64 @f(ptr %p) { ret i64 0 }
+$ir$, codegen => false);
+ ok | sqlstate |              message               |                       detail                       
+----+----------+------------------------------------+----------------------------------------------------
+ f  | 42P13    | the IR must not define "llvm.trap" | Names starting with "llvm." are reserved for LLVM.
+(1 row)
+
+SELECT ok, sqlstate, message, detail FROM plllvm_jit_test($ir$
 module asm ".globl _plllvm_x"
 define i64 @f(ptr %p) { ret i64 0 }
 $ir$, codegen => false);

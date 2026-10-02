@@ -159,6 +159,14 @@ SELECT ok, sqlstate, message, detail FROM plllvm_jit_test($ir$
 define i64 @f(ptr %p) { ret i64 0 }
 $ir$, codegen => false);
 SELECT ok, sqlstate, message, detail FROM plllvm_jit_test($ir$
+define void @"llvm.foo"() { ret void }
+define i64 @f(ptr %p) { ret i64 0 }
+$ir$, codegen => false);
+SELECT ok, sqlstate, message, detail FROM plllvm_jit_test($ir$
+define void @llvm.trap() { ret void }
+define i64 @f(ptr %p) { ret i64 0 }
+$ir$, codegen => false);
+SELECT ok, sqlstate, message, detail FROM plllvm_jit_test($ir$
 module asm ".globl _plllvm_x"
 define i64 @f(ptr %p) { ret i64 0 }
 $ir$, codegen => false);

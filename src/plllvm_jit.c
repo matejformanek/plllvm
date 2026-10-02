@@ -1383,7 +1383,7 @@ user_ir_check(LLVMContextRef ctx, LLVMModuleRef umod, LLVMModuleRef hmod,
 			const char *name = value_name(gv);
 			LLVMValueRef host;
 
-			if (pass == 0 && LLVMGetIntrinsicID(gv) != 0)
+			if (pass == 0 && LLVMGetIntrinsicID(gv) != 0 && LLVMIsDeclaration(gv))
 				continue;
 
 			host = LLVMGetNamedFunction(hmod, name);
@@ -1396,7 +1396,7 @@ user_ir_check(LLVMContextRef ctx, LLVMModuleRef umod, LLVMModuleRef hmod,
 
 			if (!LLVMIsDeclaration(gv))
 			{
-				if (pass == 1 && strncmp(name, "llvm.", 5) == 0)
+				if (strncmp(name, "llvm.", 5) == 0)
 				{
 					if (!llvm_global_check(gv, name, result))
 						return false;
@@ -1457,12 +1457,15 @@ user_ir_check(LLVMContextRef ctx, LLVMModuleRef umod, LLVMModuleRef hmod,
  * A global named "llvm.*" stays external (symbols_internalize()), and the
  * JIT runs no static constructors or destructors.  So only llvm.used,
  * llvm.compiler.used and the empty lists that opt leaves behind may be
- * defined.
+ * defined, and no function.
  */
 static bool
 llvm_global_check(LLVMValueRef gv, const char *name, plllvm_jit_result *result)
 {
 	LLVMTypeRef type = LLVMGlobalGetValueType(gv);
+
+	if (LLVMIsAFunction(gv))
+		goto reserved;
 
 	if (strcmp(name, "llvm.used") == 0 ||
 		strcmp(name, "llvm.compiler.used") == 0)
@@ -1481,6 +1484,7 @@ llvm_global_check(LLVMValueRef gv, const char *name, plllvm_jit_result *result)
 		return false;
 	}
 
+reserved:
 	build_error(result, ERRCODE_INVALID_FUNCTION_DEFINITION,
 				psprintf("the IR must not define \"%s\"", name),
 				pstrdup("Names starting with \"llvm.\" are reserved for LLVM."));
@@ -1506,6 +1510,7 @@ spi_slot_check(LLVMModuleRef umod, plllvm_jit_result *result)
 	{
 		LLVMValueRef call = LLVMGetUser(use);
 		LLVMValueRef slot;
+		LLVMValueRef first;
 
 		if (!LLVMIsACallInst(call) || !call_callee_use(call, use))
 		{
@@ -1533,6 +1538,8 @@ spi_slot_check(LLVMModuleRef umod, plllvm_jit_result *result)
 			}
 		}
 
+		/* every use of the slot is checked once, with its first user */
+		first = LLVMGetUser(LLVMGetFirstUse(slot));
 		for (LLVMUseRef suse = LLVMGetFirstUse(slot); suse; suse = LLVMGetNextUse(suse))
 		{
 			LLVMValueRef other = LLVMGetUser(suse);
@@ -1541,17 +1548,19 @@ spi_slot_check(LLVMModuleRef umod, plllvm_jit_result *result)
 				LLVMGetCalledValue(other) != prepare ||
 				LLVMGetOperandUse(other, 0) != suse)
 				goto bad_slot;
+			if (first != call)
+				break;
+		}
 
-			for (int i = 1; i <= 3; i++)
+		for (int i = 1; i <= 3; i++)
+		{
+			if (LLVMGetOperand(call, i) != LLVMGetOperand(first, i))
 			{
-				if (LLVMGetOperand(other, i) != LLVMGetOperand(call, i))
-				{
-					build_error(result, ERRCODE_INVALID_FUNCTION_DEFINITION,
-								psprintf("statement slot \"%s\" is prepared with different arguments",
-										 value_name(slot)),
-								pstrdup("Each statement needs a slot of its own."));
-					return false;
-				}
+				build_error(result, ERRCODE_INVALID_FUNCTION_DEFINITION,
+							psprintf("statement slot \"%s\" is prepared with different arguments",
+									 value_name(slot)),
+							pstrdup("Each statement needs a slot of its own."));
+				return false;
 			}
 		}
 	}
