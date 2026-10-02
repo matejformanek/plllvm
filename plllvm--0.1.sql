@@ -56,7 +56,7 @@ CREATE FUNCTION plllvm_jit_test(ir text, opt_level int4 DEFAULT NULL,
                                 codegen bool DEFAULT true)
   RETURNS TABLE(ok bool, sqlstate text, message text, detail text,
                 line int4, col int4, gen int8, ir_instructions int4,
-                helpers_linked int4, cfi_left int4)
+                helpers_linked int4, cfi_left int4, checks_inserted int4)
   CALLED ON NULL INPUT LANGUAGE c AS 'MODULE_PATHNAME';
 
 REVOKE ALL ON FUNCTION plllvm_jit_test(text, int4, bool) FROM PUBLIC;

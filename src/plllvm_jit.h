@@ -88,6 +88,7 @@ typedef struct plllvm_jit_result
 	int			ir_instructions;
 	int			helpers_linked;
 	int			cfi_left;		/* -1 when not optimised */
+	int			checks_inserted;	/* plllvm.auto_checks calls added */
 	bool		needs_frame;
 	bool		uses_spi;
 } plllvm_jit_result;

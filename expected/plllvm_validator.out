@@ -110,6 +110,73 @@ ERROR:  invalid IR: Instruction does not dominate all uses!
 CONTEXT:  compilation of PL/LLVM function "v_ir"
 \echo :LAST_ERROR_SQLSTATE
 42P13
+-- each SQL statement has a slot of its own, a global that only
+-- plllvm_spi_prepare uses
+CREATE FUNCTION v_slot() RETURNS int8 LANGUAGE plllvm STABLE AS $$
+@q1 = private constant [9 x i8] c"SELECT 1\00"
+@q2 = private constant [9 x i8] c"SELECT 2\00"
+@int4 = private constant [5 x i8] c"int4\00"
+@none = private constant [1 x i8] c"\00"
+@q = internal global ptr null
+declare ptr @plllvm_spi_prepare(ptr, ptr, ptr, ptr)
+define i64 @f(ptr %fcinfo) {
+  %s1 = call ptr @plllvm_spi_prepare(ptr @q, ptr @q1, ptr @none, ptr @int4)
+  %s2 = call ptr @plllvm_spi_prepare(ptr @q, ptr @q2, ptr @none, ptr @int4)
+  ret i64 0
+}
+$$;
+ERROR:  statement slot "q" is prepared with different arguments
+DETAIL:  Each statement needs a slot of its own.
+CONTEXT:  compilation of PL/LLVM function "v_slot"
+CREATE FUNCTION v_slot() RETURNS int8 LANGUAGE plllvm STABLE AS $$
+@q1 = private constant [9 x i8] c"SELECT 1\00"
+@int4 = private constant [5 x i8] c"int4\00"
+@none = private constant [1 x i8] c"\00"
+declare ptr @plllvm_spi_prepare(ptr, ptr, ptr, ptr)
+define i64 @f(ptr %fcinfo) {
+  %slot = alloca ptr
+  store ptr null, ptr %slot
+  %s = call ptr @plllvm_spi_prepare(ptr %slot, ptr @q1, ptr @none, ptr @int4)
+  ret i64 0
+}
+$$;
+ERROR:  the slot of plllvm_spi_prepare must be a global ptr initialized to null
+DETAIL:  Each statement needs a slot of its own, used by no other instruction.
+CONTEXT:  compilation of PL/LLVM function "v_slot"
+CREATE FUNCTION v_slot() RETURNS int8 LANGUAGE plllvm STABLE AS $$
+@q1 = private constant [9 x i8] c"SELECT 1\00"
+@int4 = private constant [5 x i8] c"int4\00"
+@none = private constant [1 x i8] c"\00"
+@q = internal global ptr null
+declare ptr @plllvm_spi_prepare(ptr, ptr, ptr, ptr)
+define i64 @f(ptr %fcinfo) {
+  %s = call ptr @plllvm_spi_prepare(ptr @q, ptr @q1, ptr @none, ptr @int4)
+  store ptr null, ptr @q
+  ret i64 0
+}
+$$;
+ERROR:  the slot of plllvm_spi_prepare must be a global ptr initialized to null
+DETAIL:  Each statement needs a slot of its own, used by no other instruction.
+CONTEXT:  compilation of PL/LLVM function "v_slot"
+CREATE FUNCTION v_slot() RETURNS int8 LANGUAGE plllvm STABLE AS $$
+@q = internal global ptr null
+declare ptr @plllvm_spi_prepare(ptr, ptr, ptr, ptr)
+define i64 @f(ptr %fcinfo) {
+  %sql = getelementptr i8, ptr %fcinfo, i64 64
+  %s = call ptr @plllvm_spi_prepare(ptr @q, ptr %sql, ptr %sql, ptr %sql)
+  ret i64 0
+}
+$$;
+ERROR:  the statement and the types of plllvm_spi_prepare must be constants
+CONTEXT:  compilation of PL/LLVM function "v_slot"
+CREATE FUNCTION v_slot() RETURNS int8 LANGUAGE plllvm STABLE AS $$
+@q = internal global ptr null
+@prepare = internal global ptr @plllvm_spi_prepare
+declare ptr @plllvm_spi_prepare(ptr, ptr, ptr, ptr)
+define i64 @f(ptr %fcinfo) { ret i64 0 }
+$$;
+ERROR:  plllvm_spi_prepare can only be called directly
+CONTEXT:  compilation of PL/LLVM function "v_slot"
 -- what the handler cannot call, also with check_function_bodies = off
 CREATE TYPE v_pair AS (a int4, b int4);
 CREATE DOMAIN v_posint AS int4 CHECK (VALUE > 0);

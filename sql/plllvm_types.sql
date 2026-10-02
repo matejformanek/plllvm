@@ -7,6 +7,7 @@ SET plllvm.regress_test_mode = on;
 \getenv abs_builddir PG_ABS_BUILDDIR
 \set stale :abs_builddir '/src/plllvm_types_stale.bc'
 \set notbc :abs_builddir '/plllvm.control'
+\set dir :abs_builddir '/src'
 
 -- a .bc built from other sources is refused
 SET plllvm.types_bc_path = :'stale';
@@ -16,6 +17,9 @@ SELECT llvm_version FROM plllvm_session_info();  -- fail
 SET plllvm.types_bc_path = :'notbc';
 SELECT llvm_version FROM plllvm_session_info();  -- fail
 SET plllvm.types_bc_path = '/nonexistent/plllvm_types.bc';
+SELECT llvm_version FROM plllvm_session_info();  -- fail
+-- and a directory; LLVM would read a FIFO or a device without end
+SET plllvm.types_bc_path = :'dir';
 SELECT llvm_version FROM plllvm_session_info();  -- fail
 
 -- the default, next to the library, works after the failed attempts

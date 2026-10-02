@@ -60,6 +60,7 @@ bool		plllvm_dump_ir = false;
 int			plllvm_max_resident_compiles = 2000;
 int			plllvm_max_ir_instructions = 100000;
 int			plllvm_debug_inject = PLLLVM_INJECT_NONE;
+bool		plllvm_auto_checks = true;
 
 static const struct config_enum_entry debug_inject_options[] = {
 	{"none", PLLLVM_INJECT_NONE, false},
@@ -141,6 +142,14 @@ _PG_init(void)
 							 &plllvm_debug_inject,
 							 PLLLVM_INJECT_NONE,
 							 debug_inject_options,
+							 PGC_SUSET, GUC_NO_SHOW_ALL | GUC_NOT_IN_SAMPLE,
+							 NULL, NULL, NULL);
+
+	DefineCustomBoolVariable("plllvm.auto_checks",
+							 gettext_noop("Inserts interrupt and stack depth checks into compiled loops and recursion."),
+							 gettext_noop("Turn it off only for measurements."),
+							 &plllvm_auto_checks,
+							 true,
 							 PGC_SUSET, GUC_NO_SHOW_ALL | GUC_NOT_IN_SAMPLE,
 							 NULL, NULL, NULL);
 
