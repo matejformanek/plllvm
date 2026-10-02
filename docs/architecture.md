@@ -8,7 +8,8 @@ language only; everything else depends on the thesis plan.
 | file | content |
 |---|---|
 | `src/plllvm.c` | module magic, `_PG_init` (GUCs, abort callbacks), call handler, validator |
-| `src/plllvm.h` | internal declarations, version floor |
+| `src/plllvm.h` | internal declarations |
+| `src/plllvm_host.h` | what JIT code shares with the server: version floor, layout probes, `plllvm_site`, the inline call protocol, out-of-line host functions; the only header of `plllvm_types.c`, hashed into the `.bc` version |
 | `src/plllvm_jit.h` | the LLVM-facing API, the only header shared with C++ |
 | `src/plllvm_error.cpp` | fatal-on-OOM sections (copy of core's `llvmjit_error.cpp`) |
 | `src/plllvm_types.c` | inline host helpers and the version and layout constants, compiled to `plllvm_types.bc` only |

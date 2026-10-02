@@ -266,6 +266,18 @@ SELECT mk_ll('ow.c_sib(x int)', 'int', 'sib(integer)', 1);
 SELECT ow.c_sib(2);
 ALTER SCHEMA ow RENAME TO ow2;
 SELECT ow2.c_sib(2);
+-- an own search_path is used as it is, even when it starts with \x01
+CREATE SCHEMA U&"\0001ctl";
+CREATE FUNCTION U&"\0001ctl".ctl(x int) RETURNS int LANGUAGE sql AS 'SELECT x + 7';
+SELECT set_config('search_path', E'\x01ctl', false) IS NOT NULL AS set;
+SELECT public.mk_ll('public.c_ctl(x int)', 'int', 'ctl(integer)', 1,
+                    opts => 'SET search_path FROM CURRENT');
+RESET search_path;
+SELECT proconfig = ARRAY[E'search_path=\x01ctl'] AS raw_setting
+FROM pg_proc WHERE oid = 'c_ctl(int)'::regprocedure;
+SELECT c_ctl(1);
+DROP FUNCTION c_ctl(int), U&"\0001ctl".ctl(int);
+DROP SCHEMA U&"\0001ctl";
 -- the code was compiled for the old argument types
 CREATE SCHEMA ta;
 CREATE DOMAIN ta.d AS int;

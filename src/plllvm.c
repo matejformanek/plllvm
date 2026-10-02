@@ -248,7 +248,7 @@ plllvm_call_handler(PG_FUNCTION_ARGS)
 	{
 		if (func->cfunc.use_count > 1 && func->mod != NULL &&
 			func->mod->refs != NULL)
-			plllvm_sites_unsure(func->mod->refs);
+			plllvm_refs_unsure(func->mod->refs);
 		call_end(func, &frame);
 		PG_RE_THROW();
 	}
@@ -285,7 +285,7 @@ exec_error_callback(void *arg)
 	const char *site = NULL;
 
 	if (func->mod != NULL && func->mod->refs != NULL)
-		site = plllvm_sites_running(func->mod->refs, func->cfunc.use_count);
+		site = plllvm_refs_running(func->mod->refs, func->cfunc.use_count);
 	if (site != NULL)
 		errcontext("PL/LLVM call site \"%s\"", site);
 	errcontext("PL/LLVM function \"%s\"", NameStr(func->proname));

@@ -36,7 +36,7 @@
 #include "utils/float.h"
 #include "varatt.h"
 
-#include "plllvm.h"
+#include "plllvm_host.h"
 
 const uint32 plllvm_types_version = PLLLVM_TYPES_VERSION;
 const uint32 plllvm_types_llvm_major = __clang_major__;
@@ -140,46 +140,17 @@ plllvm_check_stack(void)
 	check_stack_depth();
 }
 
-/*
- * The arguments come in by value and are stored right before the call, so
- * nothing can re-enter in between.  A busy site is never called again: an
- * FmgrInfo carries one call at a time (fmgr_security_definer, fmgr_sql).
- */
+/* a busy site is never called again: an FmgrInfo carries one call at a time */
 static pg_always_inline Datum
 site_call(plllvm_site *site, NullableDatum *args, int nargs, bool *isnull)
 {
 	FunctionCallInfo fcinfo = site->fcinfo;
-	Datum		result;
 
 	if (unlikely(!site->ready || site->busy || site->userid != GetUserId()))
 		return plllvm_rt_site_call(site, args, isnull);
 
-	if (site->flinfo.fn_strict)
-	{
-		for (int i = 0; i < nargs; i++)
-		{
-			if (args[i].isnull)
-				goto null_result;
-		}
-	}
-	for (int i = 0; i < nargs; i++)
-		fcinfo->args[i] = args[i];
-	fcinfo->isnull = false;
-	site->busy = true;
-	result = FunctionCallInvoke(fcinfo);
-	site->busy = false;
-	if (!fcinfo->isnull)
-	{
-		if (isnull)
-			*isnull = false;
-		return result;
-	}
-
-null_result:
-	if (isnull == NULL)
-		plllvm_rt_site_null(site);
-	*isnull = true;
-	return (Datum) 0;
+	return plllvm_site_invoke(site, fcinfo, site->flinfo.fn_strict, true,
+							  args, nargs, isnull);
 }
 
 pg_always_inline Datum

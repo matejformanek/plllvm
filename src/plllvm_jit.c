@@ -75,7 +75,7 @@
 #error "plllvm requires LLVM 22 or later"
 #endif
 
-/* the Makefile sets it, see plllvm.h */
+/* the Makefile sets it, see plllvm_host.h */
 #ifndef PLLLVM_TYPES_VERSION
 #error "PLLLVM_TYPES_VERSION is not defined"
 #endif
@@ -131,6 +131,7 @@ static int	n_unfreed = 0;		/* released, not yet freed */
  */
 static char *diag_error = NULL;
 
+static void plllvm_jit_session_ensure(void);
 static void types_bc_locate(char *path);
 static char *types_module_check(LLVMModuleRef mod, unsigned llvm_major);
 static char *target_machine_create(void);
@@ -144,7 +145,7 @@ static void plllvm_jit_shutdown(int code, Datum arg);
 static void released_free(void);
 static void tracker_remove(LLVMOrcResourceTrackerRef rt);
 static bool build(const char *ir, bool codegen, Oid collation,
-				  const char *search_path, int nargs, plllvm_jit_module *mod,
+				  const plllvm_path *path, int nargs, plllvm_jit_module *mod,
 				  LLVMOrcResourceTrackerRef *rt, plllvm_refs **refs,
 				  char **optimized_ir, plllvm_jit_result *result);
 static bool helpers_load(LLVMContextRef ctx, LLVMModuleRef *hmod,
@@ -158,7 +159,7 @@ static void symbols_internalize(LLVMModuleRef umod, const char *symbol,
 								LLVMAttributeRef *attrs, int nattrs);
 static bool ir_verify(LLVMModuleRef umod, plllvm_jit_result *result);
 static void refs_apply(LLVMContextRef ctx, LLVMModuleRef umod, List *irrefs,
-					   bool codegen, Oid collation, const char *search_path,
+					   bool codegen, Oid collation, const plllvm_path *path,
 					   plllvm_refs **refs);
 static bool symbols_check(LLVMModuleRef umod, plllvm_jit_result *result);
 static bool ir_optimize(LLVMModuleRef umod, int opt_level, char **optimized_ir,
@@ -170,6 +171,8 @@ static void parse_error_set(char *msg, plllvm_jit_result *result);
 static bool user_ir_check(LLVMContextRef ctx, LLVMModuleRef umod,
 						  LLVMModuleRef hmod, int nargs, List **irrefs,
 						  plllvm_jit_result *result);
+static bool global_check(LLVMValueRef gv, LLVMModuleRef hmod, int nargs,
+						 List **irrefs, plllvm_jit_result *result);
 static bool ir_ref_check(LLVMValueRef gv, const char *name, int *nargs,
 						 plllvm_jit_result *result);
 static bool arg_index_check(LLVMValueRef gv, const char *name, int nargs,
@@ -217,7 +220,7 @@ static char *llvm_error_message(LLVMErrorRef error);
  * A failed attempt leaves nothing behind, so it is retried on the next
  * call, e.g. after plllvm.types_bc_path was fixed.
  */
-void
+static void
 plllvm_jit_session_ensure(void)
 {
 	char		path[MAXPGPATH];
@@ -330,19 +333,22 @@ plllvm_jit_session_ensure(void)
 					 errhint("Check the installation of the plllvm extension, or set plllvm.types_bc_path.")));
 		else if (parse_failed)
 			ereport(ERROR,
-					(errmsg("could not parse PL/LLVM types file \"%s\"",
+					(errcode(ERRCODE_INTERNAL_ERROR),
+					 errmsg("could not parse PL/LLVM types file \"%s\"",
 							plllvm_display_path(path)),
 					 parse_error ? errdetail("%s", parse_error) : 0,
 					 errhint("Rebuild and reinstall the plllvm extension.")));
 		else if (incompatible != NULL)
 			ereport(ERROR,
-					(errmsg("incompatible PL/LLVM types file \"%s\"",
+					(errcode(ERRCODE_INTERNAL_ERROR),
+					 errmsg("incompatible PL/LLVM types file \"%s\"",
 							plllvm_display_path(path)),
 					 errdetail("%s", incompatible),
 					 errhint("Rebuild and reinstall the plllvm extension.")));
 		else
 			ereport(ERROR,
-					(errmsg("could not create the LLVM JIT: %s", jit_error),
+					(errcode(ERRCODE_INTERNAL_ERROR),
+					 errmsg("could not create the LLVM JIT: %s", jit_error),
 					 errhint("Check the LLVM installation the plllvm extension was built with.")));
 	}
 
@@ -392,7 +398,7 @@ plllvm_jit_get_session_info(plllvm_jit_session_info *info)
  * is refused or the resident cap is reached; the caller raises the ERROR.
  */
 bool
-plllvm_jit_compile(Oid owner_oid, Oid collation, const char *search_path,
+plllvm_jit_compile(Oid owner_oid, Oid collation, const plllvm_path *path,
 				   int nargs, const char *ir, int opt_level,
 				   plllvm_jit_result *result)
 {
@@ -427,7 +433,7 @@ plllvm_jit_compile(Oid owner_oid, Oid collation, const char *search_path,
 			 owner_oid, mod.gen);
 	mod.opt_level = opt_level;
 
-	if (!build(ir, true, collation, search_path, nargs, &mod, &rt, &refs,
+	if (!build(ir, true, collation, path, nargs, &mod, &rt, &refs,
 			   &optimized_ir, result))
 	{
 		if (refs != NULL)
@@ -473,7 +479,7 @@ plllvm_jit_compile(Oid owner_oid, Oid collation, const char *search_path,
  * Check the IR as plllvm_jit_compile() would, without generating code
  */
 bool
-plllvm_jit_check(const char *ir, const char *search_path, int nargs,
+plllvm_jit_check(const char *ir, const plllvm_path *path, int nargs,
 				 plllvm_jit_result *result)
 {
 	plllvm_jit_module mod = {0};
@@ -484,7 +490,7 @@ plllvm_jit_check(const char *ir, const char *search_path, int nargs,
 
 	plllvm_jit_session_ensure();
 
-	ok = build(ir, false, InvalidOid, search_path, nargs, &mod, NULL, &refs,
+	ok = build(ir, false, InvalidOid, path, nargs, &mod, NULL, &refs,
 			   NULL, result);
 	if (refs != NULL)
 		plllvm_refs_end(refs, false);
@@ -503,7 +509,7 @@ plllvm_jit_release(plllvm_jit_module *mod)
 		return;
 
 	if (mod->refs != NULL)
-		plllvm_sites_release(mod->refs);
+		plllvm_refs_release(mod->refs);
 	mod->released = true;
 	n_retired++;
 	n_unfreed++;
@@ -843,7 +849,7 @@ plllvm_jit_shutdown(int code, Datum arg)
  * caller forgets them right after the call, so out: disposes what is left.
  */
 static bool
-build(const char *ir, bool codegen, Oid collation, const char *search_path,
+build(const char *ir, bool codegen, Oid collation, const plllvm_path *path,
 	  int nargs, plllvm_jit_module *mod, LLVMOrcResourceTrackerRef *rt,
 	  plllvm_refs **refs, char **optimized_ir, plllvm_jit_result *result)
 {
@@ -891,7 +897,7 @@ build(const char *ir, bool codegen, Oid collation, const char *search_path,
 	mod->verify_ms = elapsed_ms(&since);
 
 	if (irrefs != NIL)
-		refs_apply(ctx, umod, irrefs, codegen, collation, search_path, refs);
+		refs_apply(ctx, umod, irrefs, codegen, collation, path, refs);
 
 	if (!symbols_check(umod, result))
 		goto out;
@@ -1092,7 +1098,7 @@ ir_verify(LLVMModuleRef umod, plllvm_jit_result *result)
  */
 static void
 refs_apply(LLVMContextRef ctx, LLVMModuleRef umod, List *irrefs, bool codegen,
-		   Oid collation, const char *search_path, plllvm_refs **refs)
+		   Oid collation, const plllvm_path *path, plllvm_refs **refs)
 {
 	Datum	   *values = palloc(list_length(irrefs) * sizeof(Datum));
 	plllvm_refs *volatile vrefs = NULL;
@@ -1105,7 +1111,7 @@ refs_apply(LLVMContextRef ctx, LLVMModuleRef umod, List *irrefs, bool codegen,
 		int			i = 0;
 
 		vrefs = plllvm_refs_begin(list_length(irrefs), collation,
-								  search_path, !codegen);
+								  path, !codegen);
 		foreach_ptr(IrRef, ref, irrefs)
 			values[i++] = plllvm_refs_add(vrefs, ref->name, ref->nargs);
 		plllvm_refs_resolved(vrefs);
@@ -1371,83 +1377,96 @@ user_ir_check(LLVMContextRef ctx, LLVMModuleRef umod, LLVMModuleRef hmod,
 		return false;
 	}
 
-	for (int pass = 0; pass < 2; pass++)
+	for (gv = LLVMGetFirstFunction(umod); gv; gv = LLVMGetNextFunction(gv))
 	{
-		gv = pass == 0 ? LLVMGetFirstFunction(umod) : LLVMGetFirstGlobal(umod);
-
-		for (; gv; gv = pass == 0 ? LLVMGetNextFunction(gv) : LLVMGetNextGlobal(gv))
-		{
-			const char *name = value_name(gv);
-			LLVMValueRef host;
-
-			if (pass == 0 && LLVMGetIntrinsicID(gv) != 0 && LLVMIsDeclaration(gv))
-				continue;
-
-			host = LLVMGetNamedFunction(hmod, name);
-			if (host == NULL)
-				host = LLVMGetNamedGlobal(hmod, name);
-			/* the link renames local names, as clang's .str of Assert() */
-			if (host != NULL && (LLVMGetLinkage(host) == LLVMPrivateLinkage ||
-								 LLVMGetLinkage(host) == LLVMInternalLinkage))
-				host = NULL;
-
-			if (!LLVMIsDeclaration(gv))
-			{
-				if (strncmp(name, "llvm.", 5) == 0)
-				{
-					if (!llvm_global_check(gv, name, result))
-						return false;
-				}
-				else if (host != NULL || strncmp(name, "plllvm_", 7) == 0)
-				{
-					build_error(result, ERRCODE_INVALID_FUNCTION_DEFINITION,
-								psprintf("the IR must not define \"%s\"", name),
-								pstrdup("Names starting with \"plllvm_\" and the names of the host API are reserved."));
-					return false;
-				}
-			}
-			else if (host != NULL)
-			{
-				LLVMTypeRef expected = LLVMGlobalGetValueType(host);
-				LLVMTypeRef found = LLVMGlobalGetValueType(gv);
-
-				if (found != expected)
-				{
-					build_error(result, ERRCODE_INVALID_FUNCTION_DEFINITION,
-								psprintf("declaration of \"%s\" does not match the host API",
-										 name),
-								psprintf("Expected %s, found %s.",
-										 llvm_message(LLVMPrintTypeToString(expected)),
-										 llvm_message(LLVMPrintTypeToString(found))));
-					return false;
-				}
-				if (!arg_index_check(gv, name, nargs, result))
-					return false;
-				if (is_frame_helper(name))
-					result->needs_frame = true;
-				if (strncmp(name, "plllvm_spi_", 11) == 0)
-					result->uses_spi = true;
-			}
-			else if (pass == 1 && (name[0] == '\'' || strchr(name, '(') != NULL))
-			{
-				IrRef	   *ref = palloc(sizeof(IrRef));
-
-				if (!ir_ref_check(gv, name, &ref->nargs, result))
-					return false;
-				ref->name = pstrdup(name);
-				*irrefs = lappend(*irrefs, ref);
-			}
-			else if (strncmp(name, "plllvm_", 7) == 0)
-			{
-				build_error(result, ERRCODE_UNDEFINED_FUNCTION,
-							psprintf("host function \"%s\" does not exist", name),
-							NULL);
-				return false;
-			}
-		}
+		if (!global_check(gv, hmod, nargs, irrefs, result))
+			return false;
+	}
+	for (gv = LLVMGetFirstGlobal(umod); gv; gv = LLVMGetNextGlobal(gv))
+	{
+		if (!global_check(gv, hmod, nargs, irrefs, result))
+			return false;
 	}
 
 	return spi_slot_check(umod, result);
+}
+
+/*
+ * One function or global variable of the user IR: a definition must not
+ * take a reserved name, a declaration must match the host API or name a
+ * call site or constant.
+ */
+static bool
+global_check(LLVMValueRef gv, LLVMModuleRef hmod, int nargs, List **irrefs,
+			 plllvm_jit_result *result)
+{
+	const char *name = value_name(gv);
+	bool		is_function = LLVMIsAFunction(gv) != NULL;
+	LLVMValueRef host;
+
+	if (is_function && LLVMGetIntrinsicID(gv) != 0 && LLVMIsDeclaration(gv))
+		return true;
+
+	host = LLVMGetNamedFunction(hmod, name);
+	if (host == NULL)
+		host = LLVMGetNamedGlobal(hmod, name);
+	/* the link renames local names, as clang's .str of Assert() */
+	if (host != NULL && (LLVMGetLinkage(host) == LLVMPrivateLinkage ||
+						 LLVMGetLinkage(host) == LLVMInternalLinkage))
+		host = NULL;
+
+	if (!LLVMIsDeclaration(gv))
+	{
+		if (strncmp(name, "llvm.", 5) == 0)
+			return llvm_global_check(gv, name, result);
+		if (host != NULL || strncmp(name, "plllvm_", 7) == 0)
+		{
+			build_error(result, ERRCODE_INVALID_FUNCTION_DEFINITION,
+						psprintf("the IR must not define \"%s\"", name),
+						pstrdup("Names starting with \"plllvm_\" and the names of the host API are reserved."));
+			return false;
+		}
+	}
+	else if (host != NULL)
+	{
+		LLVMTypeRef expected = LLVMGlobalGetValueType(host);
+		LLVMTypeRef found = LLVMGlobalGetValueType(gv);
+
+		if (found != expected)
+		{
+			build_error(result, ERRCODE_INVALID_FUNCTION_DEFINITION,
+						psprintf("declaration of \"%s\" does not match the host API",
+								 name),
+						psprintf("Expected %s, found %s.",
+								 llvm_message(LLVMPrintTypeToString(expected)),
+								 llvm_message(LLVMPrintTypeToString(found))));
+			return false;
+		}
+		if (!arg_index_check(gv, name, nargs, result))
+			return false;
+		if (is_frame_helper(name))
+			result->needs_frame = true;
+		if (strncmp(name, "plllvm_spi_", 11) == 0)
+			result->uses_spi = true;
+	}
+	else if (!is_function && (name[0] == '\'' || strchr(name, '(') != NULL))
+	{
+		IrRef	   *ref = palloc(sizeof(IrRef));
+
+		if (!ir_ref_check(gv, name, &ref->nargs, result))
+			return false;
+		ref->name = pstrdup(name);
+		*irrefs = lappend(*irrefs, ref);
+	}
+	else if (strncmp(name, "plllvm_", 7) == 0)
+	{
+		build_error(result, ERRCODE_UNDEFINED_FUNCTION,
+					psprintf("host function \"%s\" does not exist", name),
+					NULL);
+		return false;
+	}
+
+	return true;
 }
 
 /*

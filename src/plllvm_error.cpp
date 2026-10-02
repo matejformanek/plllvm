@@ -44,6 +44,7 @@ static int	fatal_new_handler_depth = 0;
 static std::new_handler old_new_handler = NULL;
 
 static void fatal_system_new_handler(void);
+static void plllvm_assert_in_fatal_section(void);
 static void fatal_llvm_new_handler(void *user_data, const char *reason, bool gen_crash_diag);
 static void fatal_llvm_error_handler(void *user_data, const char *reason, bool gen_crash_diag);
 
@@ -116,7 +117,7 @@ plllvm_reset_after_error(void)
 	fatal_new_handler_depth = 0;
 }
 
-void
+static void
 plllvm_assert_in_fatal_section(void)
 {
 	Assert(fatal_new_handler_depth > 0);

@@ -11,73 +11,12 @@
 #ifndef PLLLVM_H
 #define PLLLVM_H
 
-#include "fmgr.h"
+#include "plllvm_host.h"
 
-/*
- * The language is built on funccache (cached_function_compile), which
- * appeared in PostgreSQL 18.  Only 20devel is checked (see PG_PIN).
- */
-#if PG_VERSION_NUM < 180000
-#error "plllvm requires PostgreSQL 18 or later"
-#endif
-
-#include "lib/ilist.h"
-#include "utils/array.h"
 #include "utils/funccache.h"
 
 /* keep in sync with META.json; plllvm.control carries major.minor only */
 #define PLLLVM_VERSION "0.1.0"
-
-/*
- * Probes of the fmgr ABI.  They are compiled into plllvm_types.bc by clang
- * and into the library by the server's compiler, and must agree.
- *
- * PLLLVM_TYPES_VERSION, the version stored next to them in the .bc, is not
- * defined here: the Makefile passes a checksum of plllvm_types.c and this
- * file to the .bc and to plllvm_jit.o.
- */
-#define PLLLVM_LAYOUT \
-	{ \
-		sizeof(Datum), \
-		sizeof(NullableDatum), \
-		offsetof(NullableDatum, isnull), \
-		offsetof(FunctionCallInfoBaseData, flinfo), \
-		offsetof(FunctionCallInfoBaseData, isnull), \
-		offsetof(FunctionCallInfoBaseData, nargs), \
-		offsetof(FunctionCallInfoBaseData, args), \
-		offsetof(plllvm_site, userid), \
-		offsetof(plllvm_site, fcinfo), \
-		offsetof(plllvm_site, flinfo), \
-		offsetof(FmgrInfo, fn_addr), \
-		offsetof(FmgrInfo, fn_strict), \
-		sizeof(ArrayType), \
-		ARR_OVERHEAD_NONULLS(1) \
-	}
-
-/* a call site of JIT-compiled code (plllvm_sites.c); its address is in the code */
-typedef struct plllvm_site
-{
-	bool		ready;			/* true, while flinfo matches pg_proc */
-	bool		busy;			/* true, while a call through flinfo runs */
-	Oid			userid;			/* user whose EXECUTE right was checked, or
-								 * InvalidOid */
-	FunctionCallInfo fcinfo;	/* nargs slots; fcinfo->flinfo = &flinfo */
-	FmgrInfo	flinfo;
-	Oid			fn_oid;
-	uint32		hashvalue;		/* of fn_oid in PROCOID */
-	int16		nargs;
-	Oid			rettype;		/* with argtypes, to recognise another
-								 * function under the same OID */
-	Oid		   *argtypes;
-	Oid			collation;
-	MemoryContext mcxt;			/* fn_mcxt, replaced at each rebuild */
-	const char *signature;		/* as written in the IR */
-	const char *search_path;	/* the module's resolution path */
-	int64		prepares;		/* for plllvm_call_sites() */
-	int64		checks;
-	int64		reentries;
-	dlist_node	node;			/* in the list the callbacks walk */
-} plllvm_site;
 
 /* the memory of a running function that calls other functions */
 typedef struct plllvm_frame
@@ -92,23 +31,14 @@ typedef struct plllvm_frame
 /* the sites and constants of one compile (plllvm_sites.c) */
 typedef struct plllvm_refs plllvm_refs;
 
-/* host functions called from JIT-compiled code (plllvm_runtime.c) */
-pg_noreturn extern void plllvm_error(int32 sqlstate, const char *msg);
-extern void plllvm_notice(const char *msg);
-pg_noreturn extern void plllvm_rt_int_overflow(void);
-pg_noreturn extern void plllvm_rt_bigint_overflow(void);
-pg_noreturn extern void plllvm_rt_div_zero(void);
-extern Datum plllvm_keep(Datum value);
-extern void plllvm_scratch_reset(void);
-extern Datum plllvm_rt_site_call(plllvm_site *site, NullableDatum *args,
-								 bool *isnull);
-pg_noreturn extern void plllvm_rt_site_null(plllvm_site *site);
-extern ArrayType *plllvm_array_arg(FunctionCallInfo fcinfo, int32 argno,
-								   Oid elemtype);
-extern ArrayType *plllvm_array_new(Oid elemtype, int32 n);
-extern ArrayType *plllvm_array_copy(ArrayType *a);
-pg_noreturn extern void plllvm_rt_array_access(ArrayType *a, Oid elemtype);
+/* where the names of a function's IR resolve (plllvm_sites.c, note 1) */
+typedef struct plllvm_path
+{
+	const char *search_path;	/* the function's own setting, or NULL */
+	Oid			nspoid;			/* else pg_catalog, this schema, pg_temp */
+} plllvm_path;
 
+/* plllvm_runtime.c */
 extern plllvm_frame *plllvm_cur_frame;
 extern void plllvm_frame_push(plllvm_frame *frame, MemoryContext caller,
 							  struct plllvm_spi_stmt **stmts);
@@ -167,27 +97,23 @@ extern void plllvm_compile_check_scope(HeapTuple procTup);
 extern void plllvm_compile_check_body(HeapTuple procTup);
 
 /* plllvm_spi.c */
-extern void *plllvm_spi_prepare(void **slot, const char *sql,
-								const char *argtypes, const char *coltypes);
-extern int32 plllvm_spi_select_into(FunctionCallInfo fcinfo, void *stmt,
-									NullableDatum *args, NullableDatum *out);
 extern int64 plllvm_spi_statements(void);
 extern void plllvm_spi_free(struct plllvm_spi_stmt *stmts);
 
 /* plllvm_sites.c */
 extern void plllvm_sites_init(void);
-extern char *plllvm_sites_path(HeapTuple procTup);
+extern void plllvm_sites_path(HeapTuple procTup, plllvm_path *path);
 extern plllvm_refs *plllvm_refs_begin(int nrefs, Oid collation,
-									  const char *search_path,
+									  const plllvm_path *path,
 									  bool check_only);
 extern Datum plllvm_refs_add(plllvm_refs *refs, const char *name, int nargs);
 extern void plllvm_refs_resolved(plllvm_refs *refs);
 extern void plllvm_refs_end(plllvm_refs *refs, bool publish);
 extern int	plllvm_refs_sites(plllvm_refs *refs, plllvm_site **sites);
-extern void plllvm_sites_idle(plllvm_refs *refs);
-extern void plllvm_sites_unsure(plllvm_refs *refs);
-extern const char *plllvm_sites_running(plllvm_refs *refs, int ncalls);
-extern void plllvm_sites_release(plllvm_refs *refs);
+extern void plllvm_refs_idle(plllvm_refs *refs);
+extern void plllvm_refs_unsure(plllvm_refs *refs);
+extern const char *plllvm_refs_running(plllvm_refs *refs, int ncalls);
+extern void plllvm_refs_release(plllvm_refs *refs);
 extern void plllvm_refs_free(plllvm_refs *refs);
 
 #endif							/* PLLLVM_H */

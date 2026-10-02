@@ -36,11 +36,11 @@
 #include "plllvm.h"
 #include "plllvm_jit.h"
 
-typedef struct compile_error_arg
+typedef struct CompileErrorArg
 {
 	const char *proname;
 	const char *src;			/* the body when validating, else NULL */
-} compile_error_arg;
+} CompileErrorArg;
 
 static void compile_callback(FunctionCallInfo fcinfo, HeapTuple procTup,
 							 const CachedFunctionHashKey *hashkey,
@@ -83,10 +83,10 @@ compile_callback(FunctionCallInfo fcinfo, HeapTuple procTup,
 	plllvm_function *func = (plllvm_function *) cfunc;
 	Form_pg_proc procStruct = (Form_pg_proc) GETSTRUCT(procTup);
 	plllvm_jit_result r;
-	compile_error_arg cbarg;
+	CompileErrorArg cbarg;
 	ErrorContextCallback errcallback;
 	char	   *src;
-	char	   *path;
+	plllvm_path path;
 	int16		rettyplen;
 	bool		rettypbyval;
 
@@ -105,11 +105,11 @@ compile_callback(FunctionCallInfo fcinfo, HeapTuple procTup,
 	/* on ERROR, these go with the memory context of the call */
 	src = TextDatumGetCString(SysCacheGetAttrNotNull(PROCOID, procTup,
 													 Anum_pg_proc_prosrc));
-	path = plllvm_sites_path(procTup);
+	plllvm_sites_path(procTup, &path);
 	get_typlenbyval(procStruct->prorettype, &rettyplen, &rettypbyval);
 
 	if (!plllvm_jit_compile(fcinfo->flinfo->fn_oid, hashkey->inputCollation,
-							path, procStruct->pronargs, src, plllvm_opt_level,
+							&path, procStruct->pronargs, src, plllvm_opt_level,
 							&r))
 		report_jit_error(&r, src);
 
@@ -168,7 +168,7 @@ plllvm_compile_unpin(plllvm_function *func)
 
 	if (func->cfunc.use_count == 0 && func->mod != NULL &&
 		func->mod->refs != NULL)
-		plllvm_sites_idle(func->mod->refs);
+		plllvm_refs_idle(func->mod->refs);
 
 	if (func->cfunc.use_count == 0 && func->cfunc.fn_hashkey == NULL)
 	{
@@ -237,9 +237,10 @@ plllvm_compile_check_body(HeapTuple procTup)
 {
 	Form_pg_proc procStruct = (Form_pg_proc) GETSTRUCT(procTup);
 	plllvm_jit_result r;
-	compile_error_arg cbarg;
+	CompileErrorArg cbarg;
 	ErrorContextCallback errcallback;
 	char	   *src;
+	plllvm_path path;
 
 	src = TextDatumGetCString(SysCacheGetAttrNotNull(PROCOID, procTup,
 													 Anum_pg_proc_prosrc));
@@ -251,8 +252,8 @@ plllvm_compile_check_body(HeapTuple procTup)
 	errcallback.previous = error_context_stack;
 	error_context_stack = &errcallback;
 
-	if (!plllvm_jit_check(src, plllvm_sites_path(procTup),
-						  procStruct->pronargs, &r))
+	plllvm_sites_path(procTup, &path);
+	if (!plllvm_jit_check(src, &path, procStruct->pronargs, &r))
 		report_jit_error(&r, src);
 
 	error_context_stack = errcallback.previous;
@@ -263,7 +264,7 @@ plllvm_compile_check_body(HeapTuple procTup)
 static void
 compile_error_callback(void *arg)
 {
-	compile_error_arg *cbarg = (compile_error_arg *) arg;
+	CompileErrorArg *cbarg = (CompileErrorArg *) arg;
 
 	/* in CREATE FUNCTION, point into its text instead */
 	if (cbarg->src != NULL && function_parse_error_transpose(cbarg->src))

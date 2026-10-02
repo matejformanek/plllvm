@@ -58,13 +58,12 @@
 #include "utils/syscache.h"
 
 #include "plllvm.h"
-#include "plllvm_jit.h"
 
 struct plllvm_refs
 {
 	MemoryContext cxt;			/* "PL/LLVM module data": all of the below */
 	Oid			collation;		/* input collation of the compile */
-	const char *search_path;
+	plllvm_path path;
 	int			guc_level;
 	bool		check_only;		/* true, when nothing is kept (validator) */
 	bool		published;		/* true, while the sites are in the list */
@@ -89,12 +88,10 @@ static void ref_error_callback(void *arg);
 static Datum const_eval(plllvm_refs *refs, const char *name);
 static Datum site_add(plllvm_refs *refs, const char *name, int nargs);
 static void callee_check(Oid fn_oid, Form_pg_proc proc);
-static int	path_set(const char *search_path);
+static int	path_set(const plllvm_path *path);
 static Oid	site_lookup(plllvm_site *site);
 static void rebuild(plllvm_site *site);
 static void execute_check(Oid fn_oid);
-static Datum call(plllvm_site *site, FunctionCallInfo fcinfo,
-				  NullableDatum *args, bool *isnull);
 static Datum call_reentrant(plllvm_site *site, NullableDatum *args,
 							bool *isnull);
 
@@ -153,19 +150,18 @@ role_callback(Datum arg, SysCacheIdentifier cacheid, uint32 hashvalue)
 /*
  * The path names of a function resolve under: its own search_path, or else
  * its schema between pg_catalog and pg_temp (pg_temp last, so that a
- * temporary type cannot shadow a catalog one).  The latter is returned as
- * PATH_NSP and the schema's OID, which path_set() turns into the path of
- * the schema's current name.  A setting starting with PATH_NSP is misread
- * as this marker.
+ * temporary type cannot shadow a catalog one).  The latter is kept as the
+ * schema's OID, which path_set() turns into the path of its current name.
  */
-#define PATH_NSP '\001'
-
-char *
-plllvm_sites_path(HeapTuple procTup)
+void
+plllvm_sites_path(HeapTuple procTup, plllvm_path *path)
 {
 	Form_pg_proc procStruct = (Form_pg_proc) GETSTRUCT(procTup);
 	Datum		proconfig;
 	bool		isnull;
+
+	path->search_path = NULL;
+	path->nspoid = procStruct->pronamespace;
 
 	proconfig = SysCacheGetAttr(PROCOID, procTup, Anum_pg_proc_proconfig,
 								&isnull);
@@ -181,11 +177,12 @@ plllvm_sites_path(HeapTuple procTup)
 			char	   *setting = TextDatumGetCString(elems[i]);
 
 			if (pg_strncasecmp(setting, "search_path=", 12) == 0)
-				return setting + 12;
+			{
+				path->search_path = setting + 12;
+				break;
+			}
 		}
 	}
-
-	return psprintf("%c%u", PATH_NSP, procStruct->pronamespace);
 }
 
 /*
@@ -193,7 +190,7 @@ plllvm_sites_path(HeapTuple procTup)
  * plllvm_refs_resolved(), or an ERROR's (sub)transaction abort.
  */
 plllvm_refs *
-plllvm_refs_begin(int nrefs, Oid collation, const char *search_path,
+plllvm_refs_begin(int nrefs, Oid collation, const plllvm_path *path,
 				  bool check_only)
 {
 	MemoryContext cxt;
@@ -205,13 +202,15 @@ plllvm_refs_begin(int nrefs, Oid collation, const char *search_path,
 	refs = MemoryContextAllocZero(cxt, sizeof(plllvm_refs));
 	refs->cxt = cxt;
 	refs->collation = collation;
-	refs->search_path = MemoryContextStrdup(cxt, search_path);
+	refs->path = *path;
+	if (path->search_path != NULL)
+		refs->path.search_path = MemoryContextStrdup(cxt, path->search_path);
 	refs->check_only = check_only;
 	/* final size: fcinfo->flinfo points into it */
 	if (!check_only)
 		refs->sites = MemoryContextAllocZero(cxt, nrefs * sizeof(plllvm_site));
 
-	refs->guc_level = path_set(refs->search_path);
+	refs->guc_level = path_set(&refs->path);
 
 	return refs;
 }
@@ -382,7 +381,7 @@ site_add(plllvm_refs *refs, const char *name, int nargs)
 		   proc->pronargs * sizeof(Oid));
 	site->collation = collation;
 	site->signature = MemoryContextStrdup(refs->cxt, name);
-	site->search_path = refs->search_path;
+	site->path = &refs->path;
 
 	ReleaseSysCache(tup);
 
@@ -422,27 +421,28 @@ callee_check(Oid fn_oid, Form_pg_proc proc)
 }
 
 static int
-path_set(const char *search_path)
+path_set(const plllvm_path *path)
 {
 	int			level = NewGUCNestLevel();
-	char	   *path = NULL;
+	const char *search_path = path->search_path;
+	char	   *nsp_path = NULL;
 
-	if (search_path[0] == PATH_NSP)
+	if (search_path == NULL)
 	{
-		Oid			nspoid = atooid(search_path + 1);
-		char	   *nspname = get_namespace_name(nspoid);
+		char	   *nspname = get_namespace_name(path->nspoid);
 
 		if (nspname == NULL)
-			elog(ERROR, "cache lookup failed for namespace %u", nspoid);
-		path = psprintf("pg_catalog, %s, pg_temp", quote_identifier(nspname));
-		search_path = path;
+			elog(ERROR, "cache lookup failed for namespace %u", path->nspoid);
+		nsp_path = psprintf("pg_catalog, %s, pg_temp",
+							quote_identifier(nspname));
+		search_path = nsp_path;
 	}
 
 	(void) set_config_option("search_path", search_path, PGC_USERSET,
 							 PGC_S_SESSION, GUC_ACTION_SAVE, true, 0, false);
 
-	if (path != NULL)
-		pfree(path);
+	if (nsp_path != NULL)
+		pfree(nsp_path);
 
 	return level;
 }
@@ -476,7 +476,7 @@ plllvm_refs_sites(plllvm_refs *refs, plllvm_site **sites)
  * No call of the code is left: no site is busy, whatever an ERROR left
  */
 void
-plllvm_sites_idle(plllvm_refs *refs)
+plllvm_refs_idle(plllvm_refs *refs)
 {
 	for (int i = 0; i < refs->nsites; i++)
 		refs->sites[i].busy = false;
@@ -488,7 +488,7 @@ plllvm_sites_idle(plllvm_refs *refs)
  * stay (note 5)
  */
 void
-plllvm_sites_unsure(plllvm_refs *refs)
+plllvm_refs_unsure(plllvm_refs *refs)
 {
 	refs->unsure = true;
 }
@@ -499,7 +499,7 @@ plllvm_sites_unsure(plllvm_refs *refs)
  * code.
  */
 const char *
-plllvm_sites_running(plllvm_refs *refs, int ncalls)
+plllvm_refs_running(plllvm_refs *refs, int ncalls)
 {
 	const char *signature = NULL;
 
@@ -523,7 +523,7 @@ plllvm_sites_running(plllvm_refs *refs, int ncalls)
  * SQL-function callees.  Allocates nothing.
  */
 void
-plllvm_sites_release(plllvm_refs *refs)
+plllvm_refs_release(plllvm_refs *refs)
 {
 	if (!refs->published)
 		return;
@@ -547,7 +547,7 @@ plllvm_sites_release(plllvm_refs *refs)
 void
 plllvm_refs_free(plllvm_refs *refs)
 {
-	plllvm_sites_release(refs);
+	plllvm_refs_release(refs);
 	MemoryContextDelete(refs->cxt);
 }
 
@@ -595,7 +595,8 @@ plllvm_rt_site_call(plllvm_site *site, NullableDatum *args, bool *isnull)
 	/* the busy site names itself (note 5) */
 	error_context_stack = errcallback.previous;
 
-	return call(site, site->fcinfo, args, isnull);
+	return plllvm_site_invoke(site, site->fcinfo, site->flinfo.fn_strict, true,
+							  args, site->nargs, isnull);
 }
 
 void
@@ -618,7 +619,7 @@ site_lookup(plllvm_site *site)
 	Oid			fn_oid;
 	int			level;
 
-	level = path_set(site->search_path);
+	level = path_set(site->path);
 	fn_oid = DatumGetObjectId(DirectFunctionCall1(regprocedurein,
 												  CStringGetDatum(site->signature)));
 	AtEOXact_GUC(true, level);
@@ -705,46 +706,6 @@ execute_check(Oid fn_oid)
 }
 
 /*
- * The inline protocol, out of line; only the site's own fcinfo marks the
- * site busy
- */
-static Datum
-call(plllvm_site *site, FunctionCallInfo fcinfo, NullableDatum *args,
-	 bool *isnull)
-{
-	bool		own = (fcinfo == site->fcinfo);
-	Datum		result = (Datum) 0;
-	bool		resultnull = true;
-
-	if (fcinfo->flinfo->fn_strict)
-	{
-		for (int i = 0; i < site->nargs; i++)
-		{
-			if (args[i].isnull)
-				goto out;
-		}
-	}
-
-	for (int i = 0; i < site->nargs; i++)
-		fcinfo->args[i] = args[i];
-	fcinfo->isnull = false;
-	if (own)
-		site->busy = true;
-	result = FunctionCallInvoke(fcinfo);
-	if (own)
-		site->busy = false;
-	resultnull = fcinfo->isnull;
-
-out:
-	if (resultnull && isnull == NULL)
-		plllvm_rt_site_null(site);
-	if (isnull != NULL)
-		*isnull = resultnull;
-
-	return resultnull ? (Datum) 0 : result;
-}
-
-/*
  * A call while the site's FmgrInfo is in use.  The callee still runs in the
  * caller's context, where its result must stay; its FmgrInfo goes after the
  * call (on ERROR, with the scratch).
@@ -770,7 +731,8 @@ call_reentrant(plllvm_site *site, NullableDatum *args, bool *isnull)
 							 NULL, NULL);
 	site->reentries++;
 
-	result = call(site, fcinfo, args, isnull);
+	result = plllvm_site_invoke(site, fcinfo, flinfo->fn_strict, false,
+								args, site->nargs, isnull);
 
 	MemoryContextDelete(cxt);
 
