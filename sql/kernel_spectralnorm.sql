@@ -66,16 +66,6 @@ BEGIN
 END
 $$;
 
-CREATE FUNCTION sqlstate_of(q text) RETURNS text
-LANGUAGE plpgsql AS $$
-BEGIN
-  EXECUTE q;
-  RETURN NULL;
-EXCEPTION WHEN OTHERS THEN
-  RETURN SQLSTATE;
-END
-$$;
-
 SELECT s.n, spectralnorm_ll(s.n) AS ll, spectralnorm_ll(s.n) = spectralnorm_pl(s.n) AS ok
 FROM (SELECT n FROM (VALUES (1), (2), (3), (10), (100)) v(n) OFFSET 0) s
 ORDER BY s.n;
@@ -96,6 +86,5 @@ SELECT spectralnorm_ll(470);
 SELECT frame FROM plllvm_code_cache()
  WHERE owner_oid = 'spectralnorm_ll(integer)'::regprocedure;
 
-DROP FUNCTION sqlstate_of(text);
 DROP FUNCTION spectralnorm_ll(integer);
 DROP FUNCTION spectralnorm_pl(integer);

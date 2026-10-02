@@ -84,16 +84,6 @@ BEGIN
 END
 $$;
 
-CREATE FUNCTION sqlstate_of(q text) RETURNS text
-LANGUAGE plpgsql AS $$
-BEGIN
-  EXECUTE q;
-  RETURN NULL;
-EXCEPTION WHEN OTHERS THEN
-  RETURN SQLSTATE;
-END
-$$;
-
 SELECT s.n, revcomp_ll(s.n) AS ll, revcomp_ll(s.n) = revcomp_pl(s.n) AS ok
 FROM (SELECT n FROM (VALUES (1), (2), (10), (101)) v(n) OFFSET 0) s
 ORDER BY s.n;
@@ -107,6 +97,5 @@ FROM (VALUES (NULL::int), (0)) s(n);
 -- the size of EXP-001
 SELECT revcomp_ll(20000);
 
-DROP FUNCTION sqlstate_of(text);
 DROP FUNCTION revcomp_ll(integer);
 DROP FUNCTION revcomp_pl(integer);

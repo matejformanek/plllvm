@@ -104,16 +104,6 @@ BEGIN
 END
 $$;
 
-CREATE FUNCTION sqlstate_of(q text) RETURNS text
-LANGUAGE plpgsql AS $$
-BEGIN
-  EXECUTE q;
-  RETURN NULL;
-EXCEPTION WHEN OTHERS THEN
-  RETURN SQLSTATE;
-END
-$$;
-
 SELECT s.n, nbody_ll(s.n) AS ll, nbody_ll(s.n) = nbody_pl(s.n) AS ok
 FROM (SELECT n FROM (VALUES (0), (1), (10), (1000)) v(n) OFFSET 0) s
 ORDER BY s.n;
@@ -127,6 +117,5 @@ SELECT nbody_ll(85000);
 SELECT frame FROM plllvm_code_cache()
  WHERE owner_oid = 'nbody_ll(integer)'::regprocedure;
 
-DROP FUNCTION sqlstate_of(text);
 DROP FUNCTION nbody_ll(integer);
 DROP FUNCTION nbody_pl(integer);
