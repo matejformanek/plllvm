@@ -171,6 +171,8 @@ static void parse_error_set(char *msg, plllvm_jit_result *result);
 static bool user_ir_check(LLVMContextRef ctx, LLVMModuleRef umod,
 						  LLVMModuleRef hmod, int nargs, List **irrefs,
 						  plllvm_jit_result *result);
+static bool global_check(LLVMValueRef gv, LLVMModuleRef hmod, int nargs,
+						 List **irrefs, plllvm_jit_result *result);
 static bool ir_ref_check(LLVMValueRef gv, const char *name, int *nargs,
 						 plllvm_jit_result *result);
 static bool arg_index_check(LLVMValueRef gv, const char *name, int nargs,
@@ -1375,83 +1377,96 @@ user_ir_check(LLVMContextRef ctx, LLVMModuleRef umod, LLVMModuleRef hmod,
 		return false;
 	}
 
-	for (int pass = 0; pass < 2; pass++)
+	for (gv = LLVMGetFirstFunction(umod); gv; gv = LLVMGetNextFunction(gv))
 	{
-		gv = pass == 0 ? LLVMGetFirstFunction(umod) : LLVMGetFirstGlobal(umod);
-
-		for (; gv; gv = pass == 0 ? LLVMGetNextFunction(gv) : LLVMGetNextGlobal(gv))
-		{
-			const char *name = value_name(gv);
-			LLVMValueRef host;
-
-			if (pass == 0 && LLVMGetIntrinsicID(gv) != 0 && LLVMIsDeclaration(gv))
-				continue;
-
-			host = LLVMGetNamedFunction(hmod, name);
-			if (host == NULL)
-				host = LLVMGetNamedGlobal(hmod, name);
-			/* the link renames local names, as clang's .str of Assert() */
-			if (host != NULL && (LLVMGetLinkage(host) == LLVMPrivateLinkage ||
-								 LLVMGetLinkage(host) == LLVMInternalLinkage))
-				host = NULL;
-
-			if (!LLVMIsDeclaration(gv))
-			{
-				if (strncmp(name, "llvm.", 5) == 0)
-				{
-					if (!llvm_global_check(gv, name, result))
-						return false;
-				}
-				else if (host != NULL || strncmp(name, "plllvm_", 7) == 0)
-				{
-					build_error(result, ERRCODE_INVALID_FUNCTION_DEFINITION,
-								psprintf("the IR must not define \"%s\"", name),
-								pstrdup("Names starting with \"plllvm_\" and the names of the host API are reserved."));
-					return false;
-				}
-			}
-			else if (host != NULL)
-			{
-				LLVMTypeRef expected = LLVMGlobalGetValueType(host);
-				LLVMTypeRef found = LLVMGlobalGetValueType(gv);
-
-				if (found != expected)
-				{
-					build_error(result, ERRCODE_INVALID_FUNCTION_DEFINITION,
-								psprintf("declaration of \"%s\" does not match the host API",
-										 name),
-								psprintf("Expected %s, found %s.",
-										 llvm_message(LLVMPrintTypeToString(expected)),
-										 llvm_message(LLVMPrintTypeToString(found))));
-					return false;
-				}
-				if (!arg_index_check(gv, name, nargs, result))
-					return false;
-				if (is_frame_helper(name))
-					result->needs_frame = true;
-				if (strncmp(name, "plllvm_spi_", 11) == 0)
-					result->uses_spi = true;
-			}
-			else if (pass == 1 && (name[0] == '\'' || strchr(name, '(') != NULL))
-			{
-				IrRef	   *ref = palloc(sizeof(IrRef));
-
-				if (!ir_ref_check(gv, name, &ref->nargs, result))
-					return false;
-				ref->name = pstrdup(name);
-				*irrefs = lappend(*irrefs, ref);
-			}
-			else if (strncmp(name, "plllvm_", 7) == 0)
-			{
-				build_error(result, ERRCODE_UNDEFINED_FUNCTION,
-							psprintf("host function \"%s\" does not exist", name),
-							NULL);
-				return false;
-			}
-		}
+		if (!global_check(gv, hmod, nargs, irrefs, result))
+			return false;
+	}
+	for (gv = LLVMGetFirstGlobal(umod); gv; gv = LLVMGetNextGlobal(gv))
+	{
+		if (!global_check(gv, hmod, nargs, irrefs, result))
+			return false;
 	}
 
 	return spi_slot_check(umod, result);
+}
+
+/*
+ * One function or global variable of the user IR: a definition must not
+ * take a reserved name, a declaration must match the host API or name a
+ * call site or constant.
+ */
+static bool
+global_check(LLVMValueRef gv, LLVMModuleRef hmod, int nargs, List **irrefs,
+			 plllvm_jit_result *result)
+{
+	const char *name = value_name(gv);
+	bool		is_function = LLVMIsAFunction(gv) != NULL;
+	LLVMValueRef host;
+
+	if (is_function && LLVMGetIntrinsicID(gv) != 0 && LLVMIsDeclaration(gv))
+		return true;
+
+	host = LLVMGetNamedFunction(hmod, name);
+	if (host == NULL)
+		host = LLVMGetNamedGlobal(hmod, name);
+	/* the link renames local names, as clang's .str of Assert() */
+	if (host != NULL && (LLVMGetLinkage(host) == LLVMPrivateLinkage ||
+						 LLVMGetLinkage(host) == LLVMInternalLinkage))
+		host = NULL;
+
+	if (!LLVMIsDeclaration(gv))
+	{
+		if (strncmp(name, "llvm.", 5) == 0)
+			return llvm_global_check(gv, name, result);
+		if (host != NULL || strncmp(name, "plllvm_", 7) == 0)
+		{
+			build_error(result, ERRCODE_INVALID_FUNCTION_DEFINITION,
+						psprintf("the IR must not define \"%s\"", name),
+						pstrdup("Names starting with \"plllvm_\" and the names of the host API are reserved."));
+			return false;
+		}
+	}
+	else if (host != NULL)
+	{
+		LLVMTypeRef expected = LLVMGlobalGetValueType(host);
+		LLVMTypeRef found = LLVMGlobalGetValueType(gv);
+
+		if (found != expected)
+		{
+			build_error(result, ERRCODE_INVALID_FUNCTION_DEFINITION,
+						psprintf("declaration of \"%s\" does not match the host API",
+								 name),
+						psprintf("Expected %s, found %s.",
+								 llvm_message(LLVMPrintTypeToString(expected)),
+								 llvm_message(LLVMPrintTypeToString(found))));
+			return false;
+		}
+		if (!arg_index_check(gv, name, nargs, result))
+			return false;
+		if (is_frame_helper(name))
+			result->needs_frame = true;
+		if (strncmp(name, "plllvm_spi_", 11) == 0)
+			result->uses_spi = true;
+	}
+	else if (!is_function && (name[0] == '\'' || strchr(name, '(') != NULL))
+	{
+		IrRef	   *ref = palloc(sizeof(IrRef));
+
+		if (!ir_ref_check(gv, name, &ref->nargs, result))
+			return false;
+		ref->name = pstrdup(name);
+		*irrefs = lappend(*irrefs, ref);
+	}
+	else if (strncmp(name, "plllvm_", 7) == 0)
+	{
+		build_error(result, ERRCODE_UNDEFINED_FUNCTION,
+					psprintf("host function \"%s\" does not exist", name),
+					NULL);
+		return false;
+	}
+
+	return true;
 }
 
 /*
