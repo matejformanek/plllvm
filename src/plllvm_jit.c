@@ -504,7 +504,7 @@ plllvm_jit_release(plllvm_jit_module *mod)
 		return;
 
 	if (mod->refs != NULL)
-		plllvm_sites_release(mod->refs);
+		plllvm_refs_release(mod->refs);
 	mod->released = true;
 	n_retired++;
 	n_unfreed++;

@@ -24,6 +24,7 @@ CommandId
 CommandTag
 CommonTableExpr
 CompactAttribute
+CompileErrorArg
 ConstrCheck
 Cost
 Datum
@@ -255,7 +256,6 @@ bitmapword
 blkcnt_t
 blksize_t
 bytea
-compile_error_arg
 dev_t
 div_t
 dlist_head

@@ -36,11 +36,11 @@
 #include "plllvm.h"
 #include "plllvm_jit.h"
 
-typedef struct compile_error_arg
+typedef struct CompileErrorArg
 {
 	const char *proname;
 	const char *src;			/* the body when validating, else NULL */
-} compile_error_arg;
+} CompileErrorArg;
 
 static void compile_callback(FunctionCallInfo fcinfo, HeapTuple procTup,
 							 const CachedFunctionHashKey *hashkey,
@@ -83,7 +83,7 @@ compile_callback(FunctionCallInfo fcinfo, HeapTuple procTup,
 	plllvm_function *func = (plllvm_function *) cfunc;
 	Form_pg_proc procStruct = (Form_pg_proc) GETSTRUCT(procTup);
 	plllvm_jit_result r;
-	compile_error_arg cbarg;
+	CompileErrorArg cbarg;
 	ErrorContextCallback errcallback;
 	char	   *src;
 	char	   *path;
@@ -168,7 +168,7 @@ plllvm_compile_unpin(plllvm_function *func)
 
 	if (func->cfunc.use_count == 0 && func->mod != NULL &&
 		func->mod->refs != NULL)
-		plllvm_sites_idle(func->mod->refs);
+		plllvm_refs_idle(func->mod->refs);
 
 	if (func->cfunc.use_count == 0 && func->cfunc.fn_hashkey == NULL)
 	{
@@ -237,7 +237,7 @@ plllvm_compile_check_body(HeapTuple procTup)
 {
 	Form_pg_proc procStruct = (Form_pg_proc) GETSTRUCT(procTup);
 	plllvm_jit_result r;
-	compile_error_arg cbarg;
+	CompileErrorArg cbarg;
 	ErrorContextCallback errcallback;
 	char	   *src;
 
@@ -263,7 +263,7 @@ plllvm_compile_check_body(HeapTuple procTup)
 static void
 compile_error_callback(void *arg)
 {
-	compile_error_arg *cbarg = (compile_error_arg *) arg;
+	CompileErrorArg *cbarg = (CompileErrorArg *) arg;
 
 	/* in CREATE FUNCTION, point into its text instead */
 	if (cbarg->src != NULL && function_parse_error_transpose(cbarg->src))

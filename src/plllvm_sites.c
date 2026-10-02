@@ -473,7 +473,7 @@ plllvm_refs_sites(plllvm_refs *refs, plllvm_site **sites)
  * No call of the code is left: no site is busy, whatever an ERROR left
  */
 void
-plllvm_sites_idle(plllvm_refs *refs)
+plllvm_refs_idle(plllvm_refs *refs)
 {
 	for (int i = 0; i < refs->nsites; i++)
 		refs->sites[i].busy = false;
@@ -485,7 +485,7 @@ plllvm_sites_idle(plllvm_refs *refs)
  * stay (note 5)
  */
 void
-plllvm_sites_unsure(plllvm_refs *refs)
+plllvm_refs_unsure(plllvm_refs *refs)
 {
 	refs->unsure = true;
 }
@@ -496,7 +496,7 @@ plllvm_sites_unsure(plllvm_refs *refs)
  * code.
  */
 const char *
-plllvm_sites_running(plllvm_refs *refs, int ncalls)
+plllvm_refs_running(plllvm_refs *refs, int ncalls)
 {
 	const char *signature = NULL;
 
@@ -520,7 +520,7 @@ plllvm_sites_running(plllvm_refs *refs, int ncalls)
  * SQL-function callees.  Allocates nothing.
  */
 void
-plllvm_sites_release(plllvm_refs *refs)
+plllvm_refs_release(plllvm_refs *refs)
 {
 	if (!refs->published)
 		return;
@@ -544,7 +544,7 @@ plllvm_sites_release(plllvm_refs *refs)
 void
 plllvm_refs_free(plllvm_refs *refs)
 {
-	plllvm_sites_release(refs);
+	plllvm_refs_release(refs);
 	MemoryContextDelete(refs->cxt);
 }
 
