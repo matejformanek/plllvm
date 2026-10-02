@@ -122,7 +122,7 @@ _PG_init(void)
 
 	DefineCustomIntVariable("plllvm.max_resident_compiles",
 							gettext_noop("Sets the maximum number of compiles kept in a session."),
-							gettext_noop("Compiled code stays in memory until the session ends, also after the function was replaced."),
+							gettext_noop("Replaced code is freed when its function is next called with the same input collation; code of dropped functions stays until the session ends."),
 							&plllvm_max_resident_compiles,
 							2000, 1, 1000000,
 							PGC_SUSET, 0,
@@ -218,7 +218,7 @@ plllvm_call_handler(PG_FUNCTION_ARGS)
 		elog(ERROR, "SPI_connect failed: %s", SPI_result_code_string(rc));
 
 	if (func->needs_frame)
-		plllvm_frame_push(&frame, entry_cxt);
+		plllvm_frame_push(&frame, entry_cxt, &func->mod->stmts);
 
 	/* pin entry, so that funccache cannot reuse it under this call */
 	func->cfunc.use_count++;

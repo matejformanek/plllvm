@@ -24,11 +24,31 @@
  *    module.  llvmjit shares one context and has to recreate it now and
  *    then to bound the types leaked into it; plllvm compiles far less often.
  *
- * 4) Compiled code is never freed in v0.1: a function may still be running
- *    on the stack when its code is replaced.  Each module has its own
- *    resource tracker, kept for good.  Releasing it would hand the code to
- *    the JITDylib's default tracker, which plllvm never touches.  A failed
- *    add or lookup removes its tracker at once.
+ * 4) A module is released when no funccache entry points at it any more
+ *    (plllvm_compile.c), and freed at the start of the next compile, never
+ *    in a callback.  Then nothing can reach it:
+ *    - no call runs it: funccache lets go of an entry only at use_count 0,
+ *      and the handler pins the entry from before the code runs until after
+ *      the result, which may point into module data, is copied out;
+ *    - no entry calls it again: an entry let go of is zeroed for a new
+ *      compile, or forgotten, and a forgotten one is never called (note 2
+ *      there).  Every FmgrInfo, also long-lived ones of index expressions,
+ *      plans and portals, reaches code only through its entry, and funccache
+ *      checks the entry before each call;
+ *    - no other module calls it: only the entry point is exported, under a
+ *      name unique to the compile, and a body may not declare plllvm_
+ *      names (user_ir_check()).  Call sites and constants point into the
+ *      module's own records, which go with it;
+ *    - its statements are on its own list and run to completion within a
+ *      call, so no portal keeps their plans;
+ *    - the statistics functions read the list and nothing else.
+ *    A body that hands a pointer to its code or data to something that
+ *    outlives the call breaks this (README, Security).  Dropped functions
+ *    keep their code: funccache never lets go of their entries.
+ *
+ *    Each module has its own resource tracker.  Releasing one without
+ *    removing it would hand the code to the JITDylib's default tracker,
+ *    which plllvm never touches.
  *
  * 5) Call sites and constants are resolved between verify and symbol
  *    resolution, outside the section, with PostgreSQL's own errors
@@ -44,14 +64,11 @@
 #include <dlfcn.h>
 #include <sys/stat.h>
 
-#include "access/xact.h"
 #include "jit/jit.h"
 #include "nodes/pg_list.h"
 #include "portability/instr_time.h"
 #include "storage/ipc.h"
-#include "storage/proc.h"
 #include "utils/memutils.h"
-#include "utils/syscache.h"
 
 #include "plllvm.h"
 #include "plllvm_jit.h"
@@ -124,6 +141,7 @@ static uint64 plllvm_jit_gen = 0;
 static int64 n_compiles = 0;
 static int64 n_failures = 0;
 static int64 n_retired = 0;
+static int	n_unfreed = 0;		/* released, not yet freed */
 
 /*
  * The first error LLVM reported to diag_handler(), malloc'd by LLVM.  Not
@@ -141,6 +159,8 @@ static LLVMOrcObjectLayerRef object_layer_create(void *ctx,
 static LLVMErrorRef host_symbols_define(void);
 static void log_jit_error(void *ctx, LLVMErrorRef error);
 static void plllvm_jit_shutdown(int code, Datum arg);
+static void released_free(void);
+static void tracker_remove(LLVMOrcResourceTrackerRef rt);
 static bool build(const char *ir, bool codegen, Oid collation,
 				  const char *search_path, int nargs, plllvm_jit_module *mod,
 				  LLVMOrcResourceTrackerRef *rt, plllvm_refs **refs,
@@ -406,13 +426,15 @@ plllvm_jit_compile(Oid owner_oid, Oid collation, const char *search_path,
 
 	plllvm_jit_session_ensure();
 
-	/* retired code counts too, nothing is freed */
-	if (n_compiles >= plllvm_max_resident_compiles)
+	released_free();
+
+	if (n_compiles - n_retired >= plllvm_max_resident_compiles)
 	{
 		build_error(result, ERRCODE_CONFIGURATION_LIMIT_EXCEEDED,
 					pstrdup("too many compiled PL/LLVM functions in this session"),
-					psprintf("Compiled code stays in memory until the session ends; %lld compiles are resident.",
-							 (long long) n_compiles));
+					psprintf("Resident compiles: %lld, the limit is %d.",
+							 (long long) (n_compiles - n_retired),
+							 plllvm_max_resident_compiles));
 		result->errhint = pstrdup("Reconnect, or raise plllvm.max_resident_compiles.");
 		return false;
 	}
@@ -489,71 +511,54 @@ plllvm_jit_check(const char *ir, const char *search_path, int nargs,
 }
 
 /*
- * Mark code whose owner was replaced or dropped.  Called while unwinding
- * (the language handler's PG_FINALLY), so it must not fail.
+ * No entry points at the code any more; the next compile frees it.  Called
+ * while unwinding (the language handler's PG_FINALLY), so it must not fail.
  */
 void
-plllvm_jit_retire(plllvm_jit_module *mod)
+plllvm_jit_release(plllvm_jit_module *mod)
 {
-	if (mod->retired)
+	if (mod->released)
 		return;
 
-	mod->retired = true;
+	if (mod->refs != NULL)
+		plllvm_sites_release(mod->refs);
+	mod->released = true;
 	n_retired++;
+	n_unfreed++;
 }
 
 /*
- * Note an invalidation of the owner with this PROCOID hash (0: of all).
- * Called from an invalidation callback, so it allocates nothing.
- *
- * Only a transaction that changed catalogs can have dropped the owner
- * without committing yet.  Its mark holds until it ends; any other mark
- * counts at once (the dropping backend reads its own committed DROP back at
- * the start of its next transaction).
+ * Free the released modules (note 4)
  */
-void
-plllvm_jit_owner_inval(uint32 hashvalue)
+static void
+released_free(void)
 {
-	LocalTransactionId lxid = InvalidLocalTransactionId;
+	plllvm_jit_module **link = &modules;
 
-	if (TransactionIdIsValid(GetTopTransactionIdIfAny()))
-		lxid = MyProc->vxid.lxid;
-
-	for (plllvm_jit_module *mod = modules; mod; mod = mod->next)
+	while (n_unfreed > 0 && *link != NULL)
 	{
-		if (OidIsValid(mod->owner_oid) && !mod->retired &&
-			(hashvalue == 0 || mod->owner_hash == hashvalue) &&
-			!(mod->owner_inval && mod->owner_inval_lxid == MyProc->vxid.lxid))
+		JitCode    *code = (JitCode *) *link;
+
+		if (!code->mod.released)
 		{
-			mod->owner_inval = true;
-			mod->owner_inval_lxid = lxid;
-		}
-	}
-}
-
-/*
- * Retire the code of dropped functions, which funccache never deletes.  A
- * mark of this transaction does not count: its DROP may still roll back.
- * The sites stay, an old activation may still run.
- */
-void
-plllvm_jit_retire_dropped(void)
-{
-	for (plllvm_jit_module *mod = modules; mod; mod = mod->next)
-	{
-		HeapTuple	tuple;
-
-		if (!mod->owner_inval || mod->owner_inval_lxid == MyProc->vxid.lxid)
+			link = &code->mod.next;
 			continue;
+		}
 
-		/* before the lookup, which may mark it again */
-		mod->owner_inval = false;
+		/* unlinked first: an ERROR below leaks it, nothing worse */
+		*link = code->mod.next;
+		n_unfreed--;
 
-		tuple = SearchSysCache1(PROCOID, ObjectIdGetDatum(mod->owner_oid));
-		if (HeapTupleIsValid(tuple))
-			ReleaseSysCache(tuple);
-		else
-			plllvm_jit_retire(mod);
+		if (code->mod.stmts != NULL)
+			plllvm_spi_free(code->mod.stmts);
+		if (code->mod.refs != NULL)
+			plllvm_refs_free(code->mod.refs);
+
+		plllvm_enter_fatal_on_oom();
+		tracker_remove(code->rt);
+		plllvm_leave_fatal_on_oom();
+
+		pfree(code);
 	}
 }
 
@@ -1250,22 +1255,32 @@ code_emit(LLVMContextRef ctx, LLVMModuleRef umod, plllvm_jit_module *mod,
 
 	if (msg != NULL)
 	{
-		LLVMOrcSymbolStringPoolRef pool;
-
 		build_error(result, ERRCODE_INTERNAL_ERROR,
 					psprintf("could not emit code: %s", first_line(msg)),
 					NULL);
 
-		LLVMConsumeError(LLVMOrcResourceTrackerRemove(*rt));
-		LLVMOrcReleaseResourceTracker(*rt);
+		tracker_remove(*rt);
 		*rt = NULL;
-
-		/* as llvmjit, else the names of the module leak */
-		pool = LLVMOrcExecutionSessionGetSymbolStringPool(LLVMOrcLLJITGetExecutionSession(session.jit));
-		LLVMOrcSymbolStringPoolClearDeadEntries(pool);
 	}
 	else
 		mod->addr = (void *) addr;
+}
+
+/*
+ * Free the code of a tracker, inside a section.  As llvmjit, the error of
+ * the removal is not reported.
+ */
+static void
+tracker_remove(LLVMOrcResourceTrackerRef rt)
+{
+	LLVMOrcSymbolStringPoolRef pool;
+
+	LLVMConsumeError(LLVMOrcResourceTrackerRemove(rt));
+	LLVMOrcReleaseResourceTracker(rt);
+
+	/* as llvmjit, else the names of the module leak */
+	pool = LLVMOrcExecutionSessionGetSymbolStringPool(LLVMOrcLLJITGetExecutionSession(session.jit));
+	LLVMOrcSymbolStringPoolClearDeadEntries(pool);
 }
 
 /*

@@ -128,12 +128,15 @@ plllvm_rt_div_zero(void)
 
 /*
  * Enter a frame.  The caller's context is passed in, not taken from
- * CurrentMemoryContext, which SPI_connect() may have changed.
+ * CurrentMemoryContext, which SPI_connect() may have changed.  stmts is the
+ * statement list of the module about to run.
  */
 void
-plllvm_frame_push(plllvm_frame *frame, MemoryContext caller)
+plllvm_frame_push(plllvm_frame *frame, MemoryContext caller,
+				  struct plllvm_spi_stmt **stmts)
 {
 	frame->caller_cxt = caller;
+	frame->stmts = stmts;
 	frame->scratch = AllocSetContextCreate(caller, "PL/LLVM scratch",
 										   ALLOCSET_DEFAULT_SIZES);
 	frame->prev = plllvm_cur_frame;

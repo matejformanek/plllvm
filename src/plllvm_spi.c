@@ -15,7 +15,8 @@
  *    an ERROR the abort pops the level, as for PL/pgSQL.
  *
  * 2) A statement is prepared on first use in a backend and kept in a slot
- *    of the compiled module.  Like the code it is never freed in v0.1.
+ *    of the compiled module, and on the module's list, through the frame:
+ *    it is freed with the code.
  *
  * 3) SPI leaves its procedure context current after each call; every
  *    function here switches back to the frame's scratch.  By-reference
@@ -40,10 +41,11 @@
 
 typedef struct plllvm_spi_stmt
 {
-	SPIPlanPtr	plan;			/* SPI_keepplan'd, never freed in v0.1 */
-	const char *sql;			/* for errcontext */
+	SPIPlanPtr	plan;			/* SPI_keepplan'd */
+	char	   *sql;			/* for errcontext */
 	int			nargs;
 	List	   *coltypes;		/* OIDs */
+	struct plllvm_spi_stmt *next;	/* in the module's list */
 } plllvm_spi_stmt;
 
 static MemoryContext spi_cxt = NULL;
@@ -123,6 +125,8 @@ plllvm_spi_prepare(void **slot, const char *sql, const char *argtypes,
 	/* cannot fail */
 	SPI_keepplan(plan);
 	stmt->plan = plan;
+	stmt->next = *plllvm_cur_frame->stmts;
+	*plllvm_cur_frame->stmts = stmt;
 	*slot = stmt;
 	n_statements++;
 
@@ -202,6 +206,25 @@ int64
 plllvm_spi_statements(void)
 {
 	return n_statements;
+}
+
+/*
+ * Free a module's statements.  No call of the module runs, so none of them
+ * is executing.
+ */
+void
+plllvm_spi_free(plllvm_spi_stmt *stmts)
+{
+	while (stmts != NULL)
+	{
+		plllvm_spi_stmt *next = stmts->next;
+
+		SPI_freeplan(stmts->plan);
+		pfree(stmts->sql);
+		list_free(stmts->coltypes);
+		pfree(stmts);
+		stmts = next;
+	}
 }
 
 static void

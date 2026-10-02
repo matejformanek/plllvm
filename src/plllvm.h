@@ -85,6 +85,7 @@ typedef struct plllvm_frame
 	MemoryContext caller_cxt;	/* context at handler entry: result and kept
 								 * values */
 	MemoryContext scratch;		/* CurrentMemoryContext of the JIT code */
+	struct plllvm_spi_stmt **stmts; /* the running module's statements */
 	struct plllvm_frame *prev;
 } plllvm_frame;
 
@@ -109,7 +110,8 @@ extern ArrayType *plllvm_array_copy(ArrayType *a);
 pg_noreturn extern void plllvm_rt_array_access(ArrayType *a, Oid elemtype);
 
 extern plllvm_frame *plllvm_cur_frame;
-extern void plllvm_frame_push(plllvm_frame *frame, MemoryContext caller);
+extern void plllvm_frame_push(plllvm_frame *frame, MemoryContext caller,
+							  struct plllvm_spi_stmt **stmts);
 extern Datum plllvm_frame_copy_out(plllvm_frame *frame, Datum value,
 								   int16 typlen);
 extern void plllvm_frame_pop(plllvm_frame *frame);
@@ -142,8 +144,7 @@ typedef struct plllvm_function
 	bool		readonly;		/* true, when not VOLATILE */
 	bool		rettypbyval;
 	int16		rettyplen;
-	struct plllvm_jit_module *mod;	/* code record, never freed; NULL once
-									 * retired */
+	struct plllvm_jit_module *mod;	/* code record; NULL once released */
 } plllvm_function;
 
 /* GUCs (plllvm.c) */
@@ -171,6 +172,7 @@ extern void *plllvm_spi_prepare(void **slot, const char *sql,
 extern int32 plllvm_spi_select_into(FunctionCallInfo fcinfo, void *stmt,
 									NullableDatum *args, NullableDatum *out);
 extern int64 plllvm_spi_statements(void);
+extern void plllvm_spi_free(struct plllvm_spi_stmt *stmts);
 
 /* plllvm_sites.c */
 extern void plllvm_sites_init(void);
@@ -186,5 +188,6 @@ extern void plllvm_sites_idle(plllvm_refs *refs);
 extern void plllvm_sites_unsure(plllvm_refs *refs);
 extern const char *plllvm_sites_running(plllvm_refs *refs, int ncalls);
 extern void plllvm_sites_release(plllvm_refs *refs);
+extern void plllvm_refs_free(plllvm_refs *refs);
 
 #endif							/* PLLLVM_H */

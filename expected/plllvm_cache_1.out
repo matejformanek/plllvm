@@ -107,7 +107,7 @@ SELECT c_one();
 SELECT * FROM plllvm_function_status('c_one()');
  state | compiles | retired 
 -------+----------+---------
- live  |        2 |       1
+ live  |        1 |       0
 (1 row)
 
 -- a call site is rebuilt only after an invalidation of its callee, and

@@ -226,7 +226,7 @@ DROP FUNCTION raise0_ll();
 SELECT i4pl_ll(2147483647, 1);
 ERROR:  integer out of range
 CONTEXT:  PL/LLVM function "i4pl_ll"
--- errors release the pin: the replace retires the old code
+-- errors release the pin: the replace releases the old code
 DO $$
 BEGIN
   FOR i IN 1..50 LOOP
@@ -263,7 +263,7 @@ SELECT i4pl_ll(3, 4);
 SELECT * FROM plllvm_function_status('i4pl_ll(int4,int4)');
  state | compiles | retired 
 -------+----------+---------
- live  |        2 |       1
+ live  |        1 |       0
 (1 row)
 
 -- a loop that only checks for interrupts can be canceled
@@ -429,7 +429,7 @@ SELECT p.proname, s.*
  f8div_ll   | live  |        1 |       0
  f8mul_ll   | live  |        1 |       0
  i4div_ll   | live  |        1 |       0
- i4pl_ll    | live  |        2 |       1
+ i4pl_ll    | live  |        1 |       0
  i8pl_ll    | live  |        1 |       0
  raise_ll   | live  |        1 |       0
  spin       | live  |        1 |       0

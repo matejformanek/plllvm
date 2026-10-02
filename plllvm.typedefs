@@ -110,7 +110,6 @@ LLVMValueRef
 LimitOption
 List
 ListCell
-LocalTransactionId
 LockClauseStrength
 LockInfoData
 LockRelId

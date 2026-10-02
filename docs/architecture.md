@@ -32,10 +32,13 @@ Only `plllvm_jit.c` and `plllvm_error.cpp` include LLVM headers.
   and the user's declarations against the helpers, link, rename the entry to
   `plllvm_<oid>_<gen>`, internalise, verify, resolve every declaration,
   optimise, add with its own resource tracker, look up.
-* Compiled code is never freed in v0.1: a successful compile keeps its
-  tracker for the session, and `plllvm_jit_retire()` only marks it.
-  `plllvm.max_resident_compiles` caps the number of resident compiles. A
-  failed add or lookup removes its tracker at once.
+* When its funccache entry lets go of a module (the entry is stale and no
+  call runs it, or the last call of a forgotten entry ends),
+  `plllvm_jit_release()` marks it and releases its call sites. The next
+  compile frees it: its statements, its module data and its tracker (as
+  llvmjit, `LLVMOrcResourceTrackerRemove`). `plllvm.max_resident_compiles`
+  caps the compiles not released. A failed add or lookup removes its tracker
+  at once. Why nothing can reach freed code: `src/plllvm_jit.c`, note 4.
 * Every LLVM call runs inside a fatal-on-OOM section that never raises an
   ERROR; failures are returned and raised after leaving it. JIT-compiled code
   never runs inside a section.
@@ -63,9 +66,10 @@ Only `plllvm_jit.c` and `plllvm_error.cpp` include LLVM headers.
   a by-reference result out; pop; unpin; SPI finish. After an ERROR the
   abort pops the SPI level, as for PL/pgSQL.
 * SQL: a statement is prepared on first use into a slot of the module and
-  kept (`SPI_keepplan`), never freed in v0.1. It runs read-only unless the
-  function is VOLATILE; the result types are checked at every execution,
-  as a saved plan may be replanned. Columns go to the caller's context.
+  kept (`SPI_keepplan`) on the module's list, freed with the code. It runs
+  read-only unless the function is VOLATILE; the result types are checked
+  at every execution, as a saved plan may be replanned. Columns go to the
+  caller's context.
 * Arrays: `arg`, `new` and `copy` check the shape (flat, one dimension, no
   NULLs) once; the inline accessors check the element type and the
   subscript.

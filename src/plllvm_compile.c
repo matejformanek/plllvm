@@ -10,17 +10,19 @@
  *
  * Notes:
  *
- * 1) Code is never freed in v0.1.  funccache may zero and reuse an entry,
- *    or forget one that is still running, so the entry only points at a
- *    record owned by plllvm_jit.c, and retiring just marks it.
+ * 1) funccache may zero and reuse an entry, or forget one that is still
+ *    running, so the entry only points at a record owned by plllvm_jit.c.
+ *    When the entry lets go of it, the record is released, and the next
+ *    compile frees the code (plllvm_jit.c, note 4).
  *
  * 2) funccache reuses an entry found through fn_extra without looking at
  *    its hash table again, also one it forgot while a call ran it (after a
  *    replace made during that call).  A compile into it would insert a
  *    second entry under the key of the one that replaced it, so such an
- *    entry is looked up by its key instead.  A retired entry also gets an
- *    invalid fn_xmin, the second guard: if the replace rolls back, the
- *    entry must not match pg_proc again.
+ *    entry is looked up by its key instead.  A forgotten entry also gets
+ *    an invalid fn_xmin when its code is released, the second guard: if
+ *    the replace rolls back, the entry must not match pg_proc again and
+ *    call freed code.
  *
  * 3) The validator never goes through funccache.
  *
@@ -89,7 +91,6 @@ compile_callback(FunctionCallInfo fcinfo, HeapTuple procTup,
 	ErrorContextCallback errcallback;
 	char	   *src;
 	char	   *path;
-	uint32		hash;
 	int16		rettyplen;
 	bool		rettypbyval;
 
@@ -109,8 +110,6 @@ compile_callback(FunctionCallInfo fcinfo, HeapTuple procTup,
 	src = TextDatumGetCString(SysCacheGetAttrNotNull(PROCOID, procTup,
 													 Anum_pg_proc_prosrc));
 	path = plllvm_sites_path(procTup);
-	hash = GetSysCacheHashValue1(PROCOID,
-								 ObjectIdGetDatum(fcinfo->flinfo->fn_oid));
 	get_typlenbyval(procStruct->prorettype, &rettyplen, &rettypbyval);
 
 	if (!plllvm_jit_compile(fcinfo->flinfo->fn_oid, hashkey->inputCollation,
@@ -122,11 +121,10 @@ compile_callback(FunctionCallInfo fcinfo, HeapTuple procTup,
 
 	/*
 	 * Nothing below may fail: funccache would free a new entry, and a code
-	 * record without an entry is never retired.
+	 * record without an entry is never released.
 	 */
 	r.mod->owner_xmin = HeapTupleHeaderGetRawXmin(procTup->t_data);
 	r.mod->owner_tid = procTup->t_self;
-	r.mod->owner_hash = hash;
 	func->magic = PLLLVM_FN_MAGIC;
 	namestrcpy(&func->proname, NameStr(procStruct->proname));
 	func->addr = (PGFunction) r.mod->addr;
@@ -143,8 +141,8 @@ compile_callback(FunctionCallInfo fcinfo, HeapTuple procTup,
 }
 
 /*
- * funccache found the entry stale and nobody is running it.  The code stays
- * resident in v0.1, so only account for it.
+ * funccache found the entry stale and nobody is running it: release the
+ * code
  */
 static void
 delete_callback(CachedFunction *cfunc)
@@ -153,9 +151,7 @@ delete_callback(CachedFunction *cfunc)
 
 	if (func->mod != NULL)
 	{
-		if (func->mod->refs != NULL)
-			plllvm_sites_release(func->mod->refs);
-		plllvm_jit_retire(func->mod);
+		plllvm_jit_release(func->mod);
 		func->mod = NULL;
 	}
 }
@@ -166,7 +162,7 @@ delete_callback(CachedFunction *cfunc)
  *
  * funccache skips the delete callback of an entry it finds stale while a
  * call is running it, and forgets the entry.  The last call to leave it
- * retires the code instead.
+ * releases the code instead.
  */
 void
 plllvm_compile_unpin(plllvm_function *func)

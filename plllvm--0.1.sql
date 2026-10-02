@@ -38,12 +38,13 @@ REVOKE ALL ON FUNCTION plllvm_code_cache() FROM PUBLIC;
 
 CREATE FUNCTION plllvm_call_sites()
   RETURNS TABLE(owner regprocedure, callee text, ready bool, busy bool,
-                prepares int8, checks int8, reentries int8)
+                prepares int8, checks int8, reentries int8, retired bool)
   LANGUAGE c AS 'MODULE_PATHNAME';
 
 REVOKE ALL ON FUNCTION plllvm_call_sites() FROM PUBLIC;
 
--- of this backend: not_compiled, live, stale, retired or dropped
+-- of this backend: not_compiled, live, stale or dropped; compiles counts the
+-- resident ones, retired those released and freed at the next compile
 CREATE FUNCTION plllvm_function_status(fn regprocedure, OUT state text,
                                        OUT compiles int8, OUT retired int8)
   RETURNS record
@@ -51,7 +52,8 @@ CREATE FUNCTION plllvm_function_status(fn regprocedure, OUT state text,
 
 REVOKE ALL ON FUNCTION plllvm_function_status(regprocedure) FROM PUBLIC;
 
--- compiles IR as a function body would be; the code stays resident
+-- compiles IR as a function body would be; nothing calls the code, it is
+-- freed at the next compile
 CREATE FUNCTION plllvm_jit_test(ir text, opt_level int4 DEFAULT NULL,
                                 codegen bool DEFAULT true)
   RETURNS TABLE(ok bool, sqlstate text, message text, detail text,

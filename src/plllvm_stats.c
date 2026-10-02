@@ -46,7 +46,6 @@ plllvm_session_info(PG_FUNCTION_ARGS)
 
 	InitMaterializedSRF(fcinfo, 0);
 
-	plllvm_jit_retire_dropped();
 	plllvm_jit_get_session_info(&info);
 
 	/* the major version only, the paths as file names */
@@ -82,7 +81,8 @@ plllvm_session_info(PG_FUNCTION_ARGS)
 }
 
 /*
- * The compiled code of this backend, newest first
+ * The compiled code of this backend, newest first; released code is freed
+ * at the next compile
  */
 Datum
 plllvm_code_cache(PG_FUNCTION_ARGS)
@@ -90,8 +90,6 @@ plllvm_code_cache(PG_FUNCTION_ARGS)
 	ReturnSetInfo *rsinfo = (ReturnSetInfo *) fcinfo->resultinfo;
 
 	InitMaterializedSRF(fcinfo, 0);
-
-	plllvm_jit_retire_dropped();
 
 	for (plllvm_jit_module *mod = plllvm_jit_modules(); mod; mod = mod->next)
 	{
@@ -125,7 +123,7 @@ plllvm_code_cache(PG_FUNCTION_ARGS)
 									mod->link_ms + mod->verify_ms +
 									mod->resolve_ms + mod->optimize_ms +
 									mod->emit_ms);
-		values[14] = BoolGetDatum(mod->retired);
+		values[14] = BoolGetDatum(mod->released);
 		values[15] = CStringGetTextDatum(psprintf("%p", mod->addr));
 		values[16] = Float8GetDatum(mod->resolve_ms);
 		values[17] = BoolGetDatum(mod->needs_frame);
@@ -138,7 +136,7 @@ plllvm_code_cache(PG_FUNCTION_ARGS)
 
 /*
  * Compile (codegen) or only check IR, and return the outcome as a row
- * instead of an ERROR.  The compiled code stays resident.
+ * instead of an ERROR.  Nothing calls the code, so it is released at once.
  */
 Datum
 plllvm_jit_test(PG_FUNCTION_ARGS)
@@ -217,12 +215,15 @@ plllvm_jit_test(PG_FUNCTION_ARGS)
 
 	tuplestore_putvalues(rsinfo->setResult, rsinfo->setDesc, values, nulls);
 
+	if (result.mod != NULL)
+		plllvm_jit_release(result.mod);
+
 	return (Datum) 0;
 }
 
 /*
- * State of a function's code in this backend, from its newest compile.  Other
- * backends compile and retire on their own.
+ * State of a function's code in this backend, from its newest compile that
+ * is not released.  Other backends compile and release on their own.
  */
 Datum
 plllvm_function_status(PG_FUNCTION_ARGS)
@@ -239,17 +240,15 @@ plllvm_function_status(PG_FUNCTION_ARGS)
 	if (get_call_result_type(fcinfo, NULL, &tupdesc) != TYPEFUNC_COMPOSITE)
 		elog(ERROR, "return type must be a row type");
 
-	plllvm_jit_retire_dropped();
-
 	for (plllvm_jit_module *mod = plllvm_jit_modules(); mod; mod = mod->next)
 	{
 		if (!OidIsValid(fn) || mod->owner_oid != fn)
 			continue;
 
 		compiles++;
-		if (mod->retired)
+		if (mod->released)
 			retired++;
-		if (newest == NULL || mod->gen > newest->gen)
+		else if (newest == NULL || mod->gen > newest->gen)
 			newest = mod;
 	}
 
@@ -259,14 +258,13 @@ plllvm_function_status(PG_FUNCTION_ARGS)
 	{
 		HeapTuple	tuple = SearchSysCache1(PROCOID, ObjectIdGetDatum(fn));
 
+		/* funccache never lets go of a dropped function's entry */
 		if (!HeapTupleIsValid(tuple))
 			state = "dropped";
 		else
 		{
-			if (newest->retired)
-				state = "retired";
-			else if (HeapTupleHeaderGetRawXmin(tuple->t_data) != newest->owner_xmin ||
-					 !ItemPointerEquals(&tuple->t_self, &newest->owner_tid))
+			if (HeapTupleHeaderGetRawXmin(tuple->t_data) != newest->owner_xmin ||
+				!ItemPointerEquals(&tuple->t_self, &newest->owner_tid))
 				state = "stale";
 			else
 				state = "live";
@@ -302,8 +300,8 @@ plllvm_call_sites(PG_FUNCTION_ARGS)
 		nsites = plllvm_refs_sites(mod->refs, &sites);
 		for (int i = 0; i < nsites; i++)
 		{
-			Datum		values[7];
-			bool		nulls[7] = {0};
+			Datum		values[8];
+			bool		nulls[8] = {0};
 
 			if (OidIsValid(mod->owner_oid))
 				values[0] = ObjectIdGetDatum(mod->owner_oid);
@@ -315,6 +313,7 @@ plllvm_call_sites(PG_FUNCTION_ARGS)
 			values[4] = Int64GetDatum(sites[i].prepares);
 			values[5] = Int64GetDatum(sites[i].checks);
 			values[6] = Int64GetDatum(sites[i].reentries);
+			values[7] = BoolGetDatum(mod->released);
 
 			tuplestore_putvalues(rsinfo->setResult, rsinfo->setDesc, values,
 								 nulls);
