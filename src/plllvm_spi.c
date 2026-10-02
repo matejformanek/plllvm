@@ -54,8 +54,8 @@ static int64 n_statements = 0;
 static void stmt_error_callback(void *arg);
 static List *type_list(const char *types);
 static void type_error_callback(void *arg);
-static void check_plain_select(SPIPlanPtr plan, const char *sql);
-static void check_result(List *coltypes, TupleDesc tupdesc, const char *sql);
+static void check_plain_select(SPIPlanPtr plan);
+static void check_result(List *coltypes, TupleDesc tupdesc);
 
 /*
  * The statement of a slot, prepared on first use.  argtypes and coltypes
@@ -107,9 +107,11 @@ plllvm_spi_prepare(void **slot, const char *sql, const char *argtypes,
 			 sql, SPI_result_code_string(SPI_result));
 
 	/* until SPI_keepplan, an ERROR leaves the plan to SPI_finish */
-	check_plain_select(plan, sql);
-	check_result(cols, ((CachedPlanSource *) linitial(SPI_plan_get_plan_sources(plan)))->resultDesc,
-				 sql);
+	errcallback.previous = error_context_stack;
+	error_context_stack = &errcallback;
+	check_plain_select(plan);
+	check_result(cols, ((CachedPlanSource *) linitial(SPI_plan_get_plan_sources(plan)))->resultDesc);
+	error_context_stack = errcallback.previous;
 
 	if (spi_cxt == NULL)
 		spi_cxt = AllocSetContextCreate(TopMemoryContext,
@@ -147,6 +149,7 @@ plllvm_spi_select_into(FunctionCallInfo fcinfo, void *stmtp,
 	char		nulls[FUNC_MAX_ARGS];
 	SPITupleTable *tuptable;
 	uint64		processed;
+	ErrorContextCallback errcallback;
 	int			rc;
 
 	if (func == NULL || func->magic != PLLLVM_FN_MAGIC || !func->uses_spi)
@@ -169,7 +172,12 @@ plllvm_spi_select_into(FunctionCallInfo fcinfo, void *stmtp,
 	processed = SPI_processed;
 
 	/* a saved plan revalidates itself, its result may change */
-	check_result(stmt->coltypes, tuptable->tupdesc, stmt->sql);
+	errcallback.callback = stmt_error_callback;
+	errcallback.arg = stmt->sql;
+	errcallback.previous = error_context_stack;
+	error_context_stack = &errcallback;
+	check_result(stmt->coltypes, tuptable->tupdesc);
+	error_context_stack = errcallback.previous;
 
 	for (int i = 0; i < list_length(stmt->coltypes); i++)
 	{
@@ -304,7 +312,7 @@ type_error_callback(void *arg)
  * restricted.
  */
 static void
-check_plain_select(SPIPlanPtr plan, const char *sql)
+check_plain_select(SPIPlanPtr plan)
 {
 	List	   *plansources = SPI_plan_get_plan_sources(plan);
 	CachedPlanSource *plansource;
@@ -332,21 +340,19 @@ check_plain_select(SPIPlanPtr plan, const char *sql)
 refuse:
 	ereport(ERROR,
 			(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-			 errmsg("PL/LLVM supports only plain SELECT statements"),
-			 errcontext("SQL statement \"%s\"", sql)));
+			 errmsg("PL/LLVM supports only plain SELECT statements")));
 }
 
 /* so that IR never reads a Datum as another type than it declared */
 static void
-check_result(List *coltypes, TupleDesc tupdesc, const char *sql)
+check_result(List *coltypes, TupleDesc tupdesc)
 {
 	if (tupdesc->natts != list_length(coltypes))
 		ereport(ERROR,
 				(errcode(ERRCODE_DATATYPE_MISMATCH),
 				 errmsg("PL/LLVM statement result does not match its declaration"),
 				 errdetail("The statement returns %d columns, its declaration has %d.",
-						   tupdesc->natts, list_length(coltypes)),
-				 errcontext("SQL statement \"%s\"", sql)));
+						   tupdesc->natts, list_length(coltypes))));
 
 	for (int i = 0; i < tupdesc->natts; i++)
 	{
@@ -358,7 +364,6 @@ check_result(List *coltypes, TupleDesc tupdesc, const char *sql)
 					 errmsg("PL/LLVM statement result does not match its declaration"),
 					 errdetail("Column %d has type %s, %s was declared.",
 							   i + 1, format_type_be(atttypid),
-							   format_type_be(list_nth_oid(coltypes, i))),
-					 errcontext("SQL statement \"%s\"", sql)));
+							   format_type_be(list_nth_oid(coltypes, i)))));
 	}
 }

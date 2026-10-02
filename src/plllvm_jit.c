@@ -331,19 +331,22 @@ plllvm_jit_session_ensure(void)
 					 errhint("Check the installation of the plllvm extension, or set plllvm.types_bc_path.")));
 		else if (parse_failed)
 			ereport(ERROR,
-					(errmsg("could not parse PL/LLVM types file \"%s\"",
+					(errcode(ERRCODE_INTERNAL_ERROR),
+					 errmsg("could not parse PL/LLVM types file \"%s\"",
 							plllvm_display_path(path)),
 					 parse_error ? errdetail("%s", parse_error) : 0,
 					 errhint("Rebuild and reinstall the plllvm extension.")));
 		else if (incompatible != NULL)
 			ereport(ERROR,
-					(errmsg("incompatible PL/LLVM types file \"%s\"",
+					(errcode(ERRCODE_INTERNAL_ERROR),
+					 errmsg("incompatible PL/LLVM types file \"%s\"",
 							plllvm_display_path(path)),
 					 errdetail("%s", incompatible),
 					 errhint("Rebuild and reinstall the plllvm extension.")));
 		else
 			ereport(ERROR,
-					(errmsg("could not create the LLVM JIT: %s", jit_error),
+					(errcode(ERRCODE_INTERNAL_ERROR),
+					 errmsg("could not create the LLVM JIT: %s", jit_error),
 					 errhint("Check the LLVM installation the plllvm extension was built with.")));
 	}
 
