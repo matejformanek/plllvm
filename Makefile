@@ -31,6 +31,9 @@ REGRESS = plllvm_setup \
 		kernel_lookup \
 		kernel_nbody \
 		kernel_revcomp \
+		kernel_spectralnorm \
+		kernel_rowudf \
+		kernel_ispras \
 		plllvm_fatal \
 		plllvm_teardown
 

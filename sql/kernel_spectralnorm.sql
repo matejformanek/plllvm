@@ -1,0 +1,101 @@
+--
+-- kernel_spectralnorm: examples/kernels/spectralnorm.ll against the PL/pgSQL
+-- original (bench/kernels/11_spectralnorm.sql, spectralnorm_imm)
+--
+SET plllvm.regress_test_mode = on;
+
+\getenv abs_srcdir PG_ABS_SRCDIR
+\set ir `cat :'abs_srcdir'/examples/kernels/spectralnorm.ll`
+
+CREATE FUNCTION spectralnorm_ll(n integer) RETURNS text
+LANGUAGE plllvm IMMUTABLE AS :'ir';
+
+CREATE FUNCTION spectralnorm_pl(n integer) RETURNS text
+LANGUAGE plpgsql IMMUTABLE AS $$
+DECLARE
+  one CONSTANT float8 := 1.0;
+  u float8[]; v float8[]; t float8[];
+  i integer; j integer; k integer; ij integer;
+  s float8;
+  vbv float8 := 0; vv float8 := 0;
+BEGIN
+  u := array_fill(1.0::float8, ARRAY[n]);
+  v := array_fill(0.0::float8, ARRAY[n]);
+  t := array_fill(0.0::float8, ARRAY[n]);
+  FOR k IN 1..10 LOOP
+    -- v := AtA(u):  t := A u ; v := At t
+    FOR i IN 0..n-1 LOOP
+      s := 0;
+      FOR j IN 0..n-1 LOOP
+        ij := i + j;
+        s := s + one / (ij * (ij + 1) / 2 + i + 1) * u[j+1];
+      END LOOP;
+      t[i+1] := s;
+    END LOOP;
+    FOR i IN 0..n-1 LOOP
+      s := 0;
+      FOR j IN 0..n-1 LOOP
+        ij := i + j;
+        s := s + one / (ij * (ij + 1) / 2 + j + 1) * t[j+1];
+      END LOOP;
+      v[i+1] := s;
+    END LOOP;
+    -- u := AtA(v)
+    FOR i IN 0..n-1 LOOP
+      s := 0;
+      FOR j IN 0..n-1 LOOP
+        ij := i + j;
+        s := s + one / (ij * (ij + 1) / 2 + i + 1) * v[j+1];
+      END LOOP;
+      t[i+1] := s;
+    END LOOP;
+    FOR i IN 0..n-1 LOOP
+      s := 0;
+      FOR j IN 0..n-1 LOOP
+        ij := i + j;
+        s := s + one / (ij * (ij + 1) / 2 + j + 1) * t[j+1];
+      END LOOP;
+      u[i+1] := s;
+    END LOOP;
+  END LOOP;
+  FOR i IN 1..n LOOP
+    vbv := vbv + u[i] * v[i];
+    vv := vv + v[i] * v[i];
+  END LOOP;
+  RETURN round(sqrt(vbv / vv)::numeric, 9)::text;
+END
+$$;
+
+CREATE FUNCTION sqlstate_of(q text) RETURNS text
+LANGUAGE plpgsql AS $$
+BEGIN
+  EXECUTE q;
+  RETURN NULL;
+EXCEPTION WHEN OTHERS THEN
+  RETURN SQLSTATE;
+END
+$$;
+
+SELECT s.n, spectralnorm_ll(s.n) AS ll, spectralnorm_ll(s.n) = spectralnorm_pl(s.n) AS ok
+FROM (SELECT n FROM (VALUES (1), (2), (3), (10), (100)) v(n) OFFSET 0) s
+ORDER BY s.n;
+
+SELECT count(*) FILTER (WHERE spectralnorm_ll(g) = spectralnorm_pl(g)) AS ok
+FROM generate_series(1, 40) g;
+
+-- NULL n fails in array_fill (22004), a negative one there too (54000),
+-- 0 at vbv / vv (22012)
+SELECT s.n,
+       sqlstate_of(format('SELECT spectralnorm_ll(n) FROM (SELECT %L::int AS n OFFSET 0) s', s.n)) AS ll,
+       sqlstate_of(format('SELECT spectralnorm_pl(n) FROM (SELECT %L::int AS n OFFSET 0) s', s.n)) AS pl
+FROM (VALUES (NULL::int), (-1), (0)) s(n);
+
+-- the size of EXP-001
+SELECT spectralnorm_ll(470);
+
+SELECT frame FROM plllvm_code_cache()
+ WHERE owner_oid = 'spectralnorm_ll(integer)'::regprocedure;
+
+DROP FUNCTION sqlstate_of(text);
+DROP FUNCTION spectralnorm_ll(integer);
+DROP FUNCTION spectralnorm_pl(integer);

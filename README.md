@@ -8,8 +8,9 @@ changes to PostgreSQL.
 
 **Status: v0.1 in progress.** Functions in `LANGUAGE plllvm` are checked at
 `CREATE FUNCTION`, compiled with plllvm's own LLJIT at their first call in a
-session, and run. `examples/kernels/` has seven benchmark kernels written by
-hand in IR and two compiled from C (`make kernels`).
+session, and run. `examples/kernels/` has the benchmark kernels of the thesis
+except neword (see Limits): twelve written by hand in IR and two compiled
+from C (`make kernels`).
 
 ## Features
 
@@ -190,6 +191,10 @@ how often each was prepared, checked and re-entered.
   dynamic SQL. Prepared statements are never freed during a session, not
   even when the function is replaced.
 * Arrays: one dimension, no NULL elements, `int4`, `int8` and `float8` only.
+* The neword kernel (TPC-C New-Order) is not ported: it needs `UPDATE`
+  (district, stock) and `INSERT` (orders, new_order, order_line) through
+  SPI. Its checksum does not depend on these writes, so a port without
+  them would match it but skip the work the kernel measures.
 * Every backend compiles its own copy; status and counters are per backend.
 
 Built and tested only with PostgreSQL 20devel at commit `9510a826e4a`,
