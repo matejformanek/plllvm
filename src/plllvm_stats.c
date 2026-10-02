@@ -149,8 +149,8 @@ plllvm_jit_test(PG_FUNCTION_ARGS)
 	int			opt_level = plllvm_opt_level;
 	bool		codegen;
 	bool		ok;
-	Datum		values[10];
-	bool		nulls[10] = {0};
+	Datum		values[11];
+	bool		nulls[11] = {0};
 
 	if (PG_ARGISNULL(0) || PG_ARGISNULL(2))
 		ereport(ERROR,
@@ -210,6 +210,10 @@ plllvm_jit_test(PG_FUNCTION_ARGS)
 		values[9] = Int32GetDatum(result.cfi_left);
 	else
 		nulls[9] = true;
+	if (ok && codegen)
+		values[10] = Int32GetDatum(result.checks_inserted);
+	else
+		nulls[10] = true;
 
 	tuplestore_putvalues(rsinfo->setResult, rsinfo->setDesc, values, nulls);
 

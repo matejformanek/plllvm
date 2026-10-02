@@ -6,9 +6,9 @@ SET plllvm.regress_test_mode = on;
 \pset null '(null)'
 -- an empty body
 SELECT * FROM plllvm_jit_test('define i64 @f(ptr %fcinfo) { ret i64 0 }', 2);
- ok | sqlstate | message | detail |  line  |  col   | gen | ir_instructions | helpers_linked | cfi_left 
-----+----------+---------+--------+--------+--------+-----+-----------------+----------------+----------
- t  | (null)   | (null)  | (null) | (null) | (null) |   1 |               1 |              0 |        0
+ ok | sqlstate | message | detail |  line  |  col   | gen | ir_instructions | helpers_linked | cfi_left | checks_inserted 
+----+----------+---------+--------+--------+--------+-----+-----------------+----------------+----------+-----------------
+ t  | (null)   | (null)  | (null) | (null) | (null) |   1 |               1 |              0 |        0 |               0
 (1 row)
 
 SELECT owner_oid, symbol, gen, opt_level, ir_instructions, helpers_linked,
@@ -202,6 +202,62 @@ $ir$);
  f  | 42P13    | the IR must not define "check_stack_depth" | Names starting with "plllvm_" and the names of the host API are reserved.
 (1 row)
 
+-- only the entry point is visible to other modules, and nothing runs
+-- before it: no static constructors, module asm, aliases or ifuncs
+SELECT ok, sqlstate, message, detail FROM plllvm_jit_test($ir$
+@x = internal global i64 0
+@llvm.global_ctors = appending global [1 x { i32, ptr, ptr }] [{ i32, ptr, ptr } { i32 65535, ptr @init, ptr null }]
+define internal void @init() {
+  store i64 99, ptr @x
+  ret void
+}
+define i64 @f(ptr %p) {
+  %v = load i64, ptr @x
+  ret i64 %v
+}
+$ir$, codegen => false);
+ ok | sqlstate |                  message                   |                         detail                         
+----+----------+--------------------------------------------+--------------------------------------------------------
+ f  | 42P13    | the IR must not define "llvm.global_ctors" | PL/LLVM never runs static constructors or destructors.
+(1 row)
+
+SELECT ok, sqlstate, message, detail FROM plllvm_jit_test($ir$
+@llvm.foo = global i64 7
+define i64 @f(ptr %p) { ret i64 0 }
+$ir$, codegen => false);
+ ok | sqlstate |              message              |                       detail                       
+----+----------+-----------------------------------+----------------------------------------------------
+ f  | 42P13    | the IR must not define "llvm.foo" | Names starting with "llvm." are reserved for LLVM.
+(1 row)
+
+SELECT ok, sqlstate, message, detail FROM plllvm_jit_test($ir$
+module asm ".globl _plllvm_x"
+define i64 @f(ptr %p) { ret i64 0 }
+$ir$, codegen => false);
+ ok | sqlstate |                       message                        | detail 
+----+----------+------------------------------------------------------+--------
+ f  | 42P13    | the IR must not contain module-level inline assembly | (null)
+(1 row)
+
+SELECT ok, sqlstate, message, detail FROM plllvm_jit_test($ir$
+@plllvm_x = alias i64 (ptr), ptr @f
+define i64 @f(ptr %p) { ret i64 0 }
+$ir$, codegen => false);
+ ok | sqlstate |                 message                 |                       detail                        
+----+----------+-----------------------------------------+-----------------------------------------------------
+ f  | 42P13    | the IR must not define alias "plllvm_x" | Only functions and global variables can be defined.
+(1 row)
+
+SELECT ok, sqlstate, message, detail FROM plllvm_jit_test($ir$
+@g = ifunc void (), ptr @resolve
+define internal ptr @resolve() { ret ptr null }
+define i64 @f(ptr %p) { ret i64 0 }
+$ir$, codegen => false);
+ ok | sqlstate |             message              |                       detail                        
+----+----------+----------------------------------+-----------------------------------------------------
+ f  | 42P13    | the IR must not define ifunc "g" | Only functions and global variables can be defined.
+(1 row)
+
 -- a symbol that neither the host API nor the server has
 INSERT INTO ir VALUES ('nosym', $ir$
 declare void @no_such_function()
@@ -295,10 +351,13 @@ SELECT ok FROM plllvm_jit_test('define i64 @f(ptr %p) { ret i64 2 }');
  t
 (1 row)
 
-SELECT ok FROM plllvm_jit_test('define i64 @f(ptr %p) { ret i64 3 }');  -- fail
-ERROR:  too many compiled PL/LLVM functions in this session
-DETAIL:  Compiled code stays in memory until the session ends; 6 compiles are resident.
-HINT:  Reconnect, or raise plllvm.max_resident_compiles.
+SELECT ok, sqlstate, message, detail
+  FROM plllvm_jit_test('define i64 @f(ptr %p) { ret i64 3 }');
+ ok | sqlstate |                       message                       |                                     detail                                     
+----+----------+-----------------------------------------------------+--------------------------------------------------------------------------------
+ f  | 53400    | too many compiled PL/LLVM functions in this session | Compiled code stays in memory until the session ends; 6 compiles are resident.
+(1 row)
+
 RESET plllvm.max_resident_compiles;
 SELECT ok, gen FROM plllvm_jit_test('define i64 @f(ptr %p) { ret i64 3 }');
  ok | gen 
@@ -320,6 +379,113 @@ SELECT count(*), count(DISTINCT symbol) AS symbols, count(DISTINCT code_addr) AS
      7 |       7 |     7 | f
 (1 row)
 
+-- the empty constructor list and llvm.used that opt leaves behind are fine
+SELECT ok, sqlstate, message FROM plllvm_jit_test($ir$
+@x = internal global i64 0
+@llvm.global_ctors = appending global [0 x { i32, ptr, ptr }] zeroinitializer
+@llvm.used = appending global [1 x ptr] [ptr @x]
+define i64 @f(ptr %p) {
+  %v = load i64, ptr @x
+  ret i64 %v
+}
+$ir$);
+ ok | sqlstate | message 
+----+----------+---------
+ t  | (null)   | (null)
+(1 row)
+
+-- interrupt and stack checks go where the IR lacks them: a poll on every
+-- loop, also behind a polled block, also an irreducible or indirect one
+SELECT ok, checks_inserted, helpers_linked FROM plllvm_jit_test($ir$
+declare void @plllvm_cfi()
+define i64 @f(ptr %p) {
+entry:
+  call void @plllvm_cfi()
+  br label %spin
+spin:
+  br label %spin
+}
+$ir$);
+ ok | checks_inserted | helpers_linked 
+----+-----------------+----------------
+ t  |               1 |              1
+(1 row)
+
+SELECT ok, checks_inserted FROM plllvm_jit_test($ir$
+define i64 @f(ptr %p) {
+entry:
+  %c = ptrtoint ptr %p to i64
+  %t = trunc i64 %c to i1
+  br i1 %t, label %a, label %b
+a:
+  br label %b
+b:
+  br label %a
+}
+$ir$);
+ ok | checks_inserted 
+----+-----------------
+ t  |               1
+(1 row)
+
+SELECT ok, checks_inserted FROM plllvm_jit_test($ir$
+define i64 @f(ptr %p) {
+entry:
+  br label %l
+l:
+  indirectbr ptr blockaddress(@f, %l), [label %l]
+}
+$ir$);
+ ok | checks_inserted 
+----+-----------------
+ t  |               1
+(1 row)
+
+-- the kernels: clang's CHECK_FOR_INTERRUPTS() counts as a poll, fib's own
+-- checks suffice
+\getenv abs_srcdir PG_ABS_SRCDIR
+\set nbody `cat :'abs_srcdir'/examples/kernels/nbody.ll`
+\set revcomp `cat :'abs_srcdir'/examples/kernels/revcomp.ll`
+\set fib `cat :'abs_srcdir'/examples/kernels/fib.ll`
+SELECT ok, checks_inserted FROM plllvm_jit_test(:'nbody');
+ ok | checks_inserted 
+----+-----------------
+ t  |               9
+(1 row)
+
+SELECT ok, checks_inserted FROM plllvm_jit_test(:'revcomp');
+ ok | checks_inserted 
+----+-----------------
+ t  |               7
+(1 row)
+
+SELECT ok, checks_inserted FROM plllvm_jit_test(:'fib');
+ ok | checks_inserted 
+----+-----------------
+ t  |               0
+(1 row)
+
+-- recursion gets them at the entry
+SELECT ok, checks_inserted FROM plllvm_jit_test($ir$
+define i64 @f(ptr %p) {
+  %r = call i64 @f(ptr %p)
+  ret i64 %r
+}
+$ir$);
+ ok | checks_inserted 
+----+-----------------
+ t  |               2
+(1 row)
+
+-- off, for measurements
+SET plllvm.auto_checks = off;
+SELECT ok, checks_inserted FROM plllvm_jit_test(:'nbody');
+ ok | checks_inserted 
+----+-----------------
+ t  |               0
+(1 row)
+
+RESET plllvm.auto_checks;
 -- superuser only
 CREATE ROLE regress_plllvm_jit;
 SET ROLE regress_plllvm_jit;

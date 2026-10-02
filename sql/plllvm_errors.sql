@@ -310,6 +310,65 @@ SELECT deep(100000);
 RESET max_stack_depth;
 RESET statement_timeout;
 
+-- without its checks: a loop gets a poll, which also keeps it from being
+-- folded away (else count_down(1) returns 1 at once) ...
+CREATE FUNCTION count_down(n int8) RETURNS int8
+LANGUAGE plllvm STRICT AS $$
+declare i64 @plllvm_arg_i64(ptr, i32)
+
+define i64 @f(ptr %fcinfo) {
+entry:
+  %n = call i64 @plllvm_arg_i64(ptr %fcinfo, i32 0)
+  %none = icmp eq i64 %n, 0
+  br i1 %none, label %done, label %loop
+loop:
+  %i = phi i64 [ 8589934592, %entry ], [ %d, %loop ]
+  %d = sub i64 %i, 1
+  %end = icmp eq i64 %d, 0
+  br i1 %end, label %done, label %loop
+done:
+  ret i64 1
+}
+$$;
+
+SELECT count_down(0);
+SET statement_timeout = '100ms';
+SELECT count_down(1);
+\echo :LAST_ERROR_SQLSTATE
+RESET statement_timeout;
+
+-- ... and recursion a stack check (else depth(20000) returns 20000)
+CREATE FUNCTION depth(n int4) RETURNS int4
+LANGUAGE plllvm STRICT SET plllvm.opt_level = 0 AS $$
+declare i32 @plllvm_arg_i32(ptr, i32)
+
+define i64 @f(ptr %fcinfo) {
+  %n = call i32 @plllvm_arg_i32(ptr %fcinfo, i32 0)
+  %r = call i32 @rec(i32 %n)
+  %d = sext i32 %r to i64
+  ret i64 %d
+}
+
+define internal i32 @rec(i32 %n) {
+entry:
+  %zero = icmp eq i32 %n, 0
+  br i1 %zero, label %base, label %recurse
+base:
+  ret i32 0
+recurse:
+  %n1 = sub i32 %n, 1
+  %r = call i32 @rec(i32 %n1)
+  %s = add i32 %r, 1
+  ret i32 %s
+}
+$$;
+
+SELECT depth(10);
+SET max_stack_depth = '100kB';
+SELECT depth(20000);
+\echo :LAST_ERROR_SQLSTATE
+RESET max_stack_depth;
+
 SELECT p.proname, s.*
   FROM pg_proc p, plllvm_function_status(p.oid) s
  WHERE p.prolang = (SELECT oid FROM pg_language WHERE lanname = 'plllvm')
@@ -320,4 +379,4 @@ DROP FUNCTION i4pl_ll(int4, int4), i4div_ll(int4, int4), i8pl_ll(int8, int8),
   f8mul_ll(float8, float8), f8div_ll(float8, float8), raise_ll();
 DROP FUNCTION i4pl_pl(int4, int4), i4div_pl(int4, int4), i8pl_pl(int8, int8),
   f8mul_pl(float8, float8), f8div_pl(float8, float8), raise_pl();
-DROP FUNCTION spin(int8), deep(int4);
+DROP FUNCTION spin(int8), deep(int4), count_down(int8), depth(int4);

@@ -55,9 +55,14 @@ its bits (`bitcast`), `bool` as 0 or 1. The IR handles NULL arguments of a
 non-STRICT function itself (`plllvm_arg_isnull`, `plllvm_return_null`).
 Declarations of the host API (`src/plllvm_types.c`, `src/plllvm_runtime.c`)
 are checked against it; other external symbols resolve against the server
-process. Names starting with `plllvm_` cannot be defined. The validator
-parses and verifies the body; with `check_function_bodies = off` the first
-call does. Errors inside the body point into it.
+process. Names starting with `plllvm_` cannot be defined. Only `@f` is
+seen outside the body, so module asm, aliases, ifuncs and `llvm.*` globals
+other than `llvm.used`, `llvm.compiler.used` and empty constructor lists are
+refused; static constructors would never run. A loop or a recursion that
+does not check for interrupts and the stack depth itself gets the checks
+added (`plllvm.auto_checks`). The validator parses and verifies the body;
+with `check_function_bodies = off` the first call does. Errors inside the
+body point into it.
 
 Other functions are called through call sites: a declared global named by
 the callee's `regprocedure` text, passed to `plllvm_call0` … `plllvm_call3`
@@ -152,8 +157,9 @@ with the numbers of its compiles and retired compiles.
 `plllvm_jit_test(ir text, opt_level int DEFAULT
 NULL, codegen bool DEFAULT true)` (superuser) compiles a function body and
 returns the outcome as a row: `ok`, the SQLSTATE, message and detail of a
-refusal, the line and column of a parse error, and the instruction and helper
-counts. With `codegen => false` it only checks the IR. Its code stays resident
+refusal, the line and column of a parse error, the instruction and helper
+counts, and the number of checks added. With `codegen => false` it only
+checks the IR. Its code stays resident
 like any other compile.
 
 ```sql
@@ -201,6 +207,31 @@ Built and tested only with PostgreSQL 20devel at commit `9510a826e4a`,
 LLVM 22, macOS arm64 (see `PG_PIN`). The server must be built with LLVM; the
 extension links the same shared `libLLVM` as the server's `llvmjit`.
 
+## Security
+
+The language is untrusted, as C is: a body can declare and call any symbol
+of the server process, so it can do whatever the server's operating system
+user can. Only superusers create PL/LLVM functions.
+
+* There is no memory safety. A value used after `plllvm_scratch_reset`, a
+  value freed twice or a constant freed, or a store out of bounds corrupts
+  or crashes the backend, as a bug in a C function does.
+* The added checks do not cover a blocking call (`pause`, `read` of a
+  FIFO), a dynamic `alloca` inside a loop (the stack grows unchecked until
+  the backend dies with SIGSEGV), a loop in inline assembly, or a
+  `sigsetjmp`/`siglongjmp` loop through process symbols.
+* The owner of a function may change its `SET search_path`, and with it
+  what its call sites resolve to, as core lets an owner alter any function
+  of an untrusted language. Keep such functions owned by superusers, write
+  call-site signatures schema-qualified, and give `SECURITY DEFINER`
+  functions their own `SET search_path`.
+* SQL statements resolve names under the caller's `search_path`, as in
+  PL/pgSQL; only call sites do not. A `SECURITY DEFINER` function should
+  have `SET search_path = <its schema>, pg_temp`.
+* Call sites and constants record no dependency, as SQL in PL/pgSQL does
+  not: dropping a callee does not see its callers, and a dump restores only
+  with `check_function_bodies = off`, which pg_dump's output sets.
+
 ## Configuration
 
 * `plllvm.regress_test_mode` (bool, default off, any user): reduces volatile
@@ -222,6 +253,9 @@ extension links the same shared `libLLVM` as the server's `llvmjit`.
 * `plllvm.debug_inject` (`none`, `llvm_fatal`, `bad_alloc`, superuser): for
   tests only. Raises that LLVM error in the next compile, which ends the
   session with FATAL.
+* `plllvm.auto_checks` (bool, default on, superuser): adds interrupt and
+  stack depth checks to loops and recursions that lack them, at compile
+  time. Turn it off only for measurements.
 
 The prefix `plllvm.` is reserved.
 

@@ -34,10 +34,15 @@
  *    resolution, outside the section, with PostgreSQL's own errors
  *    (plllvm_sites.c).  Their globals then become addresses and Datums.
  *
+ * 6) The body is not trusted to check for interrupts or the stack depth:
+ *    with plllvm.auto_checks, checks_insert() adds the calls its loops and
+ *    recursions lack, before anything is linked or optimised.
+ *
  */
 #include "postgres.h"
 
 #include <dlfcn.h>
+#include <sys/stat.h>
 
 #include "access/xact.h"
 #include "jit/jit.h"
@@ -105,6 +110,13 @@ typedef struct IrRef
 	int			nargs;			/* of a site's calls, -1 if it has none */
 } IrRef;
 
+/* a block or function of checks_insert()'s graphs, sorted by ptr */
+typedef struct NodeIndex
+{
+	const void *ptr;
+	int			node;
+} NodeIndex;
+
 /* newest first */
 static plllvm_jit_module *modules = NULL;
 
@@ -160,6 +172,24 @@ static bool ir_ref_check(LLVMValueRef gv, const char *name, int *nargs,
 						 plllvm_jit_result *result);
 static bool arg_index_check(LLVMValueRef gv, const char *name, int nargs,
 							plllvm_jit_result *result);
+static bool llvm_global_check(LLVMValueRef gv, const char *name,
+							  plllvm_jit_result *result);
+static bool spi_slot_check(LLVMModuleRef umod, plllvm_jit_result *result);
+static void checks_insert(LLVMContextRef ctx, LLVMModuleRef umod,
+						  plllvm_jit_result *result);
+static void block_checks(LLVMBasicBlockRef bb, bool *polls,
+						 bool *checks_stack);
+static bool address_taken(LLVMValueRef fn);
+static void call_check(LLVMContextRef ctx, LLVMModuleRef umod,
+					   LLVMBuilderRef builder, LLVMValueRef *fn,
+					   const char *name);
+static void graph_build(void **nodes, int n, bool calls, int **off,
+						int **adj);
+static void edge_add(int *adj, int *nedges, NodeIndex *index, int n,
+					 void *target);
+static int	node_index_cmp(const void *a, const void *b);
+static bool *graph_cut(void **nodes, int n, bool calls, const bool *checked);
+static bool call_callee_use(LLVMValueRef user, LLVMUseRef use);
 static bool is_frame_helper(const char *name);
 static const char *unresolved_symbol(LLVMModuleRef mod);
 static bool host_symbol_exists(const char *name);
@@ -189,6 +219,7 @@ void
 plllvm_jit_session_ensure(void)
 {
 	char		path[MAXPGPATH];
+	struct stat st;
 	instr_time	starttime;
 	instr_time	duration;
 	MemoryContext oldcxt;
@@ -214,6 +245,14 @@ plllvm_jit_session_ensure(void)
 											   ALLOCSET_DEFAULT_SIZES);
 
 	types_bc_locate(path);
+
+	/* LLVM would read a FIFO or a device forever, and uninterruptibly */
+	if (stat(path, &st) == 0 && !S_ISREG(st.st_mode))
+		ereport(ERROR,
+				(errcode(ERRCODE_UNDEFINED_FILE),
+				 errmsg("PL/LLVM types file \"%s\" is not a regular file",
+						plllvm_display_path(path)),
+				 errhint("Check the installation of the plllvm extension, or set plllvm.types_bc_path.")));
 
 	INSTR_TIME_SET_CURRENT(starttime);
 
@@ -348,8 +387,7 @@ plllvm_jit_get_session_info(plllvm_jit_session_info *info)
  * Compile the IR of a function body (entry point @f) into resident code.
  *
  * Returns false with result->sqlerrcode and the messages set when the IR
- * is refused; the caller raises the ERROR.  Hitting the resident cap is an
- * ERROR right here, before anything is built.
+ * is refused or the resident cap is reached; the caller raises the ERROR.
  */
 bool
 plllvm_jit_compile(Oid owner_oid, Oid collation, const char *search_path,
@@ -370,12 +408,14 @@ plllvm_jit_compile(Oid owner_oid, Oid collation, const char *search_path,
 
 	/* retired code counts too, nothing is freed */
 	if (n_compiles >= plllvm_max_resident_compiles)
-		ereport(ERROR,
-				(errcode(ERRCODE_CONFIGURATION_LIMIT_EXCEEDED),
-				 errmsg("too many compiled PL/LLVM functions in this session"),
-				 errdetail("Compiled code stays in memory until the session ends; %lld compiles are resident.",
-						   (long long) n_compiles),
-				 errhint("Reconnect, or raise plllvm.max_resident_compiles.")));
+	{
+		build_error(result, ERRCODE_CONFIGURATION_LIMIT_EXCEEDED,
+					pstrdup("too many compiled PL/LLVM functions in this session"),
+					psprintf("Compiled code stays in memory until the session ends; %lld compiles are resident.",
+							 (long long) n_compiles));
+		result->errhint = pstrdup("Reconnect, or raise plllvm.max_resident_compiles.");
+		return false;
+	}
 
 	mod.owner_oid = owner_oid;
 	mod.gen = ++plllvm_jit_gen;
@@ -846,6 +886,8 @@ build(const char *ir, bool codegen, Oid collation, const char *search_path,
 
 	if (!user_ir_parse(ctx, ir, hmod, nargs, &umod, &irrefs, result))
 		goto out;
+	if (codegen && plllvm_auto_checks)
+		checks_insert(ctx, umod, result);
 	mod->parse_ms = elapsed_ms(&since);
 
 	linked = helpers_link(umod, hmod, result);
@@ -1003,6 +1045,9 @@ helpers_link(LLVMModuleRef umod, LLVMModuleRef hmod, plllvm_jit_result *result)
  * One JITDylib holds every module: export only the entry point, under a
  * name unique in the session, and let the helpers inline everywhere.
  * Names starting with "llvm." (llvm.used, ...) need appending linkage.
+ *
+ * The module gets that name too: ORC names a module's init symbol after
+ * it, and on macOS even a global in an Objective-C section makes one.
  */
 static void
 symbols_internalize(LLVMModuleRef umod, const char *symbol,
@@ -1010,6 +1055,8 @@ symbols_internalize(LLVMModuleRef umod, const char *symbol,
 {
 	LLVMValueRef fn;
 	LLVMValueRef gv;
+
+	LLVMSetModuleIdentifier(umod, symbol, strlen(symbol));
 
 	fn = LLVMGetNamedFunction(umod, "f");
 	LLVMSetValueName2(fn, symbol, strlen(symbol));
@@ -1252,6 +1299,9 @@ parse_error_set(char *msg, plllvm_jit_result *result)
  * declaration of a host API function is not type-checked by the linker,
  * hence the explicit comparison.  Call sites and constants are collected
  * into *irrefs.
+ *
+ * Only the entry point may be visible to other modules, so module asm,
+ * aliases and ifuncs, which symbols_internalize() cannot hide, are refused.
  */
 static bool
 user_ir_check(LLVMContextRef ctx, LLVMModuleRef umod, LLVMModuleRef hmod,
@@ -1261,6 +1311,7 @@ user_ir_check(LLVMContextRef ctx, LLVMModuleRef umod, LLVMModuleRef hmod,
 	LLVMTypeRef entry_type;
 	LLVMValueRef fn;
 	LLVMValueRef gv;
+	size_t		asmlen;
 
 	fn = LLVMGetNamedFunction(umod, "f");
 	if (fn == NULL || LLVMIsDeclaration(fn))
@@ -1303,6 +1354,26 @@ user_ir_check(LLVMContextRef ctx, LLVMModuleRef umod, LLVMModuleRef hmod,
 		return false;
 	}
 
+	LLVMGetModuleInlineAsm(umod, &asmlen);
+	if (asmlen > 0)
+	{
+		build_error(result, ERRCODE_INVALID_FUNCTION_DEFINITION,
+					pstrdup("the IR must not contain module-level inline assembly"),
+					NULL);
+		return false;
+	}
+
+	if ((gv = LLVMGetFirstGlobalAlias(umod)) != NULL ||
+		(gv = LLVMGetFirstGlobalIFunc(umod)) != NULL)
+	{
+		build_error(result, ERRCODE_INVALID_FUNCTION_DEFINITION,
+					psprintf("the IR must not define %s \"%s\"",
+							 LLVMIsAGlobalAlias(gv) ? "alias" : "ifunc",
+							 value_name(gv)),
+					pstrdup("Only functions and global variables can be defined."));
+		return false;
+	}
+
 	for (int pass = 0; pass < 2; pass++)
 	{
 		gv = pass == 0 ? LLVMGetFirstFunction(umod) : LLVMGetFirstGlobal(umod);
@@ -1325,7 +1396,12 @@ user_ir_check(LLVMContextRef ctx, LLVMModuleRef umod, LLVMModuleRef hmod,
 
 			if (!LLVMIsDeclaration(gv))
 			{
-				if (host != NULL || strncmp(name, "plllvm_", 7) == 0)
+				if (pass == 1 && strncmp(name, "llvm.", 5) == 0)
+				{
+					if (!llvm_global_check(gv, name, result))
+						return false;
+				}
+				else if (host != NULL || strncmp(name, "plllvm_", 7) == 0)
 				{
 					build_error(result, ERRCODE_INVALID_FUNCTION_DEFINITION,
 								psprintf("the IR must not define \"%s\"", name),
@@ -1374,7 +1450,119 @@ user_ir_check(LLVMContextRef ctx, LLVMModuleRef umod, LLVMModuleRef hmod,
 		}
 	}
 
+	return spi_slot_check(umod, result);
+}
+
+/*
+ * A global named "llvm.*" stays external (symbols_internalize()), and the
+ * JIT runs no static constructors or destructors.  So only llvm.used,
+ * llvm.compiler.used and the empty lists that opt leaves behind may be
+ * defined.
+ */
+static bool
+llvm_global_check(LLVMValueRef gv, const char *name, plllvm_jit_result *result)
+{
+	LLVMTypeRef type = LLVMGlobalGetValueType(gv);
+
+	if (strcmp(name, "llvm.used") == 0 ||
+		strcmp(name, "llvm.compiler.used") == 0)
+		return true;
+
+	if (strcmp(name, "llvm.global_ctors") == 0 ||
+		strcmp(name, "llvm.global_dtors") == 0)
+	{
+		if (LLVMGetTypeKind(type) == LLVMArrayTypeKind &&
+			LLVMGetArrayLength2(type) == 0)
+			return true;
+
+		build_error(result, ERRCODE_INVALID_FUNCTION_DEFINITION,
+					psprintf("the IR must not define \"%s\"", name),
+					pstrdup("PL/LLVM never runs static constructors or destructors."));
+		return false;
+	}
+
+	build_error(result, ERRCODE_INVALID_FUNCTION_DEFINITION,
+				psprintf("the IR must not define \"%s\"", name),
+				pstrdup("Names starting with \"llvm.\" are reserved for LLVM."));
+	return false;
+}
+
+/*
+ * plllvm_spi_prepare keeps a statement in its slot for good.  Each call
+ * must name a slot of its own, a global ptr defined null and used by no
+ * other instruction, and always with the same statement and types: a slot
+ * shared by two statements would run the first one for both, a slot on
+ * the stack would leak a plan per call.
+ */
+static bool
+spi_slot_check(LLVMModuleRef umod, plllvm_jit_result *result)
+{
+	LLVMValueRef prepare = LLVMGetNamedFunction(umod, "plllvm_spi_prepare");
+
+	if (prepare == NULL)
+		return true;
+
+	for (LLVMUseRef use = LLVMGetFirstUse(prepare); use; use = LLVMGetNextUse(use))
+	{
+		LLVMValueRef call = LLVMGetUser(use);
+		LLVMValueRef slot;
+
+		if (!LLVMIsACallInst(call) || !call_callee_use(call, use))
+		{
+			build_error(result, ERRCODE_INVALID_FUNCTION_DEFINITION,
+						pstrdup("plllvm_spi_prepare can only be called directly"),
+						NULL);
+			return false;
+		}
+
+		slot = LLVMGetOperand(call, 0);
+		if (!LLVMIsAGlobalVariable(slot) || LLVMIsDeclaration(slot) ||
+			LLVMIsGlobalConstant(slot) ||
+			LLVMGetTypeKind(LLVMGlobalGetValueType(slot)) != LLVMPointerTypeKind ||
+			!LLVMIsNull(LLVMGetInitializer(slot)))
+			goto bad_slot;
+
+		for (int i = 1; i <= 3; i++)
+		{
+			if (!LLVMIsConstant(LLVMGetOperand(call, i)))
+			{
+				build_error(result, ERRCODE_INVALID_FUNCTION_DEFINITION,
+							pstrdup("the statement and the types of plllvm_spi_prepare must be constants"),
+							NULL);
+				return false;
+			}
+		}
+
+		for (LLVMUseRef suse = LLVMGetFirstUse(slot); suse; suse = LLVMGetNextUse(suse))
+		{
+			LLVMValueRef other = LLVMGetUser(suse);
+
+			if (!LLVMIsACallInst(other) ||
+				LLVMGetCalledValue(other) != prepare ||
+				LLVMGetOperandUse(other, 0) != suse)
+				goto bad_slot;
+
+			for (int i = 1; i <= 3; i++)
+			{
+				if (LLVMGetOperand(other, i) != LLVMGetOperand(call, i))
+				{
+					build_error(result, ERRCODE_INVALID_FUNCTION_DEFINITION,
+								psprintf("statement slot \"%s\" is prepared with different arguments",
+										 value_name(slot)),
+								pstrdup("Each statement needs a slot of its own."));
+					return false;
+				}
+			}
+		}
+	}
+
 	return true;
+
+bad_slot:
+	build_error(result, ERRCODE_INVALID_FUNCTION_DEFINITION,
+				pstrdup("the slot of plllvm_spi_prepare must be a global ptr initialized to null"),
+				pstrdup("Each statement needs a slot of its own, used by no other instruction."));
+	return false;
 }
 
 /*
@@ -1477,6 +1665,335 @@ arg_index_check(LLVMValueRef gv, const char *name, int nargs,
 	}
 
 	return true;
+}
+
+/*
+ * plllvm.auto_checks: add the interrupt and stack depth checks that the
+ * body's loops and recursions lack.  The handler checks the stack once per
+ * call of @f, which does not help inside it.
+ *
+ * A block polls when it calls plllvm_cfi or ProcessInterrupts, or reads
+ * InterruptPending (CHECK_FOR_INTERRUPTS() as clang compiles it).  A poll
+ * before the terminator of every back edge's source, in a DFS forest over
+ * the blocks that do not poll, puts one on every loop.  The same over the
+ * direct calls between functions whose entries do not both poll and check
+ * the stack finds the recursions; there the checks go into the entry,
+ * where tail recursion elimination keeps them inside the loop it makes.  A
+ * function called through a pointer gets them too.
+ *
+ * Runs before the helpers are linked, which have loops of their own, and
+ * declares a helper only when it is called: an empty body links none.
+ */
+static void
+checks_insert(LLVMContextRef ctx, LLVMModuleRef umod,
+			  plllvm_jit_result *result)
+{
+	LLVMBuilderRef builder = LLVMCreateBuilderInContext(ctx);
+	LLVMValueRef cfi = NULL;
+	LLVMValueRef check_stack = NULL;
+	LLVMValueRef *fns;
+	int			nfns = 0;
+	bool	   *polled;
+	bool	   *stacked;
+	bool	   *checked;
+	bool	   *cut;
+
+	/* loops */
+	for (LLVMValueRef fn = LLVMGetFirstFunction(umod); fn; fn = LLVMGetNextFunction(fn))
+	{
+		int			n = LLVMCountBasicBlocks(fn);
+		LLVMBasicBlockRef *blocks;
+
+		if (n == 0)
+			continue;
+		nfns++;
+
+		blocks = palloc(n * sizeof(LLVMBasicBlockRef));
+		LLVMGetBasicBlocks(fn, blocks);
+		polled = palloc(n * sizeof(bool));
+		for (int i = 0; i < n; i++)
+			block_checks(blocks[i], &polled[i], NULL);
+
+		cut = graph_cut((void **) blocks, n, false, polled);
+		for (int i = 0; i < n; i++)
+		{
+			if (!cut[i])
+				continue;
+			LLVMPositionBuilderBefore(builder,
+									  LLVMGetBasicBlockTerminator(blocks[i]));
+			call_check(ctx, umod, builder, &cfi, "plllvm_cfi");
+			result->checks_inserted++;
+		}
+	}
+
+	/* recursion, and calls through pointers */
+	fns = palloc(nfns * sizeof(LLVMValueRef));
+	polled = palloc(nfns * sizeof(bool));
+	stacked = palloc(nfns * sizeof(bool));
+	checked = palloc(nfns * sizeof(bool));
+	nfns = 0;
+	for (LLVMValueRef fn = LLVMGetFirstFunction(umod); fn; fn = LLVMGetNextFunction(fn))
+	{
+		if (LLVMIsDeclaration(fn))
+			continue;
+		block_checks(LLVMGetEntryBasicBlock(fn), &polled[nfns], &stacked[nfns]);
+		checked[nfns] = polled[nfns] && stacked[nfns];
+		fns[nfns++] = fn;
+	}
+
+	cut = graph_cut((void **) fns, nfns, true, checked);
+	for (int i = 0; i < nfns; i++)
+	{
+		LLVMValueRef in;
+
+		if (checked[i] || !(cut[i] || address_taken(fns[i])))
+			continue;
+
+		/* after the allocas, which mem2reg wants first */
+		in = LLVMGetFirstInstruction(LLVMGetEntryBasicBlock(fns[i]));
+		while (LLVMIsAAllocaInst(in))
+			in = LLVMGetNextInstruction(in);
+		LLVMPositionBuilderBefore(builder, in);
+
+		if (!stacked[i])
+		{
+			call_check(ctx, umod, builder, &check_stack, "plllvm_check_stack");
+			result->checks_inserted++;
+		}
+		if (!polled[i])
+		{
+			call_check(ctx, umod, builder, &cfi, "plllvm_cfi");
+			result->checks_inserted++;
+		}
+	}
+
+	LLVMDisposeBuilder(builder);
+}
+
+/*
+ * Does bb poll for interrupts, and does it check the stack depth?
+ */
+static void
+block_checks(LLVMBasicBlockRef bb, bool *polls, bool *checks_stack)
+{
+	*polls = false;
+	if (checks_stack)
+		*checks_stack = false;
+
+	for (LLVMValueRef in = LLVMGetFirstInstruction(bb); in; in = LLVMGetNextInstruction(in))
+	{
+		LLVMValueRef v;
+		const char *name;
+
+		if (LLVMIsALoadInst(in) && LLVMGetVolatile(in))
+			v = LLVMGetOperand(in, 0);
+		else if (LLVMIsACallInst(in))
+			v = LLVMGetCalledValue(in);
+		else
+			continue;
+		if (!LLVMIsAGlobalValue(v))
+			continue;
+
+		name = value_name(v);
+		if (LLVMIsALoadInst(in))
+			*polls |= strcmp(name, "InterruptPending") == 0;
+		else if (strcmp(name, "plllvm_cfi") == 0 ||
+				 strcmp(name, "ProcessInterrupts") == 0)
+			*polls = true;
+		else if (checks_stack && (strcmp(name, "plllvm_check_stack") == 0 ||
+								  strcmp(name, "check_stack_depth") == 0))
+			*checks_stack = true;
+	}
+}
+
+/*
+ * Is fn used other than as a callee or in a blockaddress?
+ */
+static bool
+address_taken(LLVMValueRef fn)
+{
+	for (LLVMUseRef use = LLVMGetFirstUse(fn); use; use = LLVMGetNextUse(use))
+	{
+		LLVMValueRef user = LLVMGetUser(use);
+
+		if (!LLVMIsABlockAddress(user) && !call_callee_use(user, use))
+			return true;
+	}
+
+	return false;
+}
+
+/*
+ * Call void name() at the builder, declaring it unless the IR does
+ */
+static void
+call_check(LLVMContextRef ctx, LLVMModuleRef umod, LLVMBuilderRef builder,
+		   LLVMValueRef *fn, const char *name)
+{
+	if (*fn == NULL)
+		*fn = LLVMGetNamedFunction(umod, name);
+	if (*fn == NULL)
+		*fn = LLVMAddFunction(umod, name,
+							  LLVMFunctionType(LLVMVoidTypeInContext(ctx),
+											   NULL, 0, false));
+
+	LLVMBuildCall2(builder, LLVMGlobalGetValueType(*fn), *fn, NULL, 0, "");
+}
+
+/*
+ * The graph of nodes for graph_cut(): blocks and their successors, or with
+ * calls, defined functions and the defined functions they call directly.
+ * The edges of node i go to adj[off[i]] .. adj[off[i + 1] - 1], as indexes
+ * into nodes.
+ */
+static void
+graph_build(void **nodes, int n, bool calls, int **off, int **adj)
+{
+	NodeIndex  *index = palloc(n * sizeof(NodeIndex));
+	int			nedges = 0;
+
+	for (int i = 0; i < n; i++)
+	{
+		index[i].ptr = nodes[i];
+		index[i].node = i;
+	}
+	qsort(index, n, sizeof(NodeIndex), node_index_cmp);
+
+	*off = palloc((n + 1) * sizeof(int));
+	*adj = NULL;
+
+	/* count the edges, then store them */
+	for (int round = 0; round < 2; round++)
+	{
+		nedges = 0;
+		for (int i = 0; i < n; i++)
+		{
+			(*off)[i] = nedges;
+
+			if (!calls)
+			{
+				LLVMValueRef term = LLVMGetBasicBlockTerminator(nodes[i]);
+
+				for (unsigned s = 0; s < LLVMGetNumSuccessors(term); s++)
+					edge_add(*adj, &nedges, index, n, LLVMGetSuccessor(term, s));
+				continue;
+			}
+
+			for (LLVMBasicBlockRef bb = LLVMGetFirstBasicBlock(nodes[i]); bb; bb = LLVMGetNextBasicBlock(bb))
+			{
+				for (LLVMValueRef in = LLVMGetFirstInstruction(bb); in; in = LLVMGetNextInstruction(in))
+				{
+					LLVMValueRef callee;
+
+					if (!LLVMIsACallInst(in) && !LLVMIsAInvokeInst(in) &&
+						!LLVMIsACallBrInst(in))
+						continue;
+					callee = LLVMGetCalledValue(in);
+					if (LLVMIsAFunction(callee) && !LLVMIsDeclaration(callee))
+						edge_add(*adj, &nedges, index, n, callee);
+				}
+			}
+		}
+		(*off)[n] = nedges;
+
+		if (round == 0)
+			*adj = palloc(nedges * sizeof(int));
+	}
+}
+
+/*
+ * Count an edge to target, and store it once adj is allocated
+ */
+static void
+edge_add(int *adj, int *nedges, NodeIndex *index, int n, void *target)
+{
+	NodeIndex	key = {.ptr = target};
+
+	if (adj != NULL)
+		adj[*nedges] = ((NodeIndex *) bsearch(&key, index, n, sizeof(NodeIndex),
+											  node_index_cmp))->node;
+	(*nedges)++;
+}
+
+static int
+node_index_cmp(const void *a, const void *b)
+{
+	uintptr_t	pa = (uintptr_t) ((const NodeIndex *) a)->ptr;
+	uintptr_t	pb = (uintptr_t) ((const NodeIndex *) b)->ptr;
+
+	return (pa > pb) - (pa < pb);
+}
+
+/*
+ * The back edges' sources of a depth-first forest over the nodes that are
+ * not checked, every one not visited yet a root, in order: cut[u] is set
+ * for each.  A DFS forest without its back edges has no cycle, so every
+ * cycle among these nodes has one in cut.
+ */
+static bool *
+graph_cut(void **nodes, int n, bool calls, const bool *checked)
+{
+	bool	   *cut = palloc0(n * sizeof(bool));
+	char	   *state = palloc0(n); /* 0 new, 1 on the stack, 2 done */
+	int		   *stack = palloc(n * sizeof(int));
+	int		   *next = palloc(n * sizeof(int)); /* edge to follow */
+	int		   *off;
+	int		   *adj;
+
+	graph_build(nodes, n, calls, &off, &adj);
+
+	for (int root = 0; root < n; root++)
+	{
+		int			depth = 0;
+
+		if (checked[root] || state[root] != 0)
+			continue;
+
+		state[root] = 1;
+		next[root] = off[root];
+		stack[depth++] = root;
+
+		while (depth > 0)
+		{
+			int			u = stack[depth - 1];
+			int			v;
+
+			if (next[u] == off[u + 1])
+			{
+				state[u] = 2;
+				depth--;
+				continue;
+			}
+
+			v = adj[next[u]++];
+			if (checked[v])
+				continue;
+			if (state[v] == 1)
+				cut[u] = true;
+			else if (state[v] == 0)
+			{
+				state[v] = 1;
+				next[v] = off[v];
+				stack[depth++] = v;
+			}
+		}
+	}
+
+	return cut;
+}
+
+/*
+ * Is use the callee of the call, invoke or callbr user?
+ */
+static bool
+call_callee_use(LLVMValueRef user, LLVMUseRef use)
+{
+	if (!LLVMIsACallInst(user) && !LLVMIsAInvokeInst(user) &&
+		!LLVMIsACallBrInst(user))
+		return false;
+
+	/* the callee is the last operand */
+	return LLVMGetOperandUse(user, LLVMGetNumOperands(user) - 1) == use;
 }
 
 static bool

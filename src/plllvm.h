@@ -154,6 +154,7 @@ extern bool plllvm_dump_ir;
 extern int	plllvm_max_resident_compiles;
 extern int	plllvm_max_ir_instructions;
 extern int	plllvm_debug_inject;
+extern bool plllvm_auto_checks;
 
 /* plllvm.c */
 extern const char *plllvm_display_path(const char *path);

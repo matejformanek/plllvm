@@ -31,7 +31,9 @@ declare void @plllvm_notice(ptr %msg)
 declare void @plllvm_rt_int_overflow()
 declare void @plllvm_rt_bigint_overflow()
 declare void @plllvm_rt_div_zero()
-; CHECK_FOR_INTERRUPTS() and check_stack_depth()
+; CHECK_FOR_INTERRUPTS() and check_stack_depth().  With plllvm.auto_checks
+; the compiler adds them where a loop or a recursion has none; calling them
+; chooses where they go.
 declare void @plllvm_cfi()
 declare void @plllvm_check_stack()
 
@@ -96,7 +98,8 @@ declare void @plllvm_scratch_reset()
 ; have the declared column types.  NullableDatum is { i64, i8 },
 ; %struct.NullableDatum of plllvm_types.bc.
 
-; (slot, sql, argtypes, coltypes) -> statement
+; (slot, sql, argtypes, coltypes) -> statement; each statement has a slot
+; of its own that nothing else uses, and constant text and types
 declare ptr @plllvm_spi_prepare(ptr %slot, ptr %sql, ptr %argtypes, ptr %coltypes)
 ; runs it with the NullableDatum %args as a non-STRICT SELECT INTO: the
 ; first row into the NullableDatum %out, all NULL without one; returns the

@@ -140,6 +140,38 @@ define void @check_stack_depth() { ret void }
 define i64 @f(ptr %p) { ret i64 0 }
 $ir$);
 
+-- only the entry point is visible to other modules, and nothing runs
+-- before it: no static constructors, module asm, aliases or ifuncs
+SELECT ok, sqlstate, message, detail FROM plllvm_jit_test($ir$
+@x = internal global i64 0
+@llvm.global_ctors = appending global [1 x { i32, ptr, ptr }] [{ i32, ptr, ptr } { i32 65535, ptr @init, ptr null }]
+define internal void @init() {
+  store i64 99, ptr @x
+  ret void
+}
+define i64 @f(ptr %p) {
+  %v = load i64, ptr @x
+  ret i64 %v
+}
+$ir$, codegen => false);
+SELECT ok, sqlstate, message, detail FROM plllvm_jit_test($ir$
+@llvm.foo = global i64 7
+define i64 @f(ptr %p) { ret i64 0 }
+$ir$, codegen => false);
+SELECT ok, sqlstate, message, detail FROM plllvm_jit_test($ir$
+module asm ".globl _plllvm_x"
+define i64 @f(ptr %p) { ret i64 0 }
+$ir$, codegen => false);
+SELECT ok, sqlstate, message, detail FROM plllvm_jit_test($ir$
+@plllvm_x = alias i64 (ptr), ptr @f
+define i64 @f(ptr %p) { ret i64 0 }
+$ir$, codegen => false);
+SELECT ok, sqlstate, message, detail FROM plllvm_jit_test($ir$
+@g = ifunc void (), ptr @resolve
+define internal ptr @resolve() { ret ptr null }
+define i64 @f(ptr %p) { ret i64 0 }
+$ir$, codegen => false);
+
 -- a symbol that neither the host API nor the server has
 INSERT INTO ir VALUES ('nosym', $ir$
 declare void @no_such_function()
@@ -186,7 +218,8 @@ SET plllvm.max_resident_compiles = :cap;
 SELECT ok FROM plllvm_jit_test('define i64 @f(ptr %p) { ret i64 1 }');
 SELECT ok FROM plllvm_jit_test('define i64 @f(ptr %p) { ret i32 1 }');
 SELECT ok FROM plllvm_jit_test('define i64 @f(ptr %p) { ret i64 2 }');
-SELECT ok FROM plllvm_jit_test('define i64 @f(ptr %p) { ret i64 3 }');  -- fail
+SELECT ok, sqlstate, message, detail
+  FROM plllvm_jit_test('define i64 @f(ptr %p) { ret i64 3 }');
 RESET plllvm.max_resident_compiles;
 SELECT ok, gen FROM plllvm_jit_test('define i64 @f(ptr %p) { ret i64 3 }');
 
@@ -194,6 +227,73 @@ SELECT compiles, compile_failures, retired FROM plllvm_session_info();
 SELECT count(*), count(DISTINCT symbol) AS symbols, count(DISTINCT code_addr) AS addrs,
        bool_or(retired) AS retired
   FROM plllvm_code_cache();
+
+-- the empty constructor list and llvm.used that opt leaves behind are fine
+SELECT ok, sqlstate, message FROM plllvm_jit_test($ir$
+@x = internal global i64 0
+@llvm.global_ctors = appending global [0 x { i32, ptr, ptr }] zeroinitializer
+@llvm.used = appending global [1 x ptr] [ptr @x]
+define i64 @f(ptr %p) {
+  %v = load i64, ptr @x
+  ret i64 %v
+}
+$ir$);
+
+-- interrupt and stack checks go where the IR lacks them: a poll on every
+-- loop, also behind a polled block, also an irreducible or indirect one
+SELECT ok, checks_inserted, helpers_linked FROM plllvm_jit_test($ir$
+declare void @plllvm_cfi()
+define i64 @f(ptr %p) {
+entry:
+  call void @plllvm_cfi()
+  br label %spin
+spin:
+  br label %spin
+}
+$ir$);
+SELECT ok, checks_inserted FROM plllvm_jit_test($ir$
+define i64 @f(ptr %p) {
+entry:
+  %c = ptrtoint ptr %p to i64
+  %t = trunc i64 %c to i1
+  br i1 %t, label %a, label %b
+a:
+  br label %b
+b:
+  br label %a
+}
+$ir$);
+SELECT ok, checks_inserted FROM plllvm_jit_test($ir$
+define i64 @f(ptr %p) {
+entry:
+  br label %l
+l:
+  indirectbr ptr blockaddress(@f, %l), [label %l]
+}
+$ir$);
+
+-- the kernels: clang's CHECK_FOR_INTERRUPTS() counts as a poll, fib's own
+-- checks suffice
+\getenv abs_srcdir PG_ABS_SRCDIR
+\set nbody `cat :'abs_srcdir'/examples/kernels/nbody.ll`
+\set revcomp `cat :'abs_srcdir'/examples/kernels/revcomp.ll`
+\set fib `cat :'abs_srcdir'/examples/kernels/fib.ll`
+SELECT ok, checks_inserted FROM plllvm_jit_test(:'nbody');
+SELECT ok, checks_inserted FROM plllvm_jit_test(:'revcomp');
+SELECT ok, checks_inserted FROM plllvm_jit_test(:'fib');
+
+-- recursion gets them at the entry
+SELECT ok, checks_inserted FROM plllvm_jit_test($ir$
+define i64 @f(ptr %p) {
+  %r = call i64 @f(ptr %p)
+  ret i64 %r
+}
+$ir$);
+
+-- off, for measurements
+SET plllvm.auto_checks = off;
+SELECT ok, checks_inserted FROM plllvm_jit_test(:'nbody');
+RESET plllvm.auto_checks;
 
 -- superuser only
 CREATE ROLE regress_plllvm_jit;
