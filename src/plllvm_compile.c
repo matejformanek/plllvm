@@ -15,14 +15,10 @@
  *    When the entry lets go of it, the record is released, and the next
  *    compile frees the code (plllvm_jit.c, note 4).
  *
- * 2) funccache reuses an entry found through fn_extra without looking at
- *    its hash table again, also one it forgot while a call ran it (after a
- *    replace made during that call).  A compile into it would insert a
- *    second entry under the key of the one that replaced it, so such an
- *    entry is looked up by its key instead.  A forgotten entry also gets
- *    an invalid fn_xmin when its code is released, the second guard: if
- *    the replace rolls back, the entry must not match pg_proc again and
- *    call freed code.
+ * 2) funccache reuses an entry found through fn_extra without a hash
+ *    lookup, also one it forgot during a call, so a forgotten entry is
+ *    looked up by its key instead.  Its invalid fn_xmin is the second
+ *    guard, for a replace that rolls back.
  *
  * 3) The validator never goes through funccache.
  *

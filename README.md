@@ -186,16 +186,13 @@ until the next compile frees it.
 * Functions only: no procedures, window functions, triggers or set-returning
   functions; no OUT parameters; no composite, domain or pseudo-type results
   other than `void`, and no composite or pseudo-type arguments.
-* Replaced code, with its call sites, constants and prepared statements, is
-  freed by the next compile once no call runs it, but only after the
-  function was called again with the same input collation: each input
-  collation has an entry of its own (as in PL/pgSQL). Code of a dropped
-  function stays until the session ends. So a role that may call a
-  function with a `text` argument and create temporary objects (`PUBLIC`
-  has both by default) can, in a long-lived session, fill
-  `plllvm.max_resident_compiles` by calling it under new temporary
-  collations (`CREATE COLLATION pg_temp.c1 FROM "C"`). `REVOKE EXECUTE ...
-  FROM PUBLIC` on such functions, or `REVOKE TEMP`, closes this.
+* Replaced code is freed once no call runs it. Code of a dropped function
+  stays until the session ends.
+* Each input collation compiles its own code, as in PL/pgSQL. A role that
+  may call a function with a `text` argument and create temporary objects
+  (`PUBLIC` by default) can fill `plllvm.max_resident_compiles` in a
+  long-lived session with new temporary collations. `REVOKE EXECUTE ...
+  FROM PUBLIC` on such functions, or `REVOKE TEMP`, prevents this.
 * Call sites take at most 3 arguments. They cannot call procedures,
   set-returning functions, functions with polymorphic or `"any"` arguments
   or results, or functions returning `record` or a trigger. A callee that

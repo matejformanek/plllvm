@@ -24,31 +24,13 @@
  *    module.  llvmjit shares one context and has to recreate it now and
  *    then to bound the types leaked into it; plllvm compiles far less often.
  *
- * 4) A module is released when no funccache entry points at it any more
- *    (plllvm_compile.c), and freed at the start of the next compile, never
- *    in a callback.  Then nothing can reach it:
- *    - no call runs it: funccache lets go of an entry only at use_count 0,
- *      and the handler pins the entry from before the code runs until after
- *      the result, which may point into module data, is copied out;
- *    - no entry calls it again: an entry let go of is zeroed for a new
- *      compile, or forgotten, and a forgotten one is never called (note 2
- *      there).  Every FmgrInfo, also long-lived ones of index expressions,
- *      plans and portals, reaches code only through its entry, and funccache
- *      checks the entry before each call;
- *    - no other module calls it: only the entry point is exported, under a
- *      name unique to the compile, and a body may not declare plllvm_
- *      names (user_ir_check()).  Call sites and constants point into the
- *      module's own records, which go with it;
- *    - its statements are on its own list and run to completion within a
- *      call, so no portal keeps their plans;
- *    - the statistics functions read the list and nothing else.
- *    A body that hands a pointer to its code or data to something that
- *    outlives the call breaks this (README, Security).  Dropped functions
- *    keep their code: funccache never lets go of their entries.
- *
- *    Each module has its own resource tracker.  Releasing one without
- *    removing it would hand the code to the JITDylib's default tracker,
- *    which plllvm never touches.
+ * 4) Code is released only at use_count 0, and the handler pins it through
+ *    the call, including the copy-out of the result.  Calls reach it only
+ *    through its funccache entry, which is rechecked before each call.  It
+ *    is freed at the next compile, never in a callback.  A body must not
+ *    hand out pointers to its code or data (README, Security).  Each module
+ *    has its own resource tracker; releasing one without removing it would
+ *    hand the code to the JITDylib's default tracker.
  *
  * 5) Call sites and constants are resolved between verify and symbol
  *    resolution, outside the section, with PostgreSQL's own errors
