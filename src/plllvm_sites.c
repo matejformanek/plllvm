@@ -155,10 +155,8 @@ role_callback(Datum arg, SysCacheIdentifier cacheid, uint32 hashvalue)
  * its schema between pg_catalog and pg_temp (pg_temp last, so that a
  * temporary type cannot shadow a catalog one).  The latter is returned as
  * PATH_NSP and the schema's OID, which path_set() turns into the path of
- * the schema's current name.  SET quotes a name starting with PATH_NSP, so
- * a setting starts with it only through SET ... FROM CURRENT after
- * set_config(), or a direct pg_proc update.  The rest is then read as a
- * schema OID, which the owner could have named anyway.
+ * the schema's current name.  A setting starting with PATH_NSP is misread
+ * as this marker.
  */
 #define PATH_NSP '\001'
 

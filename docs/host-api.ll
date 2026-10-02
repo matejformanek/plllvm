@@ -3,8 +3,8 @@
 ; Every function a PL/LLVM body may declare, with the types the compiler
 ; checks the declarations against.  Datums are i64, C bool is i1.  The
 ; inline helpers are defined in src/plllvm_types.c, the others in
-; src/plllvm_runtime.c, plllvm_sites.c and plllvm_spi.c.  Other external
-; symbols resolve against the server.
+; src/plllvm_runtime.c and plllvm_spi.c.  Other external symbols resolve
+; against the server.
 ;
 ; This file is a valid body: sql/plllvm_host_api.sql compiles it.
 
