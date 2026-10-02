@@ -215,7 +215,7 @@ DROP FUNCTION raise0_ll();
 -- the PL/LLVM frame shows in the context
 SELECT i4pl_ll(2147483647, 1);
 
--- errors release the pin: the replace retires the old code
+-- errors release the pin: the replace releases the old code
 DO $$
 BEGIN
   FOR i IN 1..50 LOOP

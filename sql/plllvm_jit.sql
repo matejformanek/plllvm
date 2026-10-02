@@ -220,15 +220,19 @@ SELECT ok, gen FROM plllvm_jit_test('define i64 @f(ptr %p) { ret i64 0 }');
 SELECT gen, opt_level FROM plllvm_code_cache() LIMIT 1;
 RESET plllvm.opt_level;
 
--- the resident cap; failed compiles do not count, nothing is freed
-SELECT compiles + 2 AS cap FROM plllvm_session_info() \gset
+-- the resident cap; failed compiles and released code do not count
+SELECT compiles - retired + 1 AS cap FROM plllvm_session_info() \gset
 SET plllvm.max_resident_compiles = :cap;
 SELECT ok FROM plllvm_jit_test('define i64 @f(ptr %p) { ret i64 1 }');
 SELECT ok FROM plllvm_jit_test('define i64 @f(ptr %p) { ret i32 1 }');
 SELECT ok FROM plllvm_jit_test('define i64 @f(ptr %p) { ret i64 2 }');
+CREATE FUNCTION jt_cap() RETURNS int8 LANGUAGE plllvm
+AS $$ define i64 @f(ptr %fcinfo) { ret i64 0 } $$;
+SELECT jt_cap();
 SELECT ok, sqlstate, message, detail
   FROM plllvm_jit_test('define i64 @f(ptr %p) { ret i64 3 }');
 RESET plllvm.max_resident_compiles;
+DROP FUNCTION jt_cap();
 SELECT ok, gen FROM plllvm_jit_test('define i64 @f(ptr %p) { ret i64 3 }');
 
 SELECT compiles, compile_failures, retired FROM plllvm_session_info();

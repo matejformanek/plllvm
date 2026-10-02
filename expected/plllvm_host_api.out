@@ -27,12 +27,8 @@ SELECT owner, callee, ready FROM plllvm_call_sites() ORDER BY callee;
  owner |            callee            | ready 
 -------+------------------------------+-------
        | abs(integer)                 | f
-       | abs(integer)                 | f
-       | int4pl(integer,integer)      | f
        | int4pl(integer,integer)      | f
        | pi()                         | f
-       | pi()                         | f
        | substr(text,integer,integer) | f
-       | substr(text,integer,integer) | f
-(8 rows)
+(4 rows)
 

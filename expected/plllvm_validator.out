@@ -304,7 +304,7 @@ SELECT v_strict(NULL);
 SELECT * FROM plllvm_function_status('v_strict(int8)');
  state | compiles | retired 
 -------+----------+---------
- live  |        2 |       1
+ live  |        1 |       0
 (1 row)
 
 -- a constant argument number must be one of the function's

@@ -26,8 +26,9 @@
  *    through the site, or a flag left by an ERROR) gets a fresh FmgrInfo.
  *    The flags are cleared when no call of the code is left.
  *
- * 4) Sites are released with their code, which deletes their contexts.  The
- *    records themselves stay, like the code.
+ * 4) Sites are released with their code, which deletes their contexts and
+ *    takes them off the callbacks' list.  The records go when the code is
+ *    freed.
  *
  * 5) The errcontext of a call costs the fast path nothing: on ERROR, the
  *    busy site is the running call.  That holds only while one call of the
@@ -127,8 +128,6 @@ procoid_callback(Datum arg, SysCacheIdentifier cacheid, uint32 hashvalue)
 		if (hashvalue == 0 || site->hashvalue == hashvalue)
 			site->ready = false;
 	}
-
-	plllvm_jit_owner_inval(hashvalue);
 }
 
 /* a renamed or dropped schema may change what any name resolves to */
@@ -518,7 +517,7 @@ plllvm_sites_running(plllvm_refs *refs, int ncalls)
 }
 
 /*
- * The code is retired and not running.  Deleting the contexts also unpins
+ * The code is released and not running.  Deleting the contexts also unpins
  * SQL-function callees.  Allocates nothing.
  */
 void
@@ -538,6 +537,16 @@ plllvm_sites_release(plllvm_refs *refs)
 		dlist_delete(&site->node);
 	}
 	refs->published = false;
+}
+
+/*
+ * The code is freed: the sites and constants go too
+ */
+void
+plllvm_refs_free(plllvm_refs *refs)
+{
+	plllvm_sites_release(refs);
+	MemoryContextDelete(refs->cxt);
 }
 
 /*

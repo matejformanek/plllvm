@@ -156,16 +156,17 @@ allocated in the current context, the scratch in a frame.
 
 `plllvm_function_status(fn regprocedure)` (superuser) gives the `state` of
 a function's code in this backend, `not_compiled`, `live`, `stale` (the
-definition changed since the compile), `retired` (replaced) or `dropped`,
-with the numbers of its compiles and retired compiles.
+definition changed since the compile) or `dropped`, with the numbers of its
+resident compiles and of those retired (released, freed at the next
+compile).
 
 `plllvm_jit_test(ir text, opt_level int DEFAULT
 NULL, codegen bool DEFAULT true)` (superuser) compiles a function body and
 returns the outcome as a row: `ok`, the SQLSTATE, message and detail of a
 refusal, the line and column of a parse error, the instruction and helper
 counts, and the number of checks added. With `codegen => false` it only
-checks the IR. Its code stays resident
-like any other compile.
+checks the IR. Nothing calls its code, so it is retired at once and freed
+at the next compile.
 
 ```sql
 SELECT ok, gen, helpers_linked
@@ -177,15 +178,21 @@ newest first, with the time of each compile stage (`parse_bc`, `parse`,
 `link`, `verify`, `resolve`, `optimize`, `emit`; code is generated at the
 lookup in `emit`) and whether it runs in a scratch context (`frame`).
 `plllvm_call_sites()` (superuser) lists its call sites with their state and
-how often each was prepared, checked and re-entered.
+how often each was prepared, checked and re-entered. Retired code is listed
+until the next compile frees it.
 
 ## Limits
 
 * Functions only: no procedures, window functions, triggers or set-returning
   functions; no OUT parameters; no composite, domain or pseudo-type results
   other than `void`, and no composite or pseudo-type arguments.
-* Compiled code is never freed during a session, not even when the function
-  is replaced or dropped (see `plllvm.max_resident_compiles`).
+* Replaced code is freed once no call runs it. Code of a dropped function
+  stays until the session ends.
+* Each input collation compiles its own code, as in PL/pgSQL. A role that
+  may call a function with a `text` argument and create temporary objects
+  (`PUBLIC` by default) can fill `plllvm.max_resident_compiles` in a
+  long-lived session with new temporary collations. `REVOKE EXECUTE ...
+  FROM PUBLIC` on such functions, or `REVOKE TEMP`, prevents this.
 * Call sites take at most 3 arguments. They cannot call procedures,
   set-returning functions, functions with polymorphic or `"any"` arguments
   or results, or functions returning `record` or a trigger. A callee that
@@ -199,8 +206,7 @@ how often each was prepared, checked and re-entered.
   function may run a `FOR UPDATE` inside a subquery (a STABLE one is
   refused by SPI's read-only check).
 * SQL: only `SELECT INTO` of one row; no cursors, no other commands, no
-  dynamic SQL. Prepared statements are never freed during a session, not
-  even when the function is replaced.
+  dynamic SQL.
 * Arrays: one dimension, no NULL elements, `int4`, `int8` and `float8` only.
 * The neword kernel (TPC-C New-Order) is not ported: it needs `UPDATE`
   (district, stock) and `INSERT` (orders, new_order, order_line) through
@@ -221,6 +227,10 @@ user can. Only superusers create PL/LLVM functions.
 * There is no memory safety. A value used after `plllvm_scratch_reset`, a
   value freed twice or a constant freed, or a store out of bounds corrupts
   or crashes the backend, as a bug in a C function does.
+* A body must not hand a pointer to its own functions or constants to
+  anything that outlives the call (a memory context callback,
+  `RegisterXactCallback`, a hook): replaced code is freed, unlike a C
+  library, which is never unloaded.
 * The added checks do not cover a blocking call (`pause`, `read` of a
   FIFO), a dynamic `alloca` inside a loop (the stack grows unchecked until
   the backend dies with SIGSEGV), a loop in inline assembly, or a
@@ -249,10 +259,10 @@ user can. Only superusers create PL/LLVM functions.
   always-inline host helpers are inlined.
 * `plllvm.dump_ir` (bool, default off, superuser): logs the optimized IR of
   every compile.
-* `plllvm.max_resident_compiles` (int, default 2000, superuser): compiled code
-  is never freed during a session, not even when a function is replaced. When
-  this many compiles are resident, the next one fails with SQLSTATE 53400
-  until the session reconnects.
+* `plllvm.max_resident_compiles` (int, default 2000, superuser): the most
+  compiles resident in a session. Retired code does not count; code of
+  dropped functions and of every input collation does (see Limits). When
+  this many compiles are resident, the next one fails with SQLSTATE 53400.
 * `plllvm.max_ir_instructions` (int, default 100000, 0 = no limit,
   superuser): the largest function body accepted (SQLSTATE 54000).
 * `plllvm.debug_inject` (`none`, `llvm_fatal`, `bad_alloc`, superuser): for
@@ -267,9 +277,10 @@ The prefix `plllvm.` is reserved.
 `plllvm_session_info()` (superuser) shows the LLVM version, target triple and
 data layout of the session, the libLLVM and `plllvm_types.bc` it loaded, how
 long the setup took, the numbers of compiles, failed compiles and retired
-code, the resident size of the backend (`rss_bytes`, macOS only) and the
-number of SQL statements prepared (`spi_statements`). It sets
-the session up if needed, so it also checks the installation.
+compiles (resident ones are `compiles - retired`), the resident size of the
+backend (`rss_bytes`, macOS only) and the number of SQL statements prepared
+(`spi_statements`). It sets the session up if needed, so it also checks the
+installation.
 
 ## Compilation
 

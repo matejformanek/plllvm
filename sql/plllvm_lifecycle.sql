@@ -1,11 +1,11 @@
 --
--- Replacing and dropping PL/LLVM functions: retired code, stale entries,
+-- Replacing and dropping PL/LLVM functions: freed code, stale entries,
 -- replaces during a call
 --
 LOAD 'plllvm';
 SET plllvm.regress_test_mode = on;
 
--- every replace compiles anew and retires the old code
+-- every replace compiles anew; the old code is freed by the next compile
 CREATE FUNCTION lc_cyc() RETURNS int8 LANGUAGE plllvm
 AS $$ define i64 @f(ptr %fcinfo) { ret i64 1 } $$;
 SELECT lc_cyc();
@@ -90,7 +90,7 @@ DEALLOCATE lc_p;
 --
 -- Replaces while the function runs.  lc_rec(1) runs SQL through SPI, the
 -- SQL replaces lc_rec and calls the new code; the running code finishes,
--- and retires itself when it returns.
+-- and releases itself when it returns.
 --
 CREATE FUNCTION lc_rec(n int4) RETURNS int8 LANGUAGE plllvm STRICT AS $$
 declare i32 @plllvm_arg_i32(ptr, i32)
@@ -234,8 +234,8 @@ SELECT lc_dup_body(1);
 SELECT n, lc_dup(n) FROM (VALUES (1), (0), (1), (0)) v(n);
 SELECT * FROM plllvm_function_status('lc_dup(int4)');
 
--- a function that drops itself while it runs: its code is retired in the
--- next transaction
+-- a function that drops itself while it runs: dropped at once, the code
+-- stays
 CREATE FUNCTION lc_dropper() RETURNS int8 LANGUAGE plpgsql AS $$
 BEGIN
   DROP FUNCTION lc_drop_self();
@@ -256,7 +256,7 @@ SELECT 'lc_drop_self()'::regprocedure::oid AS oid \gset
 SELECT lc_drop_self();
 SELECT * FROM plllvm_function_status(:'oid');
 
--- not while the DROP may still roll back
+-- dropped as seen by this transaction; the DROP may still roll back
 CREATE FUNCTION lc_rb() RETURNS int8 LANGUAGE plllvm
 AS $$ define i64 @f(ptr %fcinfo) { ret i64 1 } $$;
 SELECT lc_rb();
@@ -268,7 +268,52 @@ ROLLBACK;
 SELECT * FROM plllvm_function_status(:'oid');
 SELECT lc_rb();
 
+-- GRANT/REVOKE toggles: every one recompiles, and the replaced code is
+-- freed before the cap is checked
+CREATE ROLE regress_plllvm_lc;
+CREATE FUNCTION lc_toggle() RETURNS int8 LANGUAGE plllvm
+AS $$ define i64 @f(ptr %fcinfo) { ret i64 1 } $$;
+SELECT lc_toggle();
+SELECT compiles AS c0, compiles - retired AS resident0
+  FROM plllvm_session_info() \gset
+SET plllvm.max_resident_compiles = :resident0;
+DO $$
+BEGIN
+  FOR i IN 1..100 LOOP
+    GRANT EXECUTE ON FUNCTION lc_toggle() TO regress_plllvm_lc;
+    PERFORM lc_toggle();
+    REVOKE EXECUTE ON FUNCTION lc_toggle() FROM regress_plllvm_lc;
+    PERFORM lc_toggle();
+  END LOOP;
+END
+$$;
+RESET plllvm.max_resident_compiles;
+SELECT compiles - :c0 AS compiles, compiles - retired = :resident0 AS bounded
+  FROM plllvm_session_info();
+SELECT * FROM plllvm_function_status('lc_toggle()');
+
+-- not closed: each input collation has an entry of its own, whose code
+-- stays live (README, Limits)
+CREATE FUNCTION lc_coll(t text) RETURNS int8 LANGUAGE plllvm
+AS $$ define i64 @f(ptr %fcinfo) { ret i64 0 } $$;
+SELECT compiles - retired + 3 AS cap FROM plllvm_session_info() \gset
+SET plllvm.max_resident_compiles = :cap;
+DO $$
+BEGIN
+  FOR i IN 1..10 LOOP
+    EXECUTE format('CREATE COLLATION pg_temp.lc_c%s FROM "C"', i);
+    EXECUTE format('SELECT lc_coll(%L COLLATE pg_temp.lc_c%s)', 'a', i);
+  END LOOP;
+EXCEPTION WHEN configuration_limit_exceeded THEN
+  RAISE NOTICE 'cap reached: %', SQLERRM;
+END
+$$;
+RESET plllvm.max_resident_compiles;
+SELECT * FROM plllvm_function_status('lc_coll(text)');
+
 DROP FUNCTION lc_cyc(), lc_lang(), lc_prep(), lc_rec(int4), lc_rec2(int4),
-  lc_f(int4), lc_dup(int4), lc_rb(), lc_dropper();
+  lc_f(int4), lc_dup(int4), lc_rb(), lc_dropper(), lc_toggle(),
+  lc_coll(text);
+DROP ROLE regress_plllvm_lc;
 DROP FUNCTION lc_replace_and_call(), lc_replace_and_undo(), lc_replace(),
   lc_dup_body(int);

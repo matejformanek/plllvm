@@ -20,7 +20,7 @@ SELECT owner_oid, symbol, gen, opt_level, ir_instructions, helpers_linked,
   FROM plllvm_code_cache();
  owner_oid |   symbol   | gen | opt_level | ir_instructions | helpers_linked | cfi_left | retired | timed | total | addr 
 -----------+------------+-----+-----------+-----------------+----------------+----------+---------+-------+-------+------
- (null)    | plllvm_0_1 |   1 |         2 |               1 |              0 |        0 | f       | t     | t     | t
+ (null)    | plllvm_0_1 |   1 |         2 |               1 |              0 |        0 | t       | t     | t     | t
 (1 row)
 
 -- every host API symbol, declared and called; all resolve at lookup
@@ -348,8 +348,8 @@ SELECT gen, opt_level FROM plllvm_code_cache() LIMIT 1;
 (1 row)
 
 RESET plllvm.opt_level;
--- the resident cap; failed compiles do not count, nothing is freed
-SELECT compiles + 2 AS cap FROM plllvm_session_info() \gset
+-- the resident cap; failed compiles and released code do not count
+SELECT compiles - retired + 1 AS cap FROM plllvm_session_info() \gset
 SET plllvm.max_resident_compiles = :cap;
 SELECT ok FROM plllvm_jit_test('define i64 @f(ptr %p) { ret i64 1 }');
  ok 
@@ -369,24 +369,33 @@ SELECT ok FROM plllvm_jit_test('define i64 @f(ptr %p) { ret i64 2 }');
  t
 (1 row)
 
+CREATE FUNCTION jt_cap() RETURNS int8 LANGUAGE plllvm
+AS $$ define i64 @f(ptr %fcinfo) { ret i64 0 } $$;
+SELECT jt_cap();
+ jt_cap 
+--------
+      0
+(1 row)
+
 SELECT ok, sqlstate, message, detail
   FROM plllvm_jit_test('define i64 @f(ptr %p) { ret i64 3 }');
- ok | sqlstate |                       message                       |                                     detail                                     
-----+----------+-----------------------------------------------------+--------------------------------------------------------------------------------
- f  | 53400    | too many compiled PL/LLVM functions in this session | Compiled code stays in memory until the session ends; 6 compiles are resident.
+ ok | sqlstate |                       message                       |                detail                 
+----+----------+-----------------------------------------------------+---------------------------------------
+ f  | 53400    | too many compiled PL/LLVM functions in this session | Resident compiles: 1, the limit is 1.
 (1 row)
 
 RESET plllvm.max_resident_compiles;
+DROP FUNCTION jt_cap();
 SELECT ok, gen FROM plllvm_jit_test('define i64 @f(ptr %p) { ret i64 3 }');
  ok | gen 
 ----+-----
- t  |  21
+ t  |  22
 (1 row)
 
 SELECT compiles, compile_failures, retired FROM plllvm_session_info();
  compiles | compile_failures | retired 
 ----------+------------------+---------
-        7 |               14 |       0
+        8 |               14 |       7
 (1 row)
 
 SELECT count(*), count(DISTINCT symbol) AS symbols, count(DISTINCT code_addr) AS addrs,
@@ -394,7 +403,7 @@ SELECT count(*), count(DISTINCT symbol) AS symbols, count(DISTINCT code_addr) AS
   FROM plllvm_code_cache();
  count | symbols | addrs | retired 
 -------+---------+-------+---------
-     7 |       7 |     7 | f
+     2 |       2 |     2 | t
 (1 row)
 
 -- the empty constructor list and llvm.used that opt leaves behind are fine

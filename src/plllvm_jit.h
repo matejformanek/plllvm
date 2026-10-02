@@ -44,7 +44,10 @@ extern void plllvm_inject_fault(int kind);
 
 #include "storage/itemptr.h"
 
-/* compiled code, owned by plllvm_jit.c and never freed in v0.1 */
+/*
+ * compiled code, owned by plllvm_jit.c; freed at the next compile once
+ * released (see the notes there)
+ */
 typedef struct plllvm_jit_module
 {
 	Oid			owner_oid;		/* function, InvalidOid for plllvm_jit_test() */
@@ -65,14 +68,10 @@ typedef struct plllvm_jit_module
 	double		emit_ms;
 	void	   *addr;			/* entry point */
 	bool		needs_frame;	/* true, when the IR uses a frame helper */
-	bool		retired;		/* true, when the owner's code was replaced or
-								 * dropped; the code itself stays */
-	uint32		owner_hash;		/* of owner_oid in PROCOID, set by the caller */
-	bool		owner_inval;	/* true, when the owner's row was invalidated
-								 * since the last check */
-	LocalTransactionId owner_inval_lxid;	/* transaction that may have
-											 * dropped the owner, or invalid */
+	bool		released;		/* true, when no entry points at it any more;
+								 * freed at the next compile */
 	struct plllvm_refs *refs;	/* call sites and constants, or NULL */
+	struct plllvm_spi_stmt *stmts;	/* statements prepared by the code */
 	struct plllvm_jit_module *next;
 } plllvm_jit_module;
 
@@ -103,7 +102,8 @@ typedef struct plllvm_jit_session_info
 	double		init_ms;
 	int64		compiles;
 	int64		compile_failures;
-	int64		retired;
+	int64		retired;		/* compiles released, resident ones are
+								 * compiles - retired */
 } plllvm_jit_session_info;
 
 /* plllvm_jit.c */
@@ -115,9 +115,7 @@ extern bool plllvm_jit_compile(Oid owner_oid, Oid collation,
 							   plllvm_jit_result *result);
 extern bool plllvm_jit_check(const char *ir, const char *search_path,
 							 int nargs, plllvm_jit_result *result);
-extern void plllvm_jit_retire(plllvm_jit_module *mod);
-extern void plllvm_jit_owner_inval(uint32 hashvalue);
-extern void plllvm_jit_retire_dropped(void);
+extern void plllvm_jit_release(plllvm_jit_module *mod);
 extern plllvm_jit_module *plllvm_jit_modules(void);
 
 #endif							/* !__cplusplus */
