@@ -259,6 +259,13 @@ SELECT c_cal(0);  -- fail
 CREATE SCHEMA zz;
 CREATE FUNCTION zz.cal(x int) RETURNS int LANGUAGE sql AS 'SELECT -666';
 SELECT c_cal(0);
+-- the default path follows a rename of the function's own schema
+CREATE SCHEMA ow;
+CREATE FUNCTION ow.sib(x int) RETURNS int LANGUAGE sql AS 'SELECT x * 3';
+SELECT mk_ll('ow.c_sib(x int)', 'int', 'sib(integer)', 1);
+SELECT ow.c_sib(2);
+ALTER SCHEMA ow RENAME TO ow2;
+SELECT ow2.c_sib(2);
 -- the code was compiled for the old argument types
 CREATE SCHEMA ta;
 CREATE DOMAIN ta.d AS int;
@@ -433,7 +440,8 @@ DROP FUNCTION n_strict(int), n_lax(int), who(), wm(), rp(int), priv(int),
   sqlrec(int), c_rec(), c_stale(int), g_stale(int);
 DROP PROCEDURE c_proc();
 DROP DOMAIN c_posint, ta.d, tb.d;
-DROP SCHEMA zz, yy, ta, tb;
+DROP FUNCTION ow2.c_sib(int), ow2.sib(int);
+DROP SCHEMA zz, yy, ta, tb, ow2;
 DROP SCHEMA s1, s2 CASCADE;
 DROP ROLE regress_plllvm_owner1, regress_plllvm_owner2, regress_plllvm_user,
   regress_plllvm_grp, regress_plllvm_su;

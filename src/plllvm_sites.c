@@ -12,9 +12,10 @@
  *
  * 1) Names resolve under the function's own search_path, else
  *    "pg_catalog, <its schema>, pg_temp", never under the caller's: a pooled
- *    session must not bind one client's function for another.  The path is
- *    fixed at the compile.  As a cached plan, a site follows the name: it is
- *    resolved again whenever its callee or any schema changes.
+ *    session must not bind one client's function for another.  The schema
+ *    is kept by OID, so that the path follows a rename of it.  As a cached
+ *    plan, a site follows the name: it is resolved again whenever its callee
+ *    or any schema changes.
  *
  * 2) The fast path of a call is inline in the code (plllvm_types.c).  This
  *    file has the rest: building the FmgrInfo, the EXECUTE check, calls
@@ -152,15 +153,18 @@ role_callback(Datum arg, SysCacheIdentifier cacheid, uint32 hashvalue)
 /*
  * The path names of a function resolve under: its own search_path, or else
  * its schema between pg_catalog and pg_temp (pg_temp last, so that a
- * temporary type cannot shadow a catalog one).
+ * temporary type cannot shadow a catalog one).  The latter is returned as
+ * PATH_NSP and the schema's OID, which path_set() turns into the path of
+ * the schema's current name.  A search_path setting never starts with it.
  */
+#define PATH_NSP '\001'
+
 char *
 plllvm_sites_path(HeapTuple procTup)
 {
 	Form_pg_proc procStruct = (Form_pg_proc) GETSTRUCT(procTup);
 	Datum		proconfig;
 	bool		isnull;
-	char	   *nspname;
 
 	proconfig = SysCacheGetAttr(PROCOID, procTup, Anum_pg_proc_proconfig,
 								&isnull);
@@ -180,12 +184,7 @@ plllvm_sites_path(HeapTuple procTup)
 		}
 	}
 
-	nspname = get_namespace_name(procStruct->pronamespace);
-	if (nspname == NULL)
-		elog(ERROR, "cache lookup failed for namespace %u",
-			 procStruct->pronamespace);
-
-	return psprintf("pg_catalog, %s, pg_temp", quote_identifier(nspname));
+	return psprintf("%c%u", PATH_NSP, procStruct->pronamespace);
 }
 
 /*
@@ -425,9 +424,24 @@ static int
 path_set(const char *search_path)
 {
 	int			level = NewGUCNestLevel();
+	char	   *path = NULL;
+
+	if (search_path[0] == PATH_NSP)
+	{
+		Oid			nspoid = atooid(search_path + 1);
+		char	   *nspname = get_namespace_name(nspoid);
+
+		if (nspname == NULL)
+			elog(ERROR, "cache lookup failed for namespace %u", nspoid);
+		path = psprintf("pg_catalog, %s, pg_temp", quote_identifier(nspname));
+		search_path = path;
+	}
 
 	(void) set_config_option("search_path", search_path, PGC_USERSET,
 							 PGC_S_SESSION, GUC_ACTION_SAVE, true, 0, false);
+
+	if (path != NULL)
+		pfree(path);
 
 	return level;
 }

@@ -88,10 +88,12 @@ A site calls with the executor's protocol: a strict callee is not called
 with a NULL argument, `EXECUTE` is checked, and an `ALTER`, `GRANT` or role
 change is seen at the next call. Like a cached plan, a site follows its
 name: after any change of the callee or of a schema, the signature is
-resolved again, and a callee of other argument or result types is an
-ERROR. A body that uses calls, text or memory helpers runs in a scratch
-context; a by-reference result is copied out of it, and must not be a
-null pointer.
+resolved again. A qualified name follows that schema's name; an
+unqualified one resolves under the function's own path, which without a
+`SET search_path` follows a rename of the function's schema. A callee of
+other argument or result types is an ERROR. A body that uses calls, text
+or memory helpers runs in a scratch context; a by-reference result is
+copied out of it, and must not be a null pointer.
 
 A body that declares `plllvm_spi_prepare` runs SQL. A statement lives in a
 slot, an `internal global ptr null` of the body, and is prepared at its

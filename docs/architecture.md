@@ -50,9 +50,9 @@ Only `plllvm_jit.c` and `plllvm_error.cpp` include LLVM headers.
   function's `SET search_path` or `pg_catalog, <schema>, pg_temp`. A site
   global becomes the address of its record (FmgrInfo and fcinfo), each
   `plllvm_const` call the constant's Datum.
-* A site is bound by OID for the session. PROCOID invalidations make it
-  rebuild (re-resolving a dropped callee), role and database invalidations
-  repeat the EXECUTE check. The executor's protocol is inline; recursion
+* A site follows its name, as a cached plan does: PROCOID and NAMESPACEOID
+  invalidations make it rebuild, which resolves the signature again; role
+  and database invalidations repeat the EXECUTE check. The executor's protocol is inline; recursion
   through a busy site gets a fresh FmgrInfo. Sites are released with their
   code.
 * Memory: a body that declares a call, text or memory helper runs in a
