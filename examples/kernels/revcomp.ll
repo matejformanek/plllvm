@@ -690,7 +690,7 @@ define internal i32 @int4_add(i32 noundef %0, i32 noundef %1) #0 {
   br i1 %14, label %15, label %16
 
 15:                                               ; preds = %2
-  call void @plllvm_rt_int_overflow() #11
+  call void @plllvm_int_overflow() #11
   unreachable
 
 16:                                               ; preds = %2
@@ -719,7 +719,7 @@ define internal i32 @int4_mul(i32 noundef %0, i32 noundef %1) #0 {
   br i1 %14, label %15, label %16
 
 15:                                               ; preds = %2
-  call void @plllvm_rt_int_overflow() #11
+  call void @plllvm_int_overflow() #11
   unreachable
 
 16:                                               ; preds = %2
@@ -866,7 +866,7 @@ define internal zeroext i1 @pg_add_s32_overflow(i32 noundef %0, i32 noundef %1, 
 declare i64 @llvm.expect.i64(i64, i64) #5
 
 ; Function Attrs: noreturn
-declare void @plllvm_rt_int_overflow() #6
+declare void @plllvm_int_overflow() #6
 
 ; Function Attrs: nocallback nocreateundeforpoison nofree nosync nounwind speculatable willreturn memory(none)
 declare { i32, i1 } @llvm.sadd.with.overflow.i32(i32, i32) #7

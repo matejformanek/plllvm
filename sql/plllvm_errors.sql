@@ -9,7 +9,7 @@ SET plllvm.regress_test_mode = on;
 CREATE FUNCTION i4pl_ll(a int4, b int4) RETURNS int4
 LANGUAGE plllvm STRICT AS $$
 declare i32 @plllvm_arg_i32(ptr, i32)
-declare void @plllvm_rt_int_overflow()
+declare void @plllvm_int_overflow()
 declare { i32, i1 } @llvm.sadd.with.overflow.i32(i32, i32)
 
 define i64 @f(ptr %fcinfo) {
@@ -24,7 +24,7 @@ ok:
   %d = sext i32 %v to i64
   ret i64 %d
 overflow:
-  call void @plllvm_rt_int_overflow()
+  call void @plllvm_int_overflow()
   unreachable
 }
 $$;
@@ -32,8 +32,8 @@ $$;
 CREATE FUNCTION i4div_ll(a int4, b int4) RETURNS int4
 LANGUAGE plllvm STRICT AS $$
 declare i32 @plllvm_arg_i32(ptr, i32)
-declare void @plllvm_rt_int_overflow()
-declare void @plllvm_rt_div_zero()
+declare void @plllvm_int_overflow()
+declare void @plllvm_div_zero()
 
 define i64 @f(ptr %fcinfo) {
 entry:
@@ -51,10 +51,10 @@ ok:
   %d = sext i32 %v to i64
   ret i64 %d
 div_zero:
-  call void @plllvm_rt_div_zero()
+  call void @plllvm_div_zero()
   unreachable
 overflow:
-  call void @plllvm_rt_int_overflow()
+  call void @plllvm_int_overflow()
   unreachable
 }
 $$;
@@ -62,7 +62,7 @@ $$;
 CREATE FUNCTION i8pl_ll(a int8, b int8) RETURNS int8
 LANGUAGE plllvm STRICT AS $$
 declare i64 @plllvm_arg_i64(ptr, i32)
-declare void @plllvm_rt_bigint_overflow()
+declare void @plllvm_bigint_overflow()
 declare { i64, i1 } @llvm.sadd.with.overflow.i64(i64, i64)
 
 define i64 @f(ptr %fcinfo) {
@@ -76,7 +76,7 @@ ok:
   %v = extractvalue { i64, i1 } %r, 0
   ret i64 %v
 overflow:
-  call void @plllvm_rt_bigint_overflow()
+  call void @plllvm_bigint_overflow()
   unreachable
 }
 $$;

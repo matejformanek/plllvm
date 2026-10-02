@@ -308,9 +308,9 @@ void	   *referenced_functions[] =
 {
 	plllvm_error,
 	plllvm_notice,
-	plllvm_rt_int_overflow,
-	plllvm_rt_bigint_overflow,
-	plllvm_rt_div_zero,
+	plllvm_int_overflow,
+	plllvm_bigint_overflow,
+	plllvm_div_zero,
 	plllvm_keep,
 	plllvm_scratch_reset,
 	plllvm_array_arg,

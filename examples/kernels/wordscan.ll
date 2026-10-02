@@ -57,8 +57,8 @@
 declare i64 @plllvm_arg_i64(ptr, i32)
 declare void @plllvm_cfi()
 declare void @plllvm_error(i32, ptr) noreturn
-declare void @plllvm_rt_int_overflow() noreturn
-declare void @plllvm_rt_bigint_overflow() noreturn
+declare void @plllvm_int_overflow() noreturn
+declare void @plllvm_bigint_overflow() noreturn
 declare i64 @plllvm_cstring_to_text(ptr)
 declare i64 @plllvm_detoast(i64)
 declare ptr @plllvm_vardata_any(i64)
@@ -320,7 +320,7 @@ ok:
   %v = extractvalue { i32, i1 } %r, 0
   ret i32 %v
 overflow:
-  call void @plllvm_rt_int_overflow()
+  call void @plllvm_int_overflow()
   unreachable
 }
 
@@ -332,7 +332,7 @@ ok:
   %v = extractvalue { i32, i1 } %r, 0
   ret i32 %v
 overflow:
-  call void @plllvm_rt_int_overflow()
+  call void @plllvm_int_overflow()
   unreachable
 }
 
@@ -344,7 +344,7 @@ ok:
   %v = extractvalue { i64, i1 } %r, 0
   ret i64 %v
 overflow:
-  call void @plllvm_rt_bigint_overflow()
+  call void @plllvm_bigint_overflow()
   unreachable
 }
 
@@ -356,6 +356,6 @@ ok:
   %v = extractvalue { i64, i1 } %r, 0
   ret i64 %v
 overflow:
-  call void @plllvm_rt_bigint_overflow()
+  call void @plllvm_bigint_overflow()
   unreachable
 }

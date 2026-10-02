@@ -40,9 +40,9 @@ const plllvm_host_symbol plllvm_host_symbols[] =
 {
 	{"plllvm_error", (void *) plllvm_error},
 	{"plllvm_notice", (void *) plllvm_notice},
-	{"plllvm_rt_int_overflow", (void *) plllvm_rt_int_overflow},
-	{"plllvm_rt_bigint_overflow", (void *) plllvm_rt_bigint_overflow},
-	{"plllvm_rt_div_zero", (void *) plllvm_rt_div_zero},
+	{"plllvm_int_overflow", (void *) plllvm_int_overflow},
+	{"plllvm_bigint_overflow", (void *) plllvm_bigint_overflow},
+	{"plllvm_div_zero", (void *) plllvm_div_zero},
 	{"plllvm_keep", (void *) plllvm_keep},
 	{"plllvm_scratch_reset", (void *) plllvm_scratch_reset},
 	{"plllvm_rt_site_call", (void *) plllvm_rt_site_call},
@@ -105,7 +105,7 @@ plllvm_notice(const char *msg)
 
 /* the messages of int4pl, int8pl and int4div */
 void
-plllvm_rt_int_overflow(void)
+plllvm_int_overflow(void)
 {
 	ereport(ERROR,
 			(errcode(ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE),
@@ -113,7 +113,7 @@ plllvm_rt_int_overflow(void)
 }
 
 void
-plllvm_rt_bigint_overflow(void)
+plllvm_bigint_overflow(void)
 {
 	ereport(ERROR,
 			(errcode(ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE),
@@ -121,7 +121,7 @@ plllvm_rt_bigint_overflow(void)
 }
 
 void
-plllvm_rt_div_zero(void)
+plllvm_div_zero(void)
 {
 	ereport(ERROR,
 			(errcode(ERRCODE_DIVISION_BY_ZERO),

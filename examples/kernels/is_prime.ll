@@ -15,7 +15,7 @@
 declare zeroext i1 @plllvm_arg_isnull(ptr, i32)
 declare i32 @plllvm_arg_i32(ptr, i32)
 declare void @plllvm_cfi()
-declare void @plllvm_rt_int_overflow() noreturn
+declare void @plllvm_int_overflow() noreturn
 
 declare { i32, i1 } @llvm.sadd.with.overflow.i32(i32, i32)
 
@@ -57,6 +57,6 @@ composite:
   ret i64 0
 
 overflow:
-  call void @plllvm_rt_int_overflow()
+  call void @plllvm_int_overflow()
   unreachable
 }
