@@ -121,7 +121,8 @@ static const ExecEvalSubroutine trampolines[MAX_PARAMFUNCS] = {
 static void \
 forward_##name(PLpgSQL_execstate *estate, type *arg) \
 { \
-	prev_plugin->name(estate, arg); \
+	if (prev_plugin->name) \
+		prev_plugin->name(estate, arg); \
 }
 
 FORWARD(func_beg, PLpgSQL_function)
@@ -159,7 +160,9 @@ plllvm_plpgsql_init(void)
 const char *
 plllvm_plpgsql_state(void)
 {
-	if (*plugin_ptr != &plugin && *plugin_ptr != seen_owner)
+	PLpgSQL_plugin *owner = *plugin_ptr;
+
+	if (owner == NULL || (owner != &plugin && owner != seen_owner))
 		return "not_in_slot";
 	if (paramfunc_conflict)
 		return "declined:paramfunc";
@@ -221,9 +224,11 @@ param_compile(ParamListInfo params, Param *param, ExprState *state,
 
 	/*
 	 * Only the ExprState of a simple expression.  Partition pruning also
-	 * builds one with no parent from our paramLI, but not of this tree.
+	 * builds one with no parent from our paramLI, but not of this tree.  The
+	 * paramLI was wrapped when the function started, so the GUC may be off by
+	 * now.
 	 */
-	if (paramfunc_conflict || state->parent != NULL || expr == NULL ||
+	if (!plllvm_expr_jit || paramfunc_conflict || state->parent != NULL || expr == NULL ||
 		state->expr != expr->expr_simple_expr)
 		return;
 

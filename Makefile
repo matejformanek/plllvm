@@ -234,8 +234,11 @@ installcheck-hazard: port-ok
 #
 # PostgreSQL's PL/pgSQL tests (src/pl/plpgsql and the core plpgsql test),
 # without plllvm and then with it loaded: plllvm.expr_jit off, on, and on
-# with eager trampolines.  Each run must give the output of the first.
-# test_setup creates a tablespace, which outlives its database.
+# with eager trampolines.  Each run must give the output of the first, and
+# with plllvm.expr_jit on the trampolines must have fired.  test_setup
+# creates a tablespace, which outlives its database, so this is for a
+# throwaway cluster only.  With plllvm in shared_preload_libraries the
+# first run has it loaded too, and compares nothing against stock PL/pgSQL.
 #
 PG_SRC ?= $(THESIS_ROOT)/code
 PG_BUILD ?= $(THESIS_ROOT)/code/build-jit
@@ -252,17 +255,31 @@ plpgsql_suite = \
 		--dbname=pl_regression $(PLPGSQL_TESTS) && \
 	'$(bindir)/psql' -X -q -h /tmp -p $(PLLLVM_PORT) -d postgres \
 		-c 'DROP DATABASE IF EXISTS regression' \
+		-c 'DROP DATABASE IF EXISTS regression_utf8' \
 		-c 'DROP TABLESPACE IF EXISTS regress_tblspace' && \
 	PGOPTIONS='$(2)' $(pg_regress_installcheck) --host=/tmp --port=$(PLLLVM_PORT) \
 		--inputdir=$(PG_SRC)/src/test/regress --dlpath=$(PG_BUILD)/src/test/regress \
 		--outputdir=results-plpgsql/$(1)/core --dbname=regression test_setup plpgsql
 
+# $(call plpgsql_fired,PGOPTIONS), in pl_regression as the suite left it
+plpgsql_fired = \
+	r=`PGOPTIONS='$(1)' '$(bindir)/psql' -X -q -At -h /tmp -p $(PLLLVM_PORT) -d pl_regression \
+		-c 'CREATE EXTENSION plllvm' \
+		-c 'DO $$$$ DECLARE s int := 0; BEGIN FOR i IN 1..10 LOOP s := s + i; END LOOP; END $$$$' \
+		-c "SELECT state = 'active' AND fired > 0 FROM plllvm_expr_stats()"` && \
+	[ "$$r" = t ] || { echo 'plllvm did not fire with $(1)' >&2; exit 1; }
+
 installcheck-plpgsql: port-ok
+	@case "$(origin PLLLVM_PORT):$(PLLLVM_PORT)" in file:*|*:|*:544[2-5]) \
+	  echo "installcheck-plpgsql needs the PLLLVM_PORT of a throwaway cluster" >&2; \
+	  exit 1;; esac
 	rm -rf results-plpgsql
 	$(call plpgsql_suite,base,)
 	$(call plpgsql_suite,off,$(PLPGSQL_LOAD))
 	$(call plpgsql_suite,on,$(PLPGSQL_LOAD) -c plllvm.expr_jit=on)
+	$(call plpgsql_fired,$(PLPGSQL_LOAD) -c plllvm.expr_jit=on)
 	$(call plpgsql_suite,eager,$(PLPGSQL_LOAD) -c plllvm.expr_jit=on -c plllvm.expr_eager=on)
+	$(call plpgsql_fired,$(PLPGSQL_LOAD) -c plllvm.expr_jit=on -c plllvm.expr_eager=on)
 	for m in off on eager; do \
 	  diff -r results-plpgsql/base/pl/results results-plpgsql/$$m/pl/results && \
 	  diff -r results-plpgsql/base/core/results results-plpgsql/$$m/core/results || exit 1; \

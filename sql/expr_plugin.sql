@@ -83,6 +83,25 @@ SELECT ep_once(2);
 COMMIT;
 SELECT state, ep_fired() - :f0 AS fired FROM plllvm_expr_stats();
 
+-- an ExprState built while off gets no trampoline, even in a function
+-- that started while on
+CREATE FUNCTION ep_switch() RETURNS int LANGUAGE plpgsql AS $$
+DECLARE
+  s int := 0;
+BEGIN
+  FOR i IN 1..3 LOOP
+    PERFORM set_config('plllvm.expr_jit',
+                       CASE WHEN i = 1 THEN 'off' ELSE 'on' END, true);
+    s := s + i;
+  END LOOP;
+  RETURN s;
+END
+$$;
+
+SELECT ep_fired() AS f0 \gset
+SELECT ep_switch();
+SELECT ep_fired() - :f0 AS fired;
+
 -- a parallel worker leaves its expressions alone
 CREATE FUNCTION ep_worker(n int) RETURNS TABLE(in_worker bool, fired int8)
 LANGUAGE plpgsql PARALLEL SAFE AS $$
@@ -104,4 +123,4 @@ SELECT in_worker, fired > :f0 AS fired FROM ep_worker(10);
 RESET plllvm.expr_jit;
 SELECT state FROM plllvm_expr_stats();
 
-DROP FUNCTION ep_worker(int), ep_fired(), ep_once(int), ep_loop(int);
+DROP FUNCTION ep_worker(int), ep_switch(), ep_fired(), ep_once(int), ep_loop(int);
