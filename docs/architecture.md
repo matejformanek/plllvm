@@ -133,9 +133,10 @@ Only `plllvm_jit.c` and `plllvm_error.cpp` include LLVM headers.
   is a PL/pgSQL variable passed by value (`int4`, `int8`, `float8`,
   `bool`).
 * Cache: a hash of the key (opt level, eager flag, tags with their kind
-  and arity, functions, types) leads to the programs with that key; one is taken when its tree
-  is `equal()` to the ExprState's and its facts match. Otherwise the tree
-  is compiled, and a failed build is kept too, so it is not tried again.
+  and arity, functions, types) leads to the programs with that key; one
+  is taken when its tree is `equal()` to the ExprState's and its facts
+  match. Otherwise the tree is compiled, and a failed build is kept too,
+  so it is not tried again.
   Programs are never freed; `plllvm.expr_max_programs` caps them and
   beyond it expressions stay interpreted. Stack too deep, an unsupported
   tree or a failed build leave the expression interpreted; only the

@@ -262,7 +262,6 @@ RegProcedure
 RelFileLocator
 RelFileLocatorBackend
 RelFileNumber
-RelabelType
 Relation
 RelationPtr
 ResourceOwner

@@ -42,7 +42,8 @@
 typedef enum OpKind
 {
 	OP_CALL,					/* helper that may raise an error */
-	OP_CALL_PURE,				/* helper that never raises */
+	OP_CALL_PURE,				/* helper that never raises; NULLIF calls it
+								 * also on NULLs */
 	OP_ICMP,					/* icmp with the predicate in name */
 	OP_SEXT,					/* int4 -> int8 */
 	OP_SITOFP,					/* int4, int8 -> float8 */
@@ -378,18 +379,6 @@ check_node(const Expr *e, CheckState *cs, plllvm_repr *repr)
 				args = f->args;
 				break;
 			}
-		case T_RelabelType:
-			{
-				const RelabelType *r = (const RelabelType *) e;
-
-				if (!type_repr(r->resulttype, repr))
-				{
-					cs->why = "type";
-					return false;
-				}
-				appendStringInfo(cs->hash_key, "R%u ", r->resulttype);
-				return check_arg(r->arg, cs, *repr);
-			}
 		case T_BoolExpr:
 			{
 				const BoolExpr *b = (const BoolExpr *) e;
@@ -429,7 +418,9 @@ check_node(const Expr *e, CheckState *cs, plllvm_repr *repr)
 				const CaseExpr *c = (const CaseExpr *) e;
 				plllvm_repr arepr = PLLLVM_I1;
 
-				if (!type_repr(c->casetype, repr) || c->defresult == NULL)
+				/* transformCaseExpr always adds a default */
+				Assert(c->defresult != NULL);
+				if (!type_repr(c->casetype, repr))
 				{
 					cs->why = "type";
 					return false;
@@ -491,7 +482,10 @@ check_node(const Expr *e, CheckState *cs, plllvm_repr *repr)
 			{
 				const NullIfExpr *n = (const NullIfExpr *) e;
 
-				/* a comparison that cannot fail, as NULLs are compared too */
+				/*
+				 * The comparison runs also on the values of NULLs, whose
+				 * result is masked, so it must not be able to raise.
+				 */
 				if (!check_func(n->opfuncid, cs, &op))
 					return false;
 				if (op->kind == OP_CALL || op->result != PLLLVM_I1 ||
@@ -659,14 +653,6 @@ emit_node(plllvm_ir *ir, const Expr *e, EmitState *es, plllvm_value *out)
 				const FuncExpr *f = (const FuncExpr *) e;
 
 				emit_op(ir, find_op(f->funcid), f->args, es, out);
-				return;
-			}
-		case T_RelabelType:
-			{
-				const RelabelType *r = (const RelabelType *) e;
-
-				emit_node(ir, r->arg, es, out);
-				out->type = r->resulttype;
 				return;
 			}
 		case T_BoolExpr:
