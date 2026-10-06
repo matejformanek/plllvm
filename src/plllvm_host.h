@@ -6,9 +6,9 @@
  *
  * by Matěj Formánek 2026
  *
- * plllvm_types.c includes only this header, and the version of
- * plllvm_types.bc is a checksum of the two files.  Whatever the .bc does
- * not need belongs in plllvm.h.
+ * plllvm_types.c includes only this header and plllvm_ops.h, and the
+ * version of plllvm_types.bc is a checksum of the three files.  Whatever
+ * the .bc does not need belongs in plllvm.h.
  *
  *-------------------------------------------------------------------------
  */
@@ -33,8 +33,8 @@
  * and into the library by the server's compiler, and must agree.
  *
  * PLLLVM_TYPES_VERSION, the version stored next to them in the .bc, is not
- * defined here: the Makefile passes a checksum of plllvm_types.c and this
- * file to the .bc and to plllvm_jit.o.
+ * defined here: the Makefile passes a checksum of plllvm_types.c, this
+ * file and plllvm_ops.h to the .bc and to plllvm_jit.o.
  */
 #define PLLLVM_LAYOUT \
 	{ \

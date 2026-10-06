@@ -20,6 +20,7 @@ REGRESS_FEATURES = plllvm_types \
 		plllvm_memory \
 		plllvm_calls \
 		plllvm_host_api \
+		plllvm_ops \
 		plllvm_spi \
 		plllvm_array \
 		plllvm_sessions
@@ -83,29 +84,30 @@ endif
 #
 PLLLVM_CLANG ?= $(LLVM)/bin/clang
 PLLLVM_BCFLAGS = -O2 -flto=thin -emit-llvm -fno-strict-aliasing -fwrapv \
-	-Wno-ignored-attributes -Wno-empty-body
+	-ffp-contract=off -Wno-ignored-attributes -Wno-empty-body
 ifdef PG_SYSROOT
 PLLLVM_BCFLAGS += -isysroot $(PG_SYSROOT)
 endif
 
 # the .bc and plllvm_jit.o must come from the same sources (see plllvm_host.h)
-PLLLVM_TYPES_VERSION := $(shell cat src/plllvm_types.c src/plllvm_host.h | cksum | cut -d' ' -f1)
+PLLLVM_TYPES_SRCS = src/plllvm_types.c src/plllvm_host.h src/plllvm_ops.h
+PLLLVM_TYPES_VERSION := $(shell cat $(PLLLVM_TYPES_SRCS) | cksum | cut -d' ' -f1)
 
 all: src/plllvm_types.bc
 
-src/plllvm_types.bc: src/plllvm_types.c src/plllvm_host.h
+src/plllvm_types.bc: $(PLLLVM_TYPES_SRCS)
 	$(PLLLVM_CLANG) $(PLLLVM_BCFLAGS) $(CPPFLAGS) \
 		-DPLLLVM_TYPES_VERSION=$(PLLLVM_TYPES_VERSION)U -c -o $@ $<
 
 # PGXS sets CPPFLAGS with override, so a plain += would be ignored
 src/plllvm_jit.o: override CPPFLAGS += -DPLLLVM_TYPES_VERSION=$(PLLLVM_TYPES_VERSION)U
-src/plllvm_jit.o: src/plllvm_types.c src/plllvm_host.h
+src/plllvm_jit.o: $(PLLLVM_TYPES_SRCS)
 
 # the .bc of slightly different sources, for the plllvm_types test
-src/plllvm_types_stale.bc: src/plllvm_types.c src/plllvm_host.h
+src/plllvm_types_stale.bc: $(PLLLVM_TYPES_SRCS)
 	{ cat $<; echo '/* stale */'; } > $@.tmp
 	$(PLLLVM_CLANG) $(PLLLVM_BCFLAGS) $(CPPFLAGS) -Isrc \
-		-DPLLLVM_TYPES_VERSION=`cat $@.tmp src/plllvm_host.h | cksum | cut -d' ' -f1`U \
+		-DPLLLVM_TYPES_VERSION=`cat $@.tmp src/plllvm_host.h src/plllvm_ops.h | cksum | cut -d' ' -f1`U \
 		-x c -c -o $@ $@.tmp
 	rm -f $@.tmp
 
@@ -214,11 +216,12 @@ installcheck-discard:
 	$(MAKE) installcheck REGRESS='plllvm_setup plllvm_calls plllvm_cache' \
 		PGOPTIONS='-c debug_discard_caches=1'
 
-# the kernels at the other opt levels, against the same expected output
+# the operators and the kernels at the other opt levels, against the same
+# expected output
 installcheck-opt:
-	$(MAKE) installcheck REGRESS='plllvm_setup $(REGRESS_KERNELS)' \
+	$(MAKE) installcheck REGRESS='plllvm_setup plllvm_ops $(REGRESS_KERNELS)' \
 		PGOPTIONS='-c plllvm.opt_level=0'
-	$(MAKE) installcheck REGRESS='plllvm_setup $(REGRESS_KERNELS)' \
+	$(MAKE) installcheck REGRESS='plllvm_setup plllvm_ops $(REGRESS_KERNELS)' \
 		PGOPTIONS='-c plllvm.opt_level=3'
 
 # tests that crash the server when their fix regresses, so never part of
