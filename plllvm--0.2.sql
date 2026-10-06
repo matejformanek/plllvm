@@ -31,7 +31,7 @@ CREATE FUNCTION plllvm_code_cache()
                 parse_bc_ms float8, parse_ms float8, link_ms float8,
                 verify_ms float8, resolve_ms float8, optimize_ms float8,
                 emit_ms float8, total_ms float8, retired bool,
-                code_addr text, frame bool)
+                code_addr text, frame bool, kind text)
   LANGUAGE c AS 'MODULE_PATHNAME';
 
 REVOKE ALL ON FUNCTION plllvm_code_cache() FROM PUBLIC;
@@ -44,7 +44,11 @@ CREATE FUNCTION plllvm_call_sites()
 REVOKE ALL ON FUNCTION plllvm_call_sites() FROM PUBLIC;
 
 -- expression JIT in the PL/pgSQL functions of this backend; state is off,
--- active, declined:paramfunc or not_in_slot
+-- active, declined:paramfunc or not_in_slot.  installed counts the
+-- expressions given code (compiled + taken from the cache), programs the
+-- compiled ones and the failed builds, which plllvm.expr_max_programs caps;
+-- compiled_evals counts evaluations of code compiled under
+-- plllvm.expr_eager only
 CREATE FUNCTION plllvm_expr_stats(OUT state text, OUT fired int8,
                                   OUT installed int8, OUT compiled int8,
                                   OUT declined int8, OUT failures int8,

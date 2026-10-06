@@ -43,17 +43,28 @@ extern void plllvm_inject_fault(int kind);
 
 #include "storage/itemptr.h"
 
+/* what a module's entry point is */
+typedef enum plllvm_jit_kind
+{
+	PLLLVM_JIT_FUNCTION,		/* a PL/LLVM function, i64 (ptr fcinfo) */
+	PLLLVM_JIT_EXPR,			/* a PL/pgSQL expression, i64 (ptr state, ptr
+								 * econtext, ptr isnull) */
+} plllvm_jit_kind;
+
 /*
  * compiled code, owned by plllvm_jit.c; freed at the next compile once
  * released (see the notes there)
  */
 typedef struct plllvm_jit_module
 {
-	Oid			owner_oid;		/* function, InvalidOid for plllvm_jit_test() */
+	plllvm_jit_kind kind;
+	Oid			owner_oid;		/* function, InvalidOid for plllvm_jit_test()
+								 * and expressions */
 	TransactionId owner_xmin;	/* pg_proc row compiled, set by the caller */
 	ItemPointerData owner_tid;	/* likewise */
 	uint64		gen;			/* backend-wide compile number */
-	char		symbol[NAMEDATALEN];	/* plllvm_<owner_oid>_<gen> */
+	char		symbol[NAMEDATALEN];	/* plllvm_<owner_oid>_<gen>, or
+										 * plllvm_expr_<gen> */
 	int			opt_level;
 	int			ir_instructions;	/* of the user IR, before linking */
 	int			helpers_linked; /* host helper definitions pulled in */
@@ -99,7 +110,7 @@ typedef struct plllvm_jit_session_info
 	char	   *libllvm;		/* file of the loaded libLLVM */
 	char	   *types_bc;		/* file the session was set up from */
 	double		init_ms;
-	int64		compiles;
+	int64		compiles;		/* of functions, as the next two */
 	int64		compile_failures;
 	int64		retired;		/* compiles released, resident ones are
 								 * compiles - retired */
@@ -111,6 +122,8 @@ extern bool plllvm_jit_compile(Oid owner_oid, Oid collation,
 							   const struct plllvm_path *path, int nargs,
 							   const char *ir, int opt_level,
 							   plllvm_jit_result *result);
+extern bool plllvm_jit_compile_expr(const char *ir, int opt_level,
+									plllvm_jit_result *result);
 extern bool plllvm_jit_check(const char *ir, const struct plllvm_path *path,
 							 int nargs, plllvm_jit_result *result);
 extern void plllvm_jit_release(plllvm_jit_module *mod);

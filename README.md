@@ -137,10 +137,10 @@ All are superuser only and show the current backend.
 | function | shows |
 |---|---|
 | `plllvm_session_info()` | LLVM version, triple, data layout, loaded `libLLVM` and `plllvm_types.bc`, setup time, compiles, failed and retired compiles, `rss_bytes` (macOS only), prepared SQL statements; sets the session up, so it also checks the installation |
-| `plllvm_code_cache()` | compiled code, newest first, with the time of each stage (`parse_bc`, `parse`, `link`, `verify`, `resolve`, `optimize`, `emit`) and whether it runs in a scratch context (`frame`) |
+| `plllvm_code_cache()` | compiled code, newest first, with the time of each stage (`parse_bc`, `parse`, `link`, `verify`, `resolve`, `optimize`, `emit`), whether it runs in a scratch context (`frame`) and its `kind`, `function` or `expr` |
 | `plllvm_call_sites()` | call sites, their state and how often each was prepared, checked and re-entered |
 | `plllvm_function_status(regprocedure)` | `not_compiled`, `live`, `stale` or `dropped`, with resident and retired compiles |
-| `plllvm_expr_stats()` | expression JIT in PL/pgSQL (below): `state`, `fired`, `declined`; the other counters stay 0 in this version |
+| `plllvm_expr_stats()` | expression JIT in PL/pgSQL (below): `state`; expressions `fired`, `installed` (given code), `compiled`, `declined`, failed (`failures`) and left interpreted at the cap (`capped`); `programs` kept; `compiled_evals`, evaluations of code compiled under `plllvm.expr_eager` |
 | `plllvm_jit_test(ir, opt_level, codegen)` | compiles a body without calling it: `ok`, SQLSTATE, message, detail, line and column of a parse error, instruction and helper counts, checks added; `codegen => false` only checks the IR |
 
 Retired code (replaced, no call running it) is listed until the next compile
@@ -148,9 +148,26 @@ frees it.
 
 ## PL/pgSQL expressions
 
-`plllvm.expr_jit` is to compile the simple expressions of `LANGUAGE plpgsql`
-functions. This version compiles nothing yet: it only finds the expressions,
-at their second evaluation in a transaction, and counts them.
+`plllvm.expr_jit` compiles the simple expressions of `LANGUAGE plpgsql`
+functions, at their second evaluation in a transaction. An expression is
+compiled whole or not at all. This version takes:
+
+* constants, and variables of type `int4`, `int8`, `float8` and `bool`;
+* `+ - * /` and unary minus of `int4`, `int8` and the mixed `int4`/`int8`
+  operators, `%` and `mod()` of `int4` and `int8`, and their six
+  comparisons;
+* `+ - * /`, unary minus and the comparisons of `float8`; `=` and `<>` of
+  `bool`;
+* the casts `int8(int4)`, `int4(int8)`, `float8(int4)`, `float8(int8)`.
+
+Anything else (`numeric`, `text`, other functions, `CASE`, `AND`/`OR`,
+arrays) stays interpreted. Results and errors are those of PL/pgSQL;
+integer errors under `VERBOSITY verbose` name another source location.
+
+A compiled expression is kept for the session and found again by its
+tree, so the next transaction pays only a lookup. The code is never freed:
+`plllvm.expr_max_programs` caps it, and beyond the cap new expressions are
+interpreted. Each takes some tens of KiB.
 
 The library has to be loaded before the PL/pgSQL function starts: `LOAD
 'plllvm'`, `session_preload_libraries` or `shared_preload_libraries`. Once
@@ -165,6 +182,11 @@ debuggers and profilers use.
   not what plllvm expects; expression JIT is then off for the session.
 * An expression evaluated once per transaction is never taken. Parallel
   workers leave their expressions alone.
+* `SET plllvm.expr_jit = off` stops new expressions at once; those already
+  compiled run compiled until the transaction ends.
+* With `plllvm.expr_jit` on, a broken installation (no usable
+  `plllvm_types.bc`) fails the first statement that would compile, as for
+  PL/LLVM functions.
 * Loaded, every PL/pgSQL call goes through plllvm's `func_setup`, also with
   `plllvm.expr_jit` off.
 
@@ -178,12 +200,15 @@ debuggers and profilers use.
 | `plllvm.max_ir_instructions` | int, 0 = no limit | 100000 | superuser | largest body accepted (SQLSTATE 54000) |
 | `plllvm.dump_ir` | bool | off | superuser | log the optimized IR of every compile |
 | `plllvm.types_bc_path` | string | empty | superuser | the `plllvm_types.bc` to use; empty means `plllvm/plllvm_types.bc` next to the library; read once per session |
-| `plllvm.expr_jit` | bool | off | superuser | expression JIT in PL/pgSQL functions; compiles nothing yet (above) |
+| `plllvm.expr_jit` | bool | off | superuser | expression JIT in PL/pgSQL functions (above) |
+| `plllvm.expr_opt_level` | int 0–3 | 2 | superuser | LLVM optimization level of compiled expressions |
+| `plllvm.expr_max_programs` | int 1–1000000 | 1000 | superuser | compiled expressions (and failed builds) kept in a session; beyond it, new expressions are interpreted |
 | `plllvm.expr_eager` | bool | off | superuser | tests only: take an expression at its first evaluation instead of the second |
 | `plllvm.regress_test_mode` | bool | off | any user | reduce volatile output (times, addresses) in regression tests |
 | `plllvm.debug_inject` | `none`, `llvm_fatal`, `bad_alloc` | none | superuser | tests only: raise that LLVM error in the next compile, which ends the session with FATAL |
 
-Code already compiled keeps its `opt_level`. Retired code does not count
+Code already compiled keeps its `opt_level`; an expression compiled at
+another `expr_opt_level` is compiled again. Retired code does not count
 against `max_resident_compiles`; code of dropped functions and of each input
 collation does. The prefix `plllvm.` is reserved.
 
@@ -245,8 +270,8 @@ user can. Only superusers create PL/LLVM functions.
 
 ## Status
 
-v0.1, the PL/LLVM language, is done. v0.2 adds the PL/pgSQL plugin for
-expression JIT; the compiler is not in yet. `examples/kernels/` has the benchmark
+v0.1, the PL/LLVM language, is done. v0.2 adds expression JIT for
+PL/pgSQL, for integer and float expressions so far. `examples/kernels/` has the benchmark
 kernels of the thesis in IR; `nbody` and `revcomp` are compiled from C
 (`examples/kernels/src/`). The neword kernel (TPC-C New-Order) is not
 ported: it needs `UPDATE` and `INSERT` through SPI, and its checksum does

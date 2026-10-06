@@ -63,6 +63,8 @@ int			plllvm_debug_inject = PLLLVM_INJECT_NONE;
 bool		plllvm_auto_checks = true;
 bool		plllvm_expr_jit = false;
 bool		plllvm_expr_eager = false;
+int			plllvm_expr_opt_level = 2;
+int			plllvm_expr_max_programs = 1000;
 
 static const struct config_enum_entry debug_inject_options[] = {
 	{"none", PLLLVM_INJECT_NONE, false},
@@ -170,6 +172,22 @@ _PG_init(void)
 							 false,
 							 PGC_SUSET, GUC_NO_SHOW_ALL | GUC_NOT_IN_SAMPLE,
 							 NULL, NULL, NULL);
+
+	DefineCustomIntVariable("plllvm.expr_opt_level",
+							gettext_noop("Sets the LLVM optimization level of compiled PL/pgSQL expressions."),
+							NULL,
+							&plllvm_expr_opt_level,
+							2, 0, 3,
+							PGC_SUSET, 0,
+							NULL, NULL, NULL);
+
+	DefineCustomIntVariable("plllvm.expr_max_programs",
+							gettext_noop("Sets the maximum number of compiled PL/pgSQL expressions kept in a session."),
+							gettext_noop("They are never freed; beyond the limit, new expressions are interpreted."),
+							&plllvm_expr_max_programs,
+							1000, 1, 1000000,
+							PGC_SUSET, 0,
+							NULL, NULL, NULL);
 
 	plllvm_plpgsql_init();
 

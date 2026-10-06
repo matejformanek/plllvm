@@ -36,8 +36,13 @@ REGRESS_KERNELS = kernel_loop \
 		kernel_spectralnorm \
 		kernel_rowudf \
 		kernel_ispras
+# PL/pgSQL only, with stock PL/pgSQL's output (installcheck-expr)
+REGRESS_EXPR = expr_basic \
+		expr_ops \
+		expr_kernels \
+		expr_collide
 REGRESS = plllvm_setup $(REGRESS_FEATURES) $(REGRESS_KERNELS) expr_plugin \
-	plllvm_fatal plllvm_teardown
+	$(REGRESS_EXPR) expr_stats plllvm_fatal plllvm_teardown
 
 REGRESS_OPTS = --dbname=$(PL_TESTDB)
 
@@ -167,7 +172,7 @@ endif
 
 .PHONY: port-ok doctor stage cluster-init cluster-start cluster-stop pgindent \
 	installcheck-discard installcheck-opt installcheck-hazard installcheck-plpgsql \
-	check-host-api kernels check-kernels
+	installcheck-expr check-host-api kernels check-kernels
 
 # 5432, 5433 belong to pg-claude, 5444 to the perf cluster
 port-ok:
@@ -225,6 +230,24 @@ installcheck-opt:
 		PGOPTIONS='-c plllvm.opt_level=0'
 	$(MAKE) installcheck REGRESS='plllvm_setup plllvm_ops $(REGRESS_KERNELS)' \
 		PGOPTIONS='-c plllvm.opt_level=3'
+
+#
+# The expression tests against the same expected output, interpreted and
+# compiled: at O0 and O2, under cache flushes, and taken at the first
+# evaluation.  expr_stats checks that compiled code ran where it should.
+#
+EXPR_JIT = -c session_preload_libraries=plllvm -c plllvm.expr_jit=on
+
+installcheck-expr:
+	$(MAKE) installcheck REGRESS='plllvm_setup $(REGRESS_EXPR) expr_stats'
+	$(MAKE) installcheck REGRESS='plllvm_setup $(REGRESS_EXPR) expr_stats' \
+		PGOPTIONS='$(EXPR_JIT) -c plllvm.expr_opt_level=0'
+	$(MAKE) installcheck REGRESS='plllvm_setup $(REGRESS_EXPR) expr_stats' \
+		PGOPTIONS='$(EXPR_JIT) -c plllvm.expr_opt_level=2'
+	$(MAKE) installcheck REGRESS='plllvm_setup $(REGRESS_EXPR) expr_stats' \
+		PGOPTIONS='$(EXPR_JIT) -c plllvm.expr_opt_level=2 -c debug_discard_caches=1'
+	$(MAKE) installcheck REGRESS='plllvm_setup $(REGRESS_EXPR) expr_stats' \
+		PGOPTIONS='$(EXPR_JIT) -c plllvm.expr_opt_level=2 -c plllvm.expr_eager=on'
 
 # tests that crash the server when their fix regresses, so never part of
 # installcheck: only on a throwaway cluster, with PLLLVM_PORT given

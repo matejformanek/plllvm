@@ -1,8 +1,7 @@
 # plllvm architecture
 
 One extension, `plllvm`, with no changes to PostgreSQL: the PL/LLVM
-language (v0.1) and the PL/pgSQL plugin for expression JIT (v0.2, which
-compiles nothing yet).
+language (v0.1) and expression JIT for PL/pgSQL (v0.2).
 
 ## Files
 
@@ -19,7 +18,10 @@ compiles nothing yet).
 | `src/plllvm_compile.c` | funccache callbacks, signature and scope checks |
 | `src/plllvm_spi.c` | read-only prepared statements: prepare into a slot, SELECT INTO, result checks (`plllvm_spi_*` host functions) |
 | `src/plllvm_sites.c` | call sites and constants: resolution, rebuild, EXECUTE checks, invalidation callbacks (`plllvm_rt_site_*` host functions) |
-| `src/plllvm_plpgsql.c` | the PL/pgSQL plugin: slot and chaining, `paramCompile` wrapper, trampolines on simple expressions; the only file that includes `plpgsql.h` |
+| `src/plllvm_plpgsql.c` | the PL/pgSQL plugin: slot and chaining, `paramCompile` wrapper, trampolines on simple expressions, the Params of compiled code (`param_check`, `param_emit`); the only file that includes `plpgsql.h` |
+| `src/plllvm_ir.c` | IR text builder: temporaries, blocks, declarations |
+| `src/plllvm_expr.c` | planned expression tree to IR: the check (whole tree or nothing) and the emitter; knows neither LLVM nor PL/pgSQL |
+| `src/plllvm_exprjit.c` | compiled expressions: key, stored tree and facts, cache, cap, the `ExprStateEvalFunc` wrapper, install |
 | `src/plllvm_stats.c` | `plllvm_session_info()`, `plllvm_code_cache()`, `plllvm_call_sites()`, `plllvm_jit_test()`, `plllvm_function_status()`, `plllvm_expr_stats()` |
 
 Only `plllvm_jit.c` and `plllvm_error.cpp` include LLVM headers.
@@ -28,7 +30,10 @@ Only `plllvm_jit.c` and `plllvm_error.cpp` include LLVM headers.
 
 * **module**, **compile**: the code of one successful compile
   (`plllvm_jit_module`, in `plllvm_jit.c` wrapped as `JitCode` with its
-  resource tracker); one row of `plllvm_code_cache()`.
+  resource tracker); one row of `plllvm_code_cache()`. Its `kind` is
+  `function` (PL/LLVM) or `expr` (PL/pgSQL expression).
+* **program**: a compiled expression in `plllvm_exprjit.c`'s cache: key,
+  copy of the tree, facts and module, or no module for a failed build.
 * **released** (counted as **retired**): no funccache entry points at the
   module any more; the next compile frees it.
 * **refs**: the call sites and constants of one module (`plllvm_refs`).
@@ -112,7 +117,37 @@ Only `plllvm_jit.c` and `plllvm_error.cpp` include LLVM headers.
   the first `PARAM_CALLBACK` step.
 * The trampoline re-arms itself at the first evaluation and fires at the
   second, after restoring the original paramfunc. `plllvm.expr_eager`
-  fires at the first. A fired trampoline is counted; nothing is compiled
-  yet.
+  fires at the first. A fired trampoline checks `plllvm.expr_jit` again
+  and that `evalfunc` is still the interpreter's, then hands the ExprState
+  to `plllvm_exprjit_install()`.
 * `plpgsql_param_eval_var` is learnt as the paramfunc of a non-varlena
   variable; a second value turns the plugin off (`declined:paramfunc`).
+
+## Expression JIT (v0.2)
+
+* The tree compiled is `state->expr`, the planned tree, not the steps.
+  `plllvm_expr_check()` walks it once (at most 64 nodes, every node
+  supported, a native operator only where no fmgr hook wants the
+  function) and produces the key and, through `param_check`, the facts:
+  per Param its type, datum kind and length. A Param is taken only if it
+  is a PL/pgSQL variable passed by value (`int4`, `int8`, `float8`,
+  `bool`).
+* Cache: a hash of the key (opt level, eager flag, tags, functions,
+  types) leads to the programs with that key; one is taken when its tree
+  is `equal()` to the ExprState's and its facts match. Otherwise the tree
+  is compiled, and a failed build is kept too, so it is not tried again.
+  Programs are never freed; `plllvm.expr_max_programs` caps them and
+  beyond it expressions stay interpreted. Stack too deep, an unsupported
+  tree or a failed build leave the expression interpreted; only the
+  session setup may raise an ERROR.
+* Code: `define i64 @f(ptr %state, ptr %econtext, ptr %isnull)`, an
+  `ExprStateEvalFunc` set as `state->evalfunc`. It reads a variable as
+  `plpgsql_param_eval_var()` does, through `econtext`, the paramLI's
+  `paramFetchArg` (the estate) and `datums[paramid - 1]`, with offsets of
+  this library's compile of `plpgsql.h`. Operators are the
+  `plllvm_ops.h` helpers of `plllvm_types.bc`; the result is boxed as a
+  Datum (an `int4` sign extended), 0 when NULL.
+* `plllvm_jit_compile_expr()` is the PL/LLVM compile with the other entry
+  type, no call sites and no interrupt checks (an expression has no
+  loops). Expression modules do not count in `plllvm_session_info()` or
+  `plllvm.max_resident_compiles`.

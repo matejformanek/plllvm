@@ -30,7 +30,8 @@
  *    is freed at the next compile, never in a callback.  A body must not
  *    hand out pointers to its code or data (README, Security).  Each module
  *    has its own resource tracker; releasing one without removing it would
- *    hand the code to the JITDylib's default tracker.
+ *    hand the code to the JITDylib's default tracker.  The code of a
+ *    PL/pgSQL expression is never released (plllvm_exprjit.c).
  *
  * 5) Call sites and constants are resolved between verify and symbol
  *    resolution, outside the section, with PostgreSQL's own errors
@@ -132,6 +133,9 @@ static int	n_unfreed = 0;		/* released, not yet freed */
 static char *diag_error = NULL;
 
 static void plllvm_jit_session_ensure(void);
+static bool compile(plllvm_jit_kind kind, Oid owner_oid, Oid collation,
+					const plllvm_path *path, int nargs, const char *ir,
+					int opt_level, plllvm_jit_result *result);
 static void types_bc_locate(char *path);
 static char *types_module_check(LLVMModuleRef mod, unsigned llvm_major);
 static char *target_machine_create(void);
@@ -151,8 +155,9 @@ static bool build(const char *ir, bool codegen, Oid collation,
 static bool helpers_load(LLVMContextRef ctx, LLVMModuleRef *hmod,
 						 LLVMAttributeRef *attrs, plllvm_jit_result *result);
 static bool user_ir_parse(LLVMContextRef ctx, const char *ir,
-						  LLVMModuleRef hmod, int nargs, LLVMModuleRef *umod,
-						  List **irrefs, plllvm_jit_result *result);
+						  plllvm_jit_kind kind, LLVMModuleRef hmod, int nargs,
+						  LLVMModuleRef *umod, List **irrefs,
+						  plllvm_jit_result *result);
 static bool helpers_link(LLVMModuleRef umod, LLVMModuleRef hmod,
 						 plllvm_jit_result *result);
 static void symbols_internalize(LLVMModuleRef umod, const char *symbol,
@@ -169,8 +174,8 @@ static void code_emit(LLVMContextRef ctx, LLVMModuleRef umod,
 					  plllvm_jit_result *result);
 static void parse_error_set(char *msg, plllvm_jit_result *result);
 static bool user_ir_check(LLVMContextRef ctx, LLVMModuleRef umod,
-						  LLVMModuleRef hmod, int nargs, List **irrefs,
-						  plllvm_jit_result *result);
+						  plllvm_jit_kind kind, LLVMModuleRef hmod, int nargs,
+						  List **irrefs, plllvm_jit_result *result);
 static bool global_check(LLVMValueRef gv, LLVMModuleRef hmod, int nargs,
 						 List **irrefs, plllvm_jit_result *result);
 static bool ir_ref_check(LLVMValueRef gv, const char *name, int *nargs,
@@ -402,6 +407,35 @@ plllvm_jit_compile(Oid owner_oid, Oid collation, const plllvm_path *path,
 				   int nargs, const char *ir, int opt_level,
 				   plllvm_jit_result *result)
 {
+	return compile(PLLLVM_JIT_FUNCTION, owner_oid, collation, path, nargs, ir,
+				   opt_level, result);
+}
+
+/*
+ * Compile the IR of a PL/pgSQL expression (entry point @f, an
+ * ExprStateEvalFunc) into resident code.  It is never released, and the
+ * caller keeps its own cap, so plllvm.max_resident_compiles and the
+ * counters of plllvm_session_info() stay those of PL/LLVM functions.
+ */
+bool
+plllvm_jit_compile_expr(const char *ir, int opt_level,
+						plllvm_jit_result *result)
+{
+	plllvm_path path;
+
+	/* the IR has no call sites or constants, so neither is used */
+	path.search_path = "pg_catalog, pg_temp";
+	path.nspoid = InvalidOid;
+
+	return compile(PLLLVM_JIT_EXPR, InvalidOid, InvalidOid, &path, -1, ir,
+				   opt_level, result);
+}
+
+static bool
+compile(plllvm_jit_kind kind, Oid owner_oid, Oid collation,
+		const plllvm_path *path, int nargs, const char *ir, int opt_level,
+		plllvm_jit_result *result)
+{
 	plllvm_jit_module mod = {0};
 	LLVMOrcResourceTrackerRef rt;
 	plllvm_refs *refs = NULL;
@@ -416,7 +450,8 @@ plllvm_jit_compile(Oid owner_oid, Oid collation, const plllvm_path *path,
 
 	released_free();
 
-	if (n_compiles - n_retired >= plllvm_max_resident_compiles)
+	if (kind == PLLLVM_JIT_FUNCTION &&
+		n_compiles - n_retired >= plllvm_max_resident_compiles)
 	{
 		build_error(result, ERRCODE_CONFIGURATION_LIMIT_EXCEEDED,
 					pstrdup("too many compiled PL/LLVM functions in this session"),
@@ -427,10 +462,15 @@ plllvm_jit_compile(Oid owner_oid, Oid collation, const plllvm_path *path,
 		return false;
 	}
 
+	mod.kind = kind;
 	mod.owner_oid = owner_oid;
 	mod.gen = ++plllvm_jit_gen;
-	snprintf(mod.symbol, NAMEDATALEN, "plllvm_%u_" UINT64_FORMAT,
-			 owner_oid, mod.gen);
+	if (kind == PLLLVM_JIT_EXPR)
+		snprintf(mod.symbol, NAMEDATALEN, "plllvm_expr_" UINT64_FORMAT,
+				 mod.gen);
+	else
+		snprintf(mod.symbol, NAMEDATALEN, "plllvm_%u_" UINT64_FORMAT,
+				 owner_oid, mod.gen);
 	mod.opt_level = opt_level;
 
 	if (!build(ir, true, collation, path, nargs, &mod, &rt, &refs,
@@ -438,7 +478,8 @@ plllvm_jit_compile(Oid owner_oid, Oid collation, const plllvm_path *path,
 	{
 		if (refs != NULL)
 			plllvm_refs_end(refs, false);
-		n_failures++;
+		if (kind == PLLLVM_JIT_FUNCTION)
+			n_failures++;
 		return false;
 	}
 
@@ -451,7 +492,8 @@ plllvm_jit_compile(Oid owner_oid, Oid collation, const plllvm_path *path,
 	code->rt = rt;
 	code->mod.next = modules;
 	modules = &code->mod;
-	n_compiles++;
+	if (kind == PLLLVM_JIT_FUNCTION)
+		n_compiles++;
 
 	result->mod = &code->mod;
 
@@ -877,9 +919,11 @@ build(const char *ir, bool codegen, Oid collation, const plllvm_path *path,
 		goto out;
 	mod->parse_bc_ms = elapsed_ms(&since);
 
-	if (!user_ir_parse(ctx, ir, hmod, nargs, &umod, &irrefs, result))
+	if (!user_ir_parse(ctx, ir, mod->kind, hmod, nargs, &umod, &irrefs,
+					   result))
 		goto out;
-	if (codegen && plllvm_auto_checks)
+	/* an expression has neither loops nor calls of itself */
+	if (codegen && plllvm_auto_checks && mod->kind == PLLLVM_JIT_FUNCTION)
 		checks_insert(ctx, umod, result);
 	mod->parse_ms = elapsed_ms(&since);
 
@@ -988,9 +1032,9 @@ helpers_load(LLVMContextRef ctx, LLVMModuleRef *hmod, LLVMAttributeRef *attrs,
  * check fails.
  */
 static bool
-user_ir_parse(LLVMContextRef ctx, const char *ir, LLVMModuleRef hmod,
-			  int nargs, LLVMModuleRef *umod, List **irrefs,
-			  plllvm_jit_result *result)
+user_ir_parse(LLVMContextRef ctx, const char *ir, plllvm_jit_kind kind,
+			  LLVMModuleRef hmod, int nargs, LLVMModuleRef *umod,
+			  List **irrefs, plllvm_jit_result *result)
 {
 	LLVMMemoryBufferRef buf;
 	char	   *msg;
@@ -1005,7 +1049,7 @@ user_ir_parse(LLVMContextRef ctx, const char *ir, LLVMModuleRef hmod,
 	LLVMDisposeMemoryBuffer(buf);
 
 	return *umod != NULL &&
-		user_ir_check(ctx, *umod, hmod, nargs, irrefs, result);
+		user_ir_check(ctx, *umod, kind, hmod, nargs, irrefs, result);
 }
 
 /*
@@ -1307,10 +1351,12 @@ parse_error_set(char *msg, plllvm_jit_result *result)
  * aliases and ifuncs, which symbols_internalize() cannot hide, are refused.
  */
 static bool
-user_ir_check(LLVMContextRef ctx, LLVMModuleRef umod, LLVMModuleRef hmod,
-			  int nargs, List **irrefs, plllvm_jit_result *result)
+user_ir_check(LLVMContextRef ctx, LLVMModuleRef umod, plllvm_jit_kind kind,
+			  LLVMModuleRef hmod, int nargs, List **irrefs,
+			  plllvm_jit_result *result)
 {
 	LLVMTypeRef ptr = LLVMPointerTypeInContext(ctx, 0);
+	LLVMTypeRef params[3] = {ptr, ptr, ptr};
 	LLVMTypeRef entry_type;
 	LLVMValueRef fn;
 	LLVMValueRef gv;
@@ -1334,13 +1380,15 @@ user_ir_check(LLVMContextRef ctx, LLVMModuleRef umod, LLVMModuleRef hmod,
 		return false;
 	}
 
-	entry_type = LLVMFunctionType(LLVMInt64TypeInContext(ctx), &ptr, 1, false);
+	entry_type = LLVMFunctionType(LLVMInt64TypeInContext(ctx), params,
+								  kind == PLLLVM_JIT_EXPR ? 3 : 1, false);
 	if (LLVMGlobalGetValueType(fn) != entry_type)
 	{
 		build_error(result, ERRCODE_INVALID_FUNCTION_DEFINITION,
 					psprintf("entry function \"f\" has type %s",
 							 llvm_message(LLVMPrintTypeToString(LLVMGlobalGetValueType(fn)))),
-					pstrdup("Expected i64 (ptr)."));
+					psprintf("Expected %s.",
+							 llvm_message(LLVMPrintTypeToString(entry_type))));
 		return false;
 	}
 

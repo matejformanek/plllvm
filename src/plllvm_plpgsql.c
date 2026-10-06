@@ -33,17 +33,25 @@
  *    transaction pays for nothing more.  plllvm.expr_eager fires at the
  *    first evaluation, which is safe for the same reason.
  *
- * 4) Nothing is compiled yet: a fired trampoline is only counted.
+ * 4) A fired trampoline hands the ExprState to plllvm_exprjit.c, with
+ *    param_check() and param_emit() for its Params.  The compiled code
+ *    reads a variable as plpgsql_param_eval_var() does, from the estate
+ *    that is running the expression: an ExprState may serve several
+ *    estates of one function.  The offsets are those of this library's
+ *    own compile of plpgsql.h.
  *
  */
 #include "postgres.h"
 
 #include "access/parallel.h"
+#include "catalog/pg_type.h"
 #include "executor/execExpr.h"
 #include "fmgr.h"
 #include "plpgsql.h"
 
 #include "plllvm.h"
+#include "plllvm_expr.h"
+#include "plllvm_ir.h"
 
 /* plpgsql_param_compile chooses one of six paramfuncs */
 #define MAX_PARAMFUNCS	6
@@ -70,7 +78,13 @@ static void plugin_func_setup(PLpgSQL_execstate *estate,
 							  PLpgSQL_function *func);
 static void param_compile(ParamListInfo params, Param *param,
 						  ExprState *state, Datum *resv, bool *resnull);
-static void fire(ExprState *state);
+static void fire(ExprState *state, ExprContext *econtext);
+static bool param_check(plllvm_expr_env *env, const Param *p,
+						StringInfo facts);
+static void param_emit(plllvm_expr_env *env, plllvm_ir *ir, const Param *p,
+					   plllvm_value *out);
+static const char *field_load(plllvm_ir *ir, const char *type,
+							  const char *base, size_t offset);
 
 /* writable: PL/pgSQL stores its helper pointers in it */
 static PLpgSQL_plugin plugin = {plugin_func_setup};
@@ -83,7 +97,7 @@ static void \
 fire_##i(ExprState *state, ExprEvalStep *op, ExprContext *econtext) \
 { \
 	op->d.cparam.paramfunc = orig_paramfunc[i]; \
-	fire(state); \
+	fire(state, econtext); \
 	orig_paramfunc[i] (state, op, econtext); \
 } \
 static void \
@@ -272,11 +286,14 @@ param_compile(ParamListInfo params, Param *param, ExprState *state,
 /*
  * The trampoline of a simple expression fired
  *
- * SET plllvm.expr_jit = off stops it at once.
+ * SET plllvm.expr_jit = off stops it at once.  The paramLI is that of the
+ * estate running the expression.
  */
 static void
-fire(ExprState *state)
+fire(ExprState *state, ExprContext *econtext)
 {
+	plllvm_expr_env env;
+
 	if (!plllvm_expr_jit || paramfunc_conflict)
 		return;
 
@@ -284,5 +301,134 @@ fire(ExprState *state)
 
 	/* someone else replaced the evalfunc */
 	if (state->evalfunc != (ExprStateEvalFunc) state->evalfunc_private)
+	{
 		plllvm_expr_declined++;
+		return;
+	}
+
+	env.param_check = param_check;
+	env.param_emit = param_emit;
+	env.arg = econtext->ecxt_param_list_info->paramFetchArg;
+	plllvm_exprjit_install(state, &env);
+}
+
+/*
+ * A Param can be compiled if plpgsql_param_eval_var() would read it: a
+ * variable of a type passed by value.  The paramfunc of a varlena variable
+ * may depend on the assignment target (plpgsql_param_eval_var_check); one
+ * passed by value is read the same way also when it is the target, as in
+ * "i := i + 1".
+ */
+static bool
+param_check(plllvm_expr_env *env, const Param *p, StringInfo facts)
+{
+	PLpgSQL_execstate *estate = (PLpgSQL_execstate *) env->arg;
+	int			dno = p->paramid - 1;
+	PLpgSQL_var *var;
+
+	if (p->paramkind != PARAM_EXTERN || dno < 0 || dno >= estate->ndatums)
+		return false;
+
+	var = (PLpgSQL_var *) estate->datums[dno];
+	if (var->dtype != PLPGSQL_DTYPE_VAR ||
+		var->datatype->typoid != p->paramtype ||
+		!var->datatype->typbyval)
+		return false;
+
+	switch (p->paramtype)
+	{
+		case BOOLOID:
+		case INT4OID:
+		case INT8OID:
+		case FLOAT8OID:
+			break;
+		default:
+			return false;
+	}
+
+	appendStringInfo(facts, "%d:%u:%d:%d ", p->paramid, p->paramtype,
+					 (int) var->dtype, (int) var->datatype->typlen);
+	return true;
+}
+
+/*
+ * Load the variable of a Param, as plpgsql_param_eval_var() does:
+ * econtext->ecxt_param_list_info->paramFetchArg is the estate, and the
+ * variable is its datums[paramid - 1]
+ */
+static void
+param_emit(plllvm_expr_env *env, plllvm_ir *ir, const Param *p,
+		   plllvm_value *out)
+{
+	const char *params;
+	const char *estate;
+	const char *datums;
+	const char *var;
+	const char *value;
+	const char *isnull;
+	const char *v;
+	const char *n;
+
+	StaticAssertStmt(sizeof(Datum) == 8, "Datum is not i64");
+	StaticAssertStmt(sizeof(bool) == 1, "bool is not i8");
+
+	params = field_load(ir, "ptr", "%econtext",
+						offsetof(ExprContext, ecxt_param_list_info));
+	estate = field_load(ir, "ptr", params,
+						offsetof(ParamListInfoData, paramFetchArg));
+	datums = field_load(ir, "ptr", estate,
+						offsetof(PLpgSQL_execstate, datums));
+	var = field_load(ir, "ptr", datums,
+					 (p->paramid - 1) * sizeof(PLpgSQL_datum *));
+	value = field_load(ir, "i64", var, offsetof(PLpgSQL_var, value));
+	isnull = field_load(ir, "i8", var, offsetof(PLpgSQL_var, isnull));
+
+	n = plllvm_ir_tmp(ir);
+	plllvm_ir_emit(ir, "%s = icmp ne i8 %s, 0", n, isnull);
+
+	v = value;
+	switch (p->paramtype)
+	{
+		case BOOLOID:
+			/* DatumGetBool */
+			out->repr = PLLLVM_I1;
+			v = plllvm_ir_tmp(ir);
+			plllvm_ir_emit(ir, "%s = icmp ne i64 %s, 0", v, value);
+			break;
+		case INT4OID:
+			out->repr = PLLLVM_I32;
+			v = plllvm_ir_tmp(ir);
+			plllvm_ir_emit(ir, "%s = trunc i64 %s to i32", v, value);
+			break;
+		case INT8OID:
+			out->repr = PLLLVM_I64;
+			break;
+		case FLOAT8OID:
+			out->repr = PLLLVM_F64;
+			v = plllvm_ir_tmp(ir);
+			plllvm_ir_emit(ir, "%s = bitcast i64 %s to double", v, value);
+			break;
+		default:
+			elog(ERROR, "unexpected type of Param: %u", p->paramtype);
+	}
+
+	out->v = v;
+	out->isnull = n;
+	out->type = p->paramtype;
+}
+
+/*
+ * The field at offset of the struct at base
+ */
+static const char *
+field_load(plllvm_ir *ir, const char *type, const char *base, size_t offset)
+{
+	const char *addr = plllvm_ir_tmp(ir);
+	const char *val = plllvm_ir_tmp(ir);
+
+	plllvm_ir_emit(ir, "%s = getelementptr inbounds i8, ptr %s, i64 %zu",
+				   addr, base, offset);
+	plllvm_ir_emit(ir, "%s = load %s, ptr %s", val, type, addr);
+
+	return val;
 }
