@@ -241,6 +241,9 @@ program_build(const Expr *expr, plllvm_expr_env *env, bool *keep)
 	plllvm_jit_result result;
 	ExprStateEvalFunc addr = NULL;
 
+	/* first, so that an ERROR of the setup is told apart (note 4) */
+	plllvm_jit_session_ensure();
+
 	/* the IR text and LLVM's messages; the code lives in plllvm_jit.c */
 	cxt = AllocSetContextCreate(CurrentMemoryContext,
 								"plllvm - expression compile",

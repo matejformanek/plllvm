@@ -132,7 +132,6 @@ static int	n_unfreed = 0;		/* released, not yet freed */
  */
 static char *diag_error = NULL;
 
-static void plllvm_jit_session_ensure(void);
 static bool compile(plllvm_jit_kind kind, Oid owner_oid, Oid collation,
 					const plllvm_path *path, int nargs, const char *ir,
 					int opt_level, plllvm_jit_result *result);
@@ -225,7 +224,7 @@ static char *llvm_error_message(LLVMErrorRef error);
  * A failed attempt leaves nothing behind, so it is retried on the next
  * call, e.g. after plllvm.types_bc_path was fixed.
  */
-static void
+void
 plllvm_jit_session_ensure(void)
 {
 	char		path[MAXPGPATH];

@@ -117,6 +117,7 @@ typedef struct plllvm_jit_session_info
 } plllvm_jit_session_info;
 
 /* plllvm_jit.c */
+extern void plllvm_jit_session_ensure(void);
 extern bool plllvm_jit_session_ready(void);
 extern void plllvm_jit_get_session_info(plllvm_jit_session_info *info);
 extern bool plllvm_jit_compile(Oid owner_oid, Oid collation,
