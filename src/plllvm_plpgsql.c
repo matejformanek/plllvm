@@ -228,7 +228,8 @@ param_compile(ParamListInfo params, Param *param, ExprState *state,
 	 * paramLI was wrapped when the function started, so the GUC may be off by
 	 * now.
 	 */
-	if (!plllvm_expr_jit || paramfunc_conflict || state->parent != NULL || expr == NULL ||
+	if (!plllvm_expr_jit || paramfunc_conflict ||
+		state->parent != NULL || expr == NULL ||
 		state->expr != expr->expr_simple_expr)
 		return;
 
