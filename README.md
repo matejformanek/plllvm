@@ -187,6 +187,9 @@ debuggers and profilers use.
 * A plugin loaded after plllvm that chains keeps both working. One that
   overwrites the slot turns expression JIT off without notice;
   `plllvm_expr_stats()` then shows `not_in_slot`.
+* pldebugger (`plugin_debugger`) overwrites the slot, so list it before
+  plllvm in `shared_preload_libraries` (or `LOAD` it first). plpgsql_check
+  chains and works in either order.
 * `state` is `declined:paramfunc` when PL/pgSQL's parameter functions are
   not what plllvm expects; expression JIT is then off for the session.
 * An expression evaluated once per transaction is never taken. Parallel
