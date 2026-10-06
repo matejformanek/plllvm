@@ -37,6 +37,7 @@
 #include "varatt.h"
 
 #include "plllvm_host.h"
+#include "plllvm_ops.h"
 
 const uint32 plllvm_types_version = PLLLVM_TYPES_VERSION;
 const uint32 plllvm_types_llvm_major = __clang_major__;
@@ -84,6 +85,38 @@ extern float8 plllvm_array_get_f64(ArrayType *a, int32 i);
 extern void plllvm_array_set_i32(ArrayType *a, int32 i, int32 v);
 extern void plllvm_array_set_i64(ArrayType *a, int32 i, int64 v);
 extern void plllvm_array_set_f64(ArrayType *a, int32 i, float8 v);
+extern int32 plllvm_int4_pl(int32 val1, int32 val2);
+extern int32 plllvm_int4_mi(int32 val1, int32 val2);
+extern int32 plllvm_int4_mul(int32 val1, int32 val2);
+extern int32 plllvm_int4_div(int32 val1, int32 val2);
+extern int32 plllvm_int4_mod(int32 val1, int32 val2);
+extern int32 plllvm_int4_um(int32 val);
+extern int64 plllvm_int8_pl(int64 val1, int64 val2);
+extern int64 plllvm_int8_mi(int64 val1, int64 val2);
+extern int64 plllvm_int8_mul(int64 val1, int64 val2);
+extern int64 plllvm_int8_div(int64 val1, int64 val2);
+extern int64 plllvm_int8_mod(int64 val1, int64 val2);
+extern int64 plllvm_int8_um(int64 val);
+extern int64 plllvm_int48_pl(int32 val1, int64 val2);
+extern int64 plllvm_int48_mi(int32 val1, int64 val2);
+extern int64 plllvm_int48_mul(int32 val1, int64 val2);
+extern int64 plllvm_int48_div(int32 val1, int64 val2);
+extern int64 plllvm_int84_pl(int64 val1, int32 val2);
+extern int64 plllvm_int84_mi(int64 val1, int32 val2);
+extern int64 plllvm_int84_mul(int64 val1, int32 val2);
+extern int64 plllvm_int84_div(int64 val1, int32 val2);
+extern int32 plllvm_int4_from_int8(int64 val);
+extern float8 plllvm_float8_pl(float8 val1, float8 val2);
+extern float8 plllvm_float8_mi(float8 val1, float8 val2);
+extern float8 plllvm_float8_mul(float8 val1, float8 val2);
+extern float8 plllvm_float8_div(float8 val1, float8 val2);
+extern float8 plllvm_float8_um(float8 val);
+extern bool plllvm_float8_eq(float8 val1, float8 val2);
+extern bool plllvm_float8_ne(float8 val1, float8 val2);
+extern bool plllvm_float8_lt(float8 val1, float8 val2);
+extern bool plllvm_float8_le(float8 val1, float8 val2);
+extern bool plllvm_float8_gt(float8 val1, float8 val2);
+extern bool plllvm_float8_ge(float8 val1, float8 val2);
 
 /* no bounds checks, as PG_GETARG_* */
 pg_always_inline bool
@@ -298,6 +331,202 @@ pg_always_inline void
 plllvm_array_set_f64(ArrayType *a, int32 i, float8 v)
 {
 	((float8 *) ARR_DATA_PTR(a))[array_index(a, i, FLOAT8OID)] = v;
+}
+
+/*
+ * Operators (plllvm_ops.h).  The int48 and int84 ones widen the int4
+ * argument to use the int8 ones, except int48div.
+ */
+pg_always_inline int32
+plllvm_int4_pl(int32 val1, int32 val2)
+{
+	return int4_pl(val1, val2);
+}
+
+pg_always_inline int32
+plllvm_int4_mi(int32 val1, int32 val2)
+{
+	return int4_mi(val1, val2);
+}
+
+pg_always_inline int32
+plllvm_int4_mul(int32 val1, int32 val2)
+{
+	return int4_mul(val1, val2);
+}
+
+pg_always_inline int32
+plllvm_int4_div(int32 val1, int32 val2)
+{
+	return int4_div(val1, val2);
+}
+
+pg_always_inline int32
+plllvm_int4_mod(int32 val1, int32 val2)
+{
+	return int4_mod(val1, val2);
+}
+
+pg_always_inline int32
+plllvm_int4_um(int32 val)
+{
+	return int4_um(val);
+}
+
+pg_always_inline int64
+plllvm_int8_pl(int64 val1, int64 val2)
+{
+	return int8_pl(val1, val2);
+}
+
+pg_always_inline int64
+plllvm_int8_mi(int64 val1, int64 val2)
+{
+	return int8_mi(val1, val2);
+}
+
+pg_always_inline int64
+plllvm_int8_mul(int64 val1, int64 val2)
+{
+	return int8_mul(val1, val2);
+}
+
+pg_always_inline int64
+plllvm_int8_div(int64 val1, int64 val2)
+{
+	return int8_div(val1, val2);
+}
+
+pg_always_inline int64
+plllvm_int8_mod(int64 val1, int64 val2)
+{
+	return int8_mod(val1, val2);
+}
+
+pg_always_inline int64
+plllvm_int8_um(int64 val)
+{
+	return int8_um(val);
+}
+
+pg_always_inline int64
+plllvm_int48_pl(int32 val1, int64 val2)
+{
+	return int8_pl((int64) val1, val2);
+}
+
+pg_always_inline int64
+plllvm_int48_mi(int32 val1, int64 val2)
+{
+	return int8_mi((int64) val1, val2);
+}
+
+pg_always_inline int64
+plllvm_int48_mul(int32 val1, int64 val2)
+{
+	return int8_mul((int64) val1, val2);
+}
+
+pg_always_inline int64
+plllvm_int48_div(int32 val1, int64 val2)
+{
+	return int48_div(val1, val2);
+}
+
+pg_always_inline int64
+plllvm_int84_pl(int64 val1, int32 val2)
+{
+	return int8_pl(val1, (int64) val2);
+}
+
+pg_always_inline int64
+plllvm_int84_mi(int64 val1, int32 val2)
+{
+	return int8_mi(val1, (int64) val2);
+}
+
+pg_always_inline int64
+plllvm_int84_mul(int64 val1, int32 val2)
+{
+	return int8_mul(val1, (int64) val2);
+}
+
+pg_always_inline int64
+plllvm_int84_div(int64 val1, int32 val2)
+{
+	return int8_div(val1, (int64) val2);
+}
+
+pg_always_inline int32
+plllvm_int4_from_int8(int64 val)
+{
+	return int4_from_int8(val);
+}
+
+pg_always_inline float8
+plllvm_float8_pl(float8 val1, float8 val2)
+{
+	return float8_pl(val1, val2);
+}
+
+pg_always_inline float8
+plllvm_float8_mi(float8 val1, float8 val2)
+{
+	return float8_mi(val1, val2);
+}
+
+pg_always_inline float8
+plllvm_float8_mul(float8 val1, float8 val2)
+{
+	return float8_mul(val1, val2);
+}
+
+pg_always_inline float8
+plllvm_float8_div(float8 val1, float8 val2)
+{
+	return float8_div(val1, val2);
+}
+
+pg_always_inline float8
+plllvm_float8_um(float8 val)
+{
+	return float8_um(val);
+}
+
+pg_always_inline bool
+plllvm_float8_eq(float8 val1, float8 val2)
+{
+	return float8_eq(val1, val2);
+}
+
+pg_always_inline bool
+plllvm_float8_ne(float8 val1, float8 val2)
+{
+	return float8_ne(val1, val2);
+}
+
+pg_always_inline bool
+plllvm_float8_lt(float8 val1, float8 val2)
+{
+	return float8_lt(val1, val2);
+}
+
+pg_always_inline bool
+plllvm_float8_le(float8 val1, float8 val2)
+{
+	return float8_le(val1, val2);
+}
+
+pg_always_inline bool
+plllvm_float8_gt(float8 val1, float8 val2)
+{
+	return float8_gt(val1, val2);
+}
+
+pg_always_inline bool
+plllvm_float8_ge(float8 val1, float8 val2)
+{
+	return float8_ge(val1, val2);
 }
 
 /*

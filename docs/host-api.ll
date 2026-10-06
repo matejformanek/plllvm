@@ -38,6 +38,48 @@ declare void @plllvm_div_zero()
 declare void @plllvm_cfi()
 declare void @plllvm_check_stack()
 
+; --- operators -------------------------------------------------------------
+;
+; The int4, int8 and float8 operators, with the results and errors of the
+; SQL ones: @plllvm_int4_pl is int4pl, @plllvm_int48_div is int48div,
+; @plllvm_int4_from_int8 is int4(int8).  Integer comparisons, int8(int4)
+; and the conversions to float8 are plain IR: icmp, sext, sitofp.
+
+declare i32 @plllvm_int4_pl(i32 %val1, i32 %val2)
+declare i32 @plllvm_int4_mi(i32 %val1, i32 %val2)
+declare i32 @plllvm_int4_mul(i32 %val1, i32 %val2)
+declare i32 @plllvm_int4_div(i32 %val1, i32 %val2)
+declare i32 @plllvm_int4_mod(i32 %val1, i32 %val2)
+declare i32 @plllvm_int4_um(i32 %val)
+declare i64 @plllvm_int8_pl(i64 %val1, i64 %val2)
+declare i64 @plllvm_int8_mi(i64 %val1, i64 %val2)
+declare i64 @plllvm_int8_mul(i64 %val1, i64 %val2)
+declare i64 @plllvm_int8_div(i64 %val1, i64 %val2)
+declare i64 @plllvm_int8_mod(i64 %val1, i64 %val2)
+declare i64 @plllvm_int8_um(i64 %val)
+declare i64 @plllvm_int48_pl(i32 %val1, i64 %val2)
+declare i64 @plllvm_int48_mi(i32 %val1, i64 %val2)
+declare i64 @plllvm_int48_mul(i32 %val1, i64 %val2)
+declare i64 @plllvm_int48_div(i32 %val1, i64 %val2)
+declare i64 @plllvm_int84_pl(i64 %val1, i32 %val2)
+declare i64 @plllvm_int84_mi(i64 %val1, i32 %val2)
+declare i64 @plllvm_int84_mul(i64 %val1, i32 %val2)
+declare i64 @plllvm_int84_div(i64 %val1, i32 %val2)
+declare i32 @plllvm_int4_from_int8(i64 %val)
+; NaN is equal to NaN and greater than any other value, as in the SQL
+; comparisons
+declare double @plllvm_float8_pl(double %val1, double %val2)
+declare double @plllvm_float8_mi(double %val1, double %val2)
+declare double @plllvm_float8_mul(double %val1, double %val2)
+declare double @plllvm_float8_div(double %val1, double %val2)
+declare double @plllvm_float8_um(double %val)
+declare i1 @plllvm_float8_eq(double %val1, double %val2)
+declare i1 @plllvm_float8_ne(double %val1, double %val2)
+declare i1 @plllvm_float8_lt(double %val1, double %val2)
+declare i1 @plllvm_float8_le(double %val1, double %val2)
+declare i1 @plllvm_float8_gt(double %val1, double %val2)
+declare i1 @plllvm_float8_ge(double %val1, double %val2)
+
 ; --- calls of other functions ----------------------------------------------
 ;
 ; A call site is a declared global named by the callee's regprocedure text,
@@ -141,7 +183,8 @@ declare void @plllvm_array_set_f64(ptr %a, i32 %i, double %v)
 @q.sql = private constant [20 x i8] c"SELECT $1::int8 + 1\00"
 @q.types = private constant [5 x i8] c"int8\00"
 
-; every helper once; argument 0 picks the path
+; every helper but the operators once (sql/plllvm_ops.sql calls those);
+; argument 0 picks the path
 define i64 @f(ptr %fcinfo) {
 entry:
   call void @plllvm_cfi()
