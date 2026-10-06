@@ -1,0 +1,241 @@
+--
+-- expr_kernels: four bench kernels with T0 expressions in their loops, at
+-- small sizes
+--
+-- No plllvm statement here: the expected output is stock PL/pgSQL's, and
+-- make installcheck-expr compares every variant against it.  The function
+-- bodies are bench/kernels/50_diag.sql (loop), 60_ispras2020.sql
+-- (is_prime), 12_mandelbrot.sql and 10_nbody.sql, rendered with
+-- @SFX@ = imm and @VOL@ = IMMUTABLE.  EXP-001's sizes (loop 20000000,
+-- is_prime 20000003, mandelbrot 440, nbody 85000) take about 13 s on a
+-- debug build, so the sizes here are small; the oracle is stock PL/pgSQL,
+-- as in EXP-001.
+--
+CREATE FUNCTION loop_imm(n integer) RETURNS integer
+LANGUAGE plpgsql IMMUTABLE AS $$
+DECLARE
+  i integer := 0;
+BEGIN
+  WHILE i < n LOOP
+    i := i + 1;
+  END LOOP;
+  RETURN i;
+END
+$$;
+CREATE FUNCTION is_prime_imm(n integer) RETURNS boolean
+LANGUAGE plpgsql IMMUTABLE AS $$
+DECLARE
+  idx integer := 2;
+BEGIN
+  LOOP
+    IF idx > n/2 THEN
+      RETURN TRUE;
+    END IF;
+    IF mod(n, idx) = 0 THEN
+      RETURN FALSE;
+    END IF;
+    idx := idx + 1;
+  END LOOP;
+END
+$$;
+CREATE FUNCTION mandelbrot_imm(sz integer) RETURNS text
+LANGUAGE plpgsql IMMUTABLE AS $$
+DECLARE
+  two CONSTANT float8 := 2.0;
+  four CONSTANT float8 := 4.0;
+  one CONSTANT float8 := 1.0;
+  onehalf CONSTANT float8 := 1.5;
+  fsz float8;
+  x integer; y integer; k integer;
+  cr float8; ci float8; zr float8; zi float8; tr float8; ti float8;
+  cnt integer := 0;
+  h bigint := 0;
+BEGIN
+  fsz := sz;
+  FOR y IN 0..sz-1 LOOP
+    ci := two * y / fsz - one;
+    FOR x IN 0..sz-1 LOOP
+      cr := two * x / fsz - onehalf;
+      zr := 0; zi := 0; tr := 0; ti := 0; k := 0;
+      WHILE k < 50 AND tr + ti <= four LOOP
+        zi := two * zr * zi + ci;
+        zr := tr - ti + cr;
+        tr := zr * zr;
+        ti := zi * zi;
+        k := k + 1;
+      END LOOP;
+      IF tr + ti <= four THEN
+        cnt := cnt + 1;
+        h := (h * 31 + x * 7 + y) % 1000000007;
+      END IF;
+    END LOOP;
+  END LOOP;
+  RETURN cnt::text || '/' || h::text;
+END
+$$;
+CREATE FUNCTION nbody_imm(n integer) RETURNS text
+LANGUAGE plpgsql IMMUTABLE AS $$
+DECLARE
+  pi CONSTANT float8 := 3.141592653589793;
+  solar_mass float8;
+  days_per_year CONSTANT float8 := 365.24;
+  dt CONSTANT float8 := 0.01;
+  half CONSTANT float8 := 0.5;
+  zero CONSTANT float8 := 0.0;
+  nb CONSTANT integer := 5;
+  x float8[]; y float8[]; z float8[];
+  vx float8[]; vy float8[]; vz float8[];
+  m float8[];
+  i integer; j integer; s integer;
+  dx float8; dy float8; dz float8; d2 float8; mag float8; mi float8; mj float8;
+  px float8 := 0; py float8 := 0; pz float8 := 0;
+  e float8;
+  e0 float8;
+BEGIN
+  solar_mass := 4 * pi * pi;
+  --          sun   jupiter                 saturn                  uranus                  neptune
+  x  := ARRAY[zero, 4.84143144246472090e+00, 8.34336671824457987e+00, 1.28943695621391310e+01, 1.53796971148509165e+01]::float8[];
+  y  := ARRAY[zero, -1.16032004402742839e+00, 4.12479856412430479e+00, -1.51111514016986312e+01, -2.59193146099879641e+01]::float8[];
+  z  := ARRAY[zero, -1.03622044471123109e-01, -4.03523417114321381e-01, -2.23307578892655734e-01, 1.79258772950371181e-01]::float8[];
+  vx := ARRAY[zero, 1.66007664274403694e-03 * days_per_year, -2.76742510726862411e-03 * days_per_year,
+              2.96460137564761618e-03 * days_per_year, 2.68067772490389322e-03 * days_per_year]::float8[];
+  vy := ARRAY[zero, 7.69901118419740425e-03 * days_per_year, 4.99852801234917238e-03 * days_per_year,
+              2.37847173959480950e-03 * days_per_year, 1.62824170038242295e-03 * days_per_year]::float8[];
+  vz := ARRAY[zero, -6.90460016972063023e-05 * days_per_year, 2.30417297573763929e-05 * days_per_year,
+              -2.96589568540237556e-05 * days_per_year, -9.51592254519715870e-05 * days_per_year]::float8[];
+  m  := ARRAY[solar_mass, 9.54791938424326609e-04 * solar_mass, 2.85885980666130812e-04 * solar_mass,
+              4.36624404335156298e-05 * solar_mass, 5.15138902046611451e-05 * solar_mass]::float8[];
+
+  -- offset momentum
+  FOR i IN 1..nb LOOP
+    px := px + vx[i] * m[i];
+    py := py + vy[i] * m[i];
+    pz := pz + vz[i] * m[i];
+  END LOOP;
+  vx[1] := - px / solar_mass;
+  vy[1] := - py / solar_mass;
+  vz[1] := - pz / solar_mass;
+
+  -- energy (before)
+  e := zero;
+  FOR i IN 1..nb LOOP
+    e := e + half * m[i] * (vx[i]*vx[i] + vy[i]*vy[i] + vz[i]*vz[i]);
+    FOR j IN i+1..nb LOOP
+      dx := x[i] - x[j]; dy := y[i] - y[j]; dz := z[i] - z[j];
+      e := e - (m[i] * m[j]) / sqrt(dx*dx + dy*dy + dz*dz);
+    END LOOP;
+  END LOOP;
+  e0 := e;
+
+  -- advance n steps
+  FOR s IN 1..n LOOP
+    FOR i IN 1..nb LOOP
+      FOR j IN i+1..nb LOOP
+        dx := x[i] - x[j];
+        dy := y[i] - y[j];
+        dz := z[i] - z[j];
+        d2 := dx*dx + dy*dy + dz*dz;
+        mag := dt / (d2 * sqrt(d2));
+        mi := m[i] * mag;
+        mj := m[j] * mag;
+        vx[i] := vx[i] - dx * mj;
+        vy[i] := vy[i] - dy * mj;
+        vz[i] := vz[i] - dz * mj;
+        vx[j] := vx[j] + dx * mi;
+        vy[j] := vy[j] + dy * mi;
+        vz[j] := vz[j] + dz * mi;
+      END LOOP;
+    END LOOP;
+    FOR i IN 1..nb LOOP
+      x[i] := x[i] + dt * vx[i];
+      y[i] := y[i] + dt * vy[i];
+      z[i] := z[i] + dt * vz[i];
+    END LOOP;
+  END LOOP;
+
+  -- energy (after)
+  e := zero;
+  FOR i IN 1..nb LOOP
+    e := e + half * m[i] * (vx[i]*vx[i] + vy[i]*vy[i] + vz[i]*vz[i]);
+    FOR j IN i+1..nb LOOP
+      dx := x[i] - x[j]; dy := y[i] - y[j]; dz := z[i] - z[j];
+      e := e - (m[i] * m[j]) / sqrt(dx*dx + dy*dy + dz*dz);
+    END LOOP;
+  END LOOP;
+
+  RETURN round(e0::numeric, 9)::text || ' ' || round(e::numeric, 9)::text;
+END
+$$;
+-- OFFSET 0 keeps the planner from folding the IMMUTABLE calls
+SELECT s.n, loop_imm(s.n)
+  FROM (SELECT n FROM (VALUES (NULL), (-5), (0), (1), (1000), (200000)) v(n)
+        OFFSET 0) s
+ ORDER BY s.n;
+   n    | loop_imm 
+--------+----------
+     -5 |        0
+      0 |        0
+      1 |        1
+   1000 |     1000
+ 200000 |   200000
+        |        0
+(6 rows)
+
+SELECT s.n, is_prime_imm(s.n)
+  FROM (SELECT n FROM (VALUES (-7), (0), (1), (2), (3), (4), (9), (97),
+                              (7917), (7919), (1000003)) v(n)
+        OFFSET 0) s
+ ORDER BY s.n;
+    n    | is_prime_imm 
+---------+--------------
+      -7 | t
+       0 | t
+       1 | t
+       2 | t
+       3 | t
+       4 | f
+       9 | f
+      97 | t
+    7917 | f
+    7919 | t
+ 1000003 | t
+(11 rows)
+
+SELECT count(*) FILTER (WHERE is_prime_imm(g)) AS primes
+  FROM generate_series(-10, 3000) g;
+ primes 
+--------
+    442
+(1 row)
+
+SELECT s.n, mandelbrot_imm(s.n)
+  FROM (SELECT n FROM (VALUES (-3), (0), (1), (2), (7), (50), (101), (200)) v(n)
+        OFFSET 0) s
+ ORDER BY s.n;
+  n  | mandelbrot_imm  
+-----+-----------------
+  -3 | 0/0
+   0 | 0/0
+   1 | 0/0
+   2 | 2/39
+   7 | 22/867639678
+  50 | 992/209543548
+ 101 | 4048/228268350
+ 200 | 15899/249215482
+(8 rows)
+
+SELECT s.n, nbody_imm(s.n)
+  FROM (SELECT n FROM (VALUES (0), (1), (10), (1000), (20000)) v(n)
+        OFFSET 0) s
+ ORDER BY s.n;
+   n   |         nbody_imm         
+-------+---------------------------
+     0 | -0.169075164 -0.169075164
+     1 | -0.169075164 -0.169074954
+    10 | -0.169075164 -0.169073022
+  1000 | -0.169075164 -0.169087605
+ 20000 | -0.169075164 -0.169089263
+(5 rows)
+
+DROP FUNCTION loop_imm(integer), is_prime_imm(integer),
+  mandelbrot_imm(integer), nbody_imm(integer);
