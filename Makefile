@@ -233,8 +233,11 @@ installcheck-opt:
 
 #
 # The expression tests against the same expected output, interpreted and
-# compiled: at O0 and O2, under cache flushes, and taken at the first
-# evaluation.  expr_stats checks that compiled code ran where it should.
+# compiled: at O0 and O2, and taken at the first evaluation.  expr_stats
+# checks that compiled code ran where it should.  Under cache flushes every
+# evaluation plans again (tens of ms each) and gets a new ExprState, which
+# never reaches its second evaluation; so that variant runs only
+# expr_stats, taken at the first evaluation.
 #
 EXPR_JIT = -c session_preload_libraries=plllvm -c plllvm.expr_jit=on
 
@@ -245,9 +248,9 @@ installcheck-expr:
 	$(MAKE) installcheck REGRESS='plllvm_setup $(REGRESS_EXPR) expr_stats' \
 		PGOPTIONS='$(EXPR_JIT) -c plllvm.expr_opt_level=2'
 	$(MAKE) installcheck REGRESS='plllvm_setup $(REGRESS_EXPR) expr_stats' \
-		PGOPTIONS='$(EXPR_JIT) -c plllvm.expr_opt_level=2 -c debug_discard_caches=1'
-	$(MAKE) installcheck REGRESS='plllvm_setup $(REGRESS_EXPR) expr_stats' \
 		PGOPTIONS='$(EXPR_JIT) -c plllvm.expr_opt_level=2 -c plllvm.expr_eager=on'
+	$(MAKE) installcheck REGRESS='plllvm_setup expr_stats' \
+		PGOPTIONS='$(EXPR_JIT) -c plllvm.expr_opt_level=2 -c plllvm.expr_eager=on -c debug_discard_caches=1'
 
 # tests that crash the server when their fix regresses, so never part of
 # installcheck: only on a throwaway cluster, with PLLLVM_PORT given
