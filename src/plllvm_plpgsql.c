@@ -286,8 +286,9 @@ param_compile(ParamListInfo params, Param *param, ExprState *state,
 /*
  * The trampoline of a simple expression fired
  *
- * SET plllvm.expr_jit = off stops it at once.  The paramLI is that of the
- * estate running the expression.
+ * SET plllvm.expr_jit = off stops new installs at once; code installed in
+ * this transaction runs until its ExprState goes at transaction end.  The
+ * paramLI is that of the estate running the expression.
  */
 static void
 fire(ExprState *state, ExprContext *econtext)

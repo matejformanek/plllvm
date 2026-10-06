@@ -73,6 +73,7 @@ static const struct config_enum_entry debug_inject_options[] = {
 	{NULL, 0, false}
 };
 
+static void types_bc_path_assign(const char *newval, void *extra);
 static void call_end(plllvm_function *func, plllvm_frame *frame);
 static void exec_error_callback(void *arg);
 static void plllvm_xact_callback(XactEvent event, void *arg);
@@ -106,7 +107,7 @@ _PG_init(void)
 							   &plllvm_types_bc_path,
 							   "",
 							   PGC_SUSET, GUC_NOT_IN_SAMPLE,
-							   NULL, NULL, NULL);
+							   NULL, types_bc_path_assign, NULL);
 
 	DefineCustomIntVariable("plllvm.opt_level",
 							gettext_noop("Sets the LLVM optimization level of compiled functions."),
@@ -199,6 +200,15 @@ _PG_init(void)
 	plllvm_sites_init();
 
 	inited = true;
+}
+
+/*
+ * A fixed path lets expression JIT try to build again (plllvm_exprjit.c)
+ */
+static void
+types_bc_path_assign(const char *newval, void *extra)
+{
+	plllvm_expr_build_broken = false;
 }
 
 /*

@@ -11,11 +11,13 @@
  * Notes:
  *
  * 1) A program is found by a hash of a cheap key (the opt level, the
- *    eager flag, the node tags, functions and types of the tree), but it is
- *    taken only when its stored copy of the tree is equal() to the
- *    ExprState's and the Param facts match.  Two trees with the same key,
- *    e.g. "x + 1" and "x + 2", get two programs.  equal() runs once per
- *    ExprState and transaction, on at most PLLLVM_EXPR_MAX_NODES nodes.
+ *    eager flag, and the tree in prefix order with its functions, Params
+ *    and Const values), but it is taken only when its stored copy of the
+ *    tree is equal() to the ExprState's and the Param facts match.  The key
+ *    leaves out what equal() compares and the emitter does not read, such
+ *    as the operator's OID, so two operators over one function share a key
+ *    and get two programs.  equal() runs once per ExprState and
+ *    transaction, on at most PLLLVM_EXPR_MAX_NODES nodes.
  *
  * 2) Programs are never freed.  The only pointer to one is the evalfunc of
  *    a simple-expression ExprState, which PL/pgSQL builds anew in every
@@ -23,7 +25,13 @@
  *    to be unused.  plllvm.expr_max_programs bounds the memory: at the cap
  *    a new expression stays interpreted.  A build that failed is kept as
  *    a program without code, so that it is not tried again; it counts
- *    toward the cap.
+ *    toward the cap.  A build refused by plllvm.max_ir_instructions is not
+ *    kept, as that limit is not in the key.
+ *
+ * 4) A build that raises an ERROR, as the LLVM session setup does without
+ *    a usable plllvm_types.bc, would raise it again in every later
+ *    ExprState and make PL/pgSQL unusable.  After one, the session builds
+ *    nothing more until plllvm.types_bc_path is set.
  *
  * 3) Under plllvm.expr_eager the program also counts its evaluations
  *    (compiled_evals of plllvm_expr_stats()), so that the tests can see
@@ -68,10 +76,14 @@ int64		plllvm_expr_capped = 0;
 int64		plllvm_expr_programs = 0;
 int64		plllvm_expr_compiled_evals = 0;
 
+/* true, when a build raised an ERROR (note 4) */
+bool		plllvm_expr_build_broken = false;
+
 static MemoryContext expr_cxt = NULL;
 static HTAB *programs = NULL;
 
-static ExprStateEvalFunc program_build(const Expr *expr, plllvm_expr_env *env);
+static ExprStateEvalFunc program_build(const Expr *expr, plllvm_expr_env *env,
+									   bool *keep);
 static const char *datum_box(plllvm_ir *ir, const plllvm_value *val);
 
 /*
@@ -79,7 +91,7 @@ static const char *datum_box(plllvm_ir *ir, const plllvm_value *val);
  *
  * Called at its second evaluation (or the first, under plllvm.expr_eager),
  * with evalfunc still the interpreter's.  Anything that cannot be compiled
- * stays interpreted; only the LLVM session setup may raise an ERROR.
+ * stays interpreted.  Only a build may raise an ERROR, once (note 4).
  */
 void
 plllvm_exprjit_install(ExprState *state, plllvm_expr_env *env)
@@ -92,6 +104,7 @@ plllvm_exprjit_install(ExprState *state, plllvm_expr_env *env)
 	bool		found;
 	ExprProgram *prog;
 	ExprStateEvalFunc addr;
+	bool		keep = true;
 	MemoryContext oldcxt;
 
 	/* the check and the emitter recurse over the tree */
@@ -159,7 +172,29 @@ plllvm_exprjit_install(ExprState *state, plllvm_expr_env *env)
 		return;
 	}
 
-	addr = program_build(state->expr, env);
+	if (plllvm_expr_build_broken)
+	{
+		plllvm_expr_declined++;
+		return;
+	}
+
+	PG_TRY();
+	{
+		addr = program_build(state->expr, env, &keep);
+	}
+	PG_CATCH();
+	{
+		plllvm_expr_build_broken = true;
+		plllvm_expr_failures++;
+		PG_RE_THROW();
+	}
+	PG_END_TRY();
+
+	if (addr == NULL && !keep)
+	{
+		plllvm_expr_failures++;
+		return;
+	}
 
 	/* not before: a build that raised an ERROR leaves no program */
 	oldcxt = MemoryContextSwitchTo(expr_cxt);
@@ -187,12 +222,13 @@ plllvm_exprjit_install(ExprState *state, plllvm_expr_env *env)
 }
 
 /*
- * Compile the tree as an ExprStateEvalFunc; NULL if the build failed
+ * Compile the tree as an ExprStateEvalFunc; NULL if the build failed,
+ * with *keep false if the failure should not be remembered
  *
  * The Params are read through %econtext (env->param_emit).
  */
 static ExprStateEvalFunc
-program_build(const Expr *expr, plllvm_expr_env *env)
+program_build(const Expr *expr, plllvm_expr_env *env, bool *keep)
 {
 	MemoryContext cxt;
 	MemoryContext oldcxt;
@@ -239,10 +275,14 @@ program_build(const Expr *expr, plllvm_expr_env *env)
 								&result))
 		addr = (ExprStateEvalFunc) result.mod->addr;
 	else
+	{
+		/* plllvm.max_ir_instructions */
+		*keep = result.sqlerrcode != ERRCODE_PROGRAM_LIMIT_EXCEEDED;
 		ereport(DEBUG1,
 				(errmsg_internal("plllvm: expression not compiled: %s",
 								 result.errmsg),
 				 errhidestmt(true)));
+	}
 
 	MemoryContextSwitchTo(oldcxt);
 	MemoryContextDelete(cxt);

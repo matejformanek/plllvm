@@ -190,7 +190,8 @@ debuggers and profilers use.
   compiled run compiled until the transaction ends.
 * With `plllvm.expr_jit` on, a broken installation (no usable
   `plllvm_types.bc`) fails the first statement that would compile, as for
-  PL/LLVM functions.
+  PL/LLVM functions. After that ERROR the session compiles no more
+  expressions until `plllvm.types_bc_path` is set.
 * Loaded, every PL/pgSQL call goes through plllvm's `func_setup`, also with
   `plllvm.expr_jit` off.
 
@@ -204,7 +205,7 @@ debuggers and profilers use.
 | `plllvm.max_ir_instructions` | int, 0 = no limit | 100000 | superuser | largest body accepted (SQLSTATE 54000) |
 | `plllvm.dump_ir` | bool | off | superuser | log the optimized IR of every compile |
 | `plllvm.types_bc_path` | string | empty | superuser | the `plllvm_types.bc` to use; empty means `plllvm/plllvm_types.bc` next to the library; read once per session |
-| `plllvm.expr_jit` | bool | off | superuser | expression JIT in PL/pgSQL functions (above) |
+| `plllvm.expr_jit` | bool | off | superuser | expression JIT in PL/pgSQL functions (above); turning it off stops new expressions, code already installed runs until the transaction ends |
 | `plllvm.expr_opt_level` | int 0–3 | 2 | superuser | LLVM optimization level of compiled expressions |
 | `plllvm.expr_max_programs` | int 1–1000000 | 1000 | superuser | compiled expressions (and failed builds) kept in a session; beyond it, new expressions are interpreted |
 | `plllvm.expr_eager` | bool | off | superuser | tests only: take an expression at its first evaluation instead of the second |

@@ -22,9 +22,10 @@
  * 3) A Datum of an int4 is sign extended (Int32GetDatum), a bool Datum is
  *    true when it is nonzero (DatumGetBool).
  *
- * 4) Every field the emitter reads is either compared by equal() or added
- *    to facts by param_check, so a program may be reused for any tree that
- *    is equal() to its own and has the same facts.
+ * 4) Every field the emitter reads is covered by the key, by equal() or by
+ *    the facts param_check adds (opfuncid is in the key, as equal() ignores
+ *    it when it is 0), so a program may be reused for any tree with its key
+ *    that is equal() to its own and has the same facts.
  *
  */
 #ifndef PLLLVM_EXPR_H
@@ -47,7 +48,7 @@ typedef struct plllvm_value
 {
 	const char *v;				/* SSA name or constant, IR type of repr */
 	const char *isnull;			/* i1 SSA name, or "false" / "true" */
-	plllvm_repr repr;
+	plllvm_repr repr;			/* IR type of v */
 	Oid			type;			/* SQL type */
 } plllvm_value;
 

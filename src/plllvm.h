@@ -116,6 +116,7 @@ extern int64 plllvm_expr_failures;
 extern int64 plllvm_expr_capped;
 extern int64 plllvm_expr_programs;
 extern int64 plllvm_expr_compiled_evals;
+extern bool plllvm_expr_build_broken;
 extern void plllvm_exprjit_install(struct ExprState *state,
 								   struct plllvm_expr_env *env);
 
