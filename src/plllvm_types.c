@@ -85,38 +85,38 @@ extern float8 plllvm_array_get_f64(ArrayType *a, int32 i);
 extern void plllvm_array_set_i32(ArrayType *a, int32 i, int32 v);
 extern void plllvm_array_set_i64(ArrayType *a, int32 i, int64 v);
 extern void plllvm_array_set_f64(ArrayType *a, int32 i, float8 v);
-extern int32 plllvm_int4_pl(int32 a, int32 b);
-extern int32 plllvm_int4_mi(int32 a, int32 b);
-extern int32 plllvm_int4_mul(int32 a, int32 b);
-extern int32 plllvm_int4_div(int32 a, int32 b);
-extern int32 plllvm_int4_mod(int32 a, int32 b);
-extern int32 plllvm_int4_um(int32 a);
-extern int64 plllvm_int8_pl(int64 a, int64 b);
-extern int64 plllvm_int8_mi(int64 a, int64 b);
-extern int64 plllvm_int8_mul(int64 a, int64 b);
-extern int64 plllvm_int8_div(int64 a, int64 b);
-extern int64 plllvm_int8_mod(int64 a, int64 b);
-extern int64 plllvm_int8_um(int64 a);
-extern int64 plllvm_int48_pl(int32 a, int64 b);
-extern int64 plllvm_int48_mi(int32 a, int64 b);
-extern int64 plllvm_int48_mul(int32 a, int64 b);
-extern int64 plllvm_int48_div(int32 a, int64 b);
-extern int64 plllvm_int84_pl(int64 a, int32 b);
-extern int64 plllvm_int84_mi(int64 a, int32 b);
-extern int64 plllvm_int84_mul(int64 a, int32 b);
-extern int64 plllvm_int84_div(int64 a, int32 b);
-extern int32 plllvm_int4_from_int8(int64 a);
-extern float8 plllvm_float8_pl(float8 a, float8 b);
-extern float8 plllvm_float8_mi(float8 a, float8 b);
-extern float8 plllvm_float8_mul(float8 a, float8 b);
-extern float8 plllvm_float8_div(float8 a, float8 b);
-extern float8 plllvm_float8_um(float8 a);
-extern bool plllvm_float8_eq(float8 a, float8 b);
-extern bool plllvm_float8_ne(float8 a, float8 b);
-extern bool plllvm_float8_lt(float8 a, float8 b);
-extern bool plllvm_float8_le(float8 a, float8 b);
-extern bool plllvm_float8_gt(float8 a, float8 b);
-extern bool plllvm_float8_ge(float8 a, float8 b);
+extern int32 plllvm_int4_pl(int32 val1, int32 val2);
+extern int32 plllvm_int4_mi(int32 val1, int32 val2);
+extern int32 plllvm_int4_mul(int32 val1, int32 val2);
+extern int32 plllvm_int4_div(int32 val1, int32 val2);
+extern int32 plllvm_int4_mod(int32 val1, int32 val2);
+extern int32 plllvm_int4_um(int32 val);
+extern int64 plllvm_int8_pl(int64 val1, int64 val2);
+extern int64 plllvm_int8_mi(int64 val1, int64 val2);
+extern int64 plllvm_int8_mul(int64 val1, int64 val2);
+extern int64 plllvm_int8_div(int64 val1, int64 val2);
+extern int64 plllvm_int8_mod(int64 val1, int64 val2);
+extern int64 plllvm_int8_um(int64 val);
+extern int64 plllvm_int48_pl(int32 val1, int64 val2);
+extern int64 plllvm_int48_mi(int32 val1, int64 val2);
+extern int64 plllvm_int48_mul(int32 val1, int64 val2);
+extern int64 plllvm_int48_div(int32 val1, int64 val2);
+extern int64 plllvm_int84_pl(int64 val1, int32 val2);
+extern int64 plllvm_int84_mi(int64 val1, int32 val2);
+extern int64 plllvm_int84_mul(int64 val1, int32 val2);
+extern int64 plllvm_int84_div(int64 val1, int32 val2);
+extern int32 plllvm_int4_from_int8(int64 val);
+extern float8 plllvm_float8_pl(float8 val1, float8 val2);
+extern float8 plllvm_float8_mi(float8 val1, float8 val2);
+extern float8 plllvm_float8_mul(float8 val1, float8 val2);
+extern float8 plllvm_float8_div(float8 val1, float8 val2);
+extern float8 plllvm_float8_um(float8 val);
+extern bool plllvm_float8_eq(float8 val1, float8 val2);
+extern bool plllvm_float8_ne(float8 val1, float8 val2);
+extern bool plllvm_float8_lt(float8 val1, float8 val2);
+extern bool plllvm_float8_le(float8 val1, float8 val2);
+extern bool plllvm_float8_gt(float8 val1, float8 val2);
+extern bool plllvm_float8_ge(float8 val1, float8 val2);
 
 /* no bounds checks, as PG_GETARG_* */
 pg_always_inline bool
@@ -338,195 +338,195 @@ plllvm_array_set_f64(ArrayType *a, int32 i, float8 v)
  * argument to use the int8 ones, except int48div.
  */
 pg_always_inline int32
-plllvm_int4_pl(int32 a, int32 b)
+plllvm_int4_pl(int32 val1, int32 val2)
 {
-	return int4_pl(a, b);
+	return int4_pl(val1, val2);
 }
 
 pg_always_inline int32
-plllvm_int4_mi(int32 a, int32 b)
+plllvm_int4_mi(int32 val1, int32 val2)
 {
-	return int4_mi(a, b);
+	return int4_mi(val1, val2);
 }
 
 pg_always_inline int32
-plllvm_int4_mul(int32 a, int32 b)
+plllvm_int4_mul(int32 val1, int32 val2)
 {
-	return int4_mul(a, b);
+	return int4_mul(val1, val2);
 }
 
 pg_always_inline int32
-plllvm_int4_div(int32 a, int32 b)
+plllvm_int4_div(int32 val1, int32 val2)
 {
-	return int4_div(a, b);
+	return int4_div(val1, val2);
 }
 
 pg_always_inline int32
-plllvm_int4_mod(int32 a, int32 b)
+plllvm_int4_mod(int32 val1, int32 val2)
 {
-	return int4_mod(a, b);
+	return int4_mod(val1, val2);
 }
 
 pg_always_inline int32
-plllvm_int4_um(int32 a)
+plllvm_int4_um(int32 val)
 {
-	return int4_um(a);
+	return int4_um(val);
 }
 
 pg_always_inline int64
-plllvm_int8_pl(int64 a, int64 b)
+plllvm_int8_pl(int64 val1, int64 val2)
 {
-	return int8_pl(a, b);
+	return int8_pl(val1, val2);
 }
 
 pg_always_inline int64
-plllvm_int8_mi(int64 a, int64 b)
+plllvm_int8_mi(int64 val1, int64 val2)
 {
-	return int8_mi(a, b);
+	return int8_mi(val1, val2);
 }
 
 pg_always_inline int64
-plllvm_int8_mul(int64 a, int64 b)
+plllvm_int8_mul(int64 val1, int64 val2)
 {
-	return int8_mul(a, b);
+	return int8_mul(val1, val2);
 }
 
 pg_always_inline int64
-plllvm_int8_div(int64 a, int64 b)
+plllvm_int8_div(int64 val1, int64 val2)
 {
-	return int8_div(a, b);
+	return int8_div(val1, val2);
 }
 
 pg_always_inline int64
-plllvm_int8_mod(int64 a, int64 b)
+plllvm_int8_mod(int64 val1, int64 val2)
 {
-	return int8_mod(a, b);
+	return int8_mod(val1, val2);
 }
 
 pg_always_inline int64
-plllvm_int8_um(int64 a)
+plllvm_int8_um(int64 val)
 {
-	return int8_um(a);
+	return int8_um(val);
 }
 
 pg_always_inline int64
-plllvm_int48_pl(int32 a, int64 b)
+plllvm_int48_pl(int32 val1, int64 val2)
 {
-	return int8_pl((int64) a, b);
+	return int8_pl((int64) val1, val2);
 }
 
 pg_always_inline int64
-plllvm_int48_mi(int32 a, int64 b)
+plllvm_int48_mi(int32 val1, int64 val2)
 {
-	return int8_mi((int64) a, b);
+	return int8_mi((int64) val1, val2);
 }
 
 pg_always_inline int64
-plllvm_int48_mul(int32 a, int64 b)
+plllvm_int48_mul(int32 val1, int64 val2)
 {
-	return int8_mul((int64) a, b);
+	return int8_mul((int64) val1, val2);
 }
 
 pg_always_inline int64
-plllvm_int48_div(int32 a, int64 b)
+plllvm_int48_div(int32 val1, int64 val2)
 {
-	return int48_div(a, b);
+	return int48_div(val1, val2);
 }
 
 pg_always_inline int64
-plllvm_int84_pl(int64 a, int32 b)
+plllvm_int84_pl(int64 val1, int32 val2)
 {
-	return int8_pl(a, (int64) b);
+	return int8_pl(val1, (int64) val2);
 }
 
 pg_always_inline int64
-plllvm_int84_mi(int64 a, int32 b)
+plllvm_int84_mi(int64 val1, int32 val2)
 {
-	return int8_mi(a, (int64) b);
+	return int8_mi(val1, (int64) val2);
 }
 
 pg_always_inline int64
-plllvm_int84_mul(int64 a, int32 b)
+plllvm_int84_mul(int64 val1, int32 val2)
 {
-	return int8_mul(a, (int64) b);
+	return int8_mul(val1, (int64) val2);
 }
 
 pg_always_inline int64
-plllvm_int84_div(int64 a, int32 b)
+plllvm_int84_div(int64 val1, int32 val2)
 {
-	return int8_div(a, (int64) b);
+	return int8_div(val1, (int64) val2);
 }
 
 pg_always_inline int32
-plllvm_int4_from_int8(int64 a)
+plllvm_int4_from_int8(int64 val)
 {
-	return int4_from_int8(a);
+	return int4_from_int8(val);
 }
 
 pg_always_inline float8
-plllvm_float8_pl(float8 a, float8 b)
+plllvm_float8_pl(float8 val1, float8 val2)
 {
-	return float8_pl(a, b);
+	return float8_pl(val1, val2);
 }
 
 pg_always_inline float8
-plllvm_float8_mi(float8 a, float8 b)
+plllvm_float8_mi(float8 val1, float8 val2)
 {
-	return float8_mi(a, b);
+	return float8_mi(val1, val2);
 }
 
 pg_always_inline float8
-plllvm_float8_mul(float8 a, float8 b)
+plllvm_float8_mul(float8 val1, float8 val2)
 {
-	return float8_mul(a, b);
+	return float8_mul(val1, val2);
 }
 
 pg_always_inline float8
-plllvm_float8_div(float8 a, float8 b)
+plllvm_float8_div(float8 val1, float8 val2)
 {
-	return float8_div(a, b);
+	return float8_div(val1, val2);
 }
 
 pg_always_inline float8
-plllvm_float8_um(float8 a)
+plllvm_float8_um(float8 val)
 {
-	return -a;
+	return float8_um(val);
 }
 
 pg_always_inline bool
-plllvm_float8_eq(float8 a, float8 b)
+plllvm_float8_eq(float8 val1, float8 val2)
 {
-	return float8_eq(a, b);
+	return float8_eq(val1, val2);
 }
 
 pg_always_inline bool
-plllvm_float8_ne(float8 a, float8 b)
+plllvm_float8_ne(float8 val1, float8 val2)
 {
-	return float8_ne(a, b);
+	return float8_ne(val1, val2);
 }
 
 pg_always_inline bool
-plllvm_float8_lt(float8 a, float8 b)
+plllvm_float8_lt(float8 val1, float8 val2)
 {
-	return float8_lt(a, b);
+	return float8_lt(val1, val2);
 }
 
 pg_always_inline bool
-plllvm_float8_le(float8 a, float8 b)
+plllvm_float8_le(float8 val1, float8 val2)
 {
-	return float8_le(a, b);
+	return float8_le(val1, val2);
 }
 
 pg_always_inline bool
-plllvm_float8_gt(float8 a, float8 b)
+plllvm_float8_gt(float8 val1, float8 val2)
 {
-	return float8_gt(a, b);
+	return float8_gt(val1, val2);
 }
 
 pg_always_inline bool
-plllvm_float8_ge(float8 a, float8 b)
+plllvm_float8_ge(float8 val1, float8 val2)
 {
-	return float8_ge(a, b);
+	return float8_ge(val1, val2);
 }
 
 /*
