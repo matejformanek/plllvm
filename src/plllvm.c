@@ -61,6 +61,8 @@ int			plllvm_max_resident_compiles = 2000;
 int			plllvm_max_ir_instructions = 100000;
 int			plllvm_debug_inject = PLLLVM_INJECT_NONE;
 bool		plllvm_auto_checks = true;
+bool		plllvm_expr_jit = false;
+bool		plllvm_expr_eager = false;
 
 static const struct config_enum_entry debug_inject_options[] = {
 	{"none", PLLLVM_INJECT_NONE, false},
@@ -152,6 +154,24 @@ _PG_init(void)
 							 true,
 							 PGC_SUSET, GUC_NO_SHOW_ALL | GUC_NOT_IN_SAMPLE,
 							 NULL, NULL, NULL);
+
+	DefineCustomBoolVariable("plllvm.expr_jit",
+							 gettext_noop("Enables JIT compilation of simple expressions in PL/pgSQL functions."),
+							 NULL,
+							 &plllvm_expr_jit,
+							 false,
+							 PGC_SUSET, 0,
+							 NULL, NULL, NULL);
+
+	DefineCustomBoolVariable("plllvm.expr_eager",
+							 gettext_noop("Takes simple expressions at their first evaluation instead of the second, for testing."),
+							 NULL,
+							 &plllvm_expr_eager,
+							 false,
+							 PGC_SUSET, GUC_NO_SHOW_ALL | GUC_NOT_IN_SAMPLE,
+							 NULL, NULL, NULL);
+
+	plllvm_plpgsql_init();
 
 	MarkGUCPrefixReserved("plllvm");
 

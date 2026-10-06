@@ -2,15 +2,15 @@
    "name": "plllvm",
    "abstract": "PL/LLVM procedural language: function bodies in LLVM IR",
    "description": "PL/LLVM is an untrusted procedural language whose function bodies are LLVM IR, compiled by the extension's own ORC LLJIT and called with the version 1 calling convention. Part of a master's thesis on JIT compilation of PL/pgSQL.",
-   "version": "0.1.0",
+   "version": "0.2.0",
    "maintainer": "Matěj Formánek <manekmatej@gmail.com>",
    "license": "postgresql",
    "provides": {
       "plllvm": {
          "abstract": "PL/LLVM procedural language",
-         "file": "plllvm--0.1.sql",
+         "file": "plllvm--0.2.sql",
          "docfile": "README.md",
-         "version": "0.1.0"
+         "version": "0.2.0"
       }
    },
    "prereqs": {

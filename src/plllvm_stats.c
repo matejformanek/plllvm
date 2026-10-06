@@ -29,6 +29,7 @@ PG_FUNCTION_INFO_V1(plllvm_code_cache);
 PG_FUNCTION_INFO_V1(plllvm_jit_test);
 PG_FUNCTION_INFO_V1(plllvm_function_status);
 PG_FUNCTION_INFO_V1(plllvm_call_sites);
+PG_FUNCTION_INFO_V1(plllvm_expr_stats);
 
 static bool resident_size(int64 *bytes);
 
@@ -324,6 +325,30 @@ plllvm_call_sites(PG_FUNCTION_ARGS)
 	}
 
 	return (Datum) 0;
+}
+
+/*
+ * Expression JIT in the PL/pgSQL functions of this backend
+ *
+ * Nothing is compiled yet, so only state, fired and declined move.
+ */
+Datum
+plllvm_expr_stats(PG_FUNCTION_ARGS)
+{
+	TupleDesc	tupdesc;
+	Datum		values[9];
+	bool		nulls[9] = {0};
+
+	if (get_call_result_type(fcinfo, NULL, &tupdesc) != TYPEFUNC_COMPOSITE)
+		elog(ERROR, "return type must be a row type");
+
+	for (int i = 0; i < lengthof(values); i++)
+		values[i] = Int64GetDatum(0);
+	values[0] = CStringGetTextDatum(plllvm_plpgsql_state());
+	values[1] = Int64GetDatum(plllvm_expr_fired);
+	values[4] = Int64GetDatum(plllvm_expr_declined);
+
+	PG_RETURN_DATUM(HeapTupleGetDatum(heap_form_tuple(tupdesc, values, nulls)));
 }
 
 /*

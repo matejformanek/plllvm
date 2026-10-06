@@ -19,6 +19,7 @@ lcov.info
 
 # pg_regress
 /results/
+/results-plpgsql/
 /log/
 /tmp_check/
 regression.diffs
