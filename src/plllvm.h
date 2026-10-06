@@ -16,7 +16,7 @@
 #include "utils/funccache.h"
 
 /* keep in sync with META.json; plllvm.control carries major.minor only */
-#define PLLLVM_VERSION "0.1.0"
+#define PLLLVM_VERSION "0.2.0"
 
 /* the memory of a running function that calls other functions */
 typedef struct plllvm_frame
@@ -86,6 +86,8 @@ extern int	plllvm_max_resident_compiles;
 extern int	plllvm_max_ir_instructions;
 extern int	plllvm_debug_inject;
 extern bool plllvm_auto_checks;
+extern bool plllvm_expr_jit;
+extern bool plllvm_expr_eager;
 
 /* plllvm.c */
 extern const char *plllvm_display_path(const char *path);
@@ -95,6 +97,12 @@ extern plllvm_function *plllvm_compile_get(FunctionCallInfo fcinfo);
 extern void plllvm_compile_unpin(plllvm_function *func);
 extern void plllvm_compile_check_scope(HeapTuple procTup);
 extern void plllvm_compile_check_body(HeapTuple procTup);
+
+/* plllvm_plpgsql.c */
+extern int64 plllvm_expr_fired;
+extern int64 plllvm_expr_declined;
+extern void plllvm_plpgsql_init(void);
+extern const char *plllvm_plpgsql_state(void);
 
 /* plllvm_spi.c */
 extern int64 plllvm_spi_statements(void);
