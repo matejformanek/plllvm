@@ -17,7 +17,9 @@
  *
  * 2) The emitted code evaluates as the interpreter does: the arguments
  *    first, left to right, then the strict NULL test (execExpr.c:2752-2801).
- *    So "x + y / z" with x NULL and z = 0 raises the division error.
+ *    So "x + y / z" with x NULL and z = 0 raises the division error.  AND,
+ *    OR, CASE and COALESCE evaluate only the arguments the interpreter
+ *    does.
  *
  * 3) A Datum of an int4 is sign extended (Int32GetDatum), a bool Datum is
  *    true when it is nonzero (DatumGetBool).

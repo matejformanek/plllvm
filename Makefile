@@ -40,7 +40,8 @@ REGRESS_KERNELS = kernel_loop \
 REGRESS_EXPR = expr_basic \
 		expr_ops \
 		expr_kernels \
-		expr_collide
+		expr_collide \
+		expr_bool
 REGRESS = plllvm_setup $(REGRESS_FEATURES) $(REGRESS_KERNELS) expr_plugin \
 	$(REGRESS_EXPR) expr_stats plllvm_fatal plllvm_teardown
 
