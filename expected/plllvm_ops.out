@@ -33,6 +33,12 @@ INSERT INTO op_helpers VALUES
   ('float8_mul', '%s * %s', 'float8', 'float8', 'float8'),
   ('float8_div', '%s / %s', 'float8', 'float8', 'float8'),
   ('float8_um', '-%s', 'float8', NULL, 'float8'),
+  ('float8_abs', 'abs(%s)', 'float8', NULL, 'float8'),
+  ('float8_sqrt', 'sqrt(%s)', 'float8', NULL, 'float8'),
+  ('int4_abs', 'abs(%s)', 'int4', NULL, 'int4'),
+  ('int8_abs', 'abs(%s)', 'int8', NULL, 'int8'),
+  ('int4_from_float8', 'int4(%s)', 'float8', NULL, 'int4'),
+  ('int8_from_float8', 'int8(%s)', 'float8', NULL, 'int8'),
   ('float8_eq', '%s = %s', 'float8', 'float8', 'bool'),
   ('float8_ne', '%s <> %s', 'float8', 'float8', 'bool'),
   ('float8_lt', '%s < %s', 'float8', 'float8', 'bool'),
@@ -103,6 +109,18 @@ INSERT INTO op_cases (helper, a, b) VALUES
   ('float8_div', 'NaN', '0'),
   ('float8_um', '1.5', NULL),
   ('float8_um', '0', NULL),
+  ('float8_abs', '-0', NULL),
+  ('float8_abs', '-Infinity', NULL),
+  ('float8_sqrt', '2', NULL),
+  ('float8_sqrt', '-1', NULL),
+  ('int4_abs', '-5', NULL),
+  ('int4_abs', '-2147483648', NULL),
+  ('int8_abs', '-5', NULL),
+  ('int8_abs', '-9223372036854775808', NULL),
+  ('int4_from_float8', '-2.5', NULL),
+  ('int4_from_float8', '2147483647.5', NULL),
+  ('int8_from_float8', '-0.5', NULL),
+  ('int8_from_float8', '9223372036854775807', NULL),
   ('float8_eq', '1', '1'),
   ('float8_eq', 'NaN', 'NaN'),
   ('float8_eq', '0', '-0'),
@@ -138,84 +156,96 @@ SELECT c.n, c.helper, c.a, c.b,
                              THEN format('%L::%s', c.b, h.tb) END)) AS ll
   FROM op_cases c JOIN op_helpers h USING (helper);
 SELECT helper, a, b, op_eval(sql) AS result FROM op_calls ORDER BY n;
-     helper     |          a           |          b          |                result                
-----------------+----------------------+---------------------+--------------------------------------
- int4_pl        | 2                    | 3                   | 5
- int4_pl        | 2147483647           | 1                   | 22003: integer out of range
- int4_mi        | 2                    | 5                   | -3
- int4_mi        | -2147483648          | 1                   | 22003: integer out of range
- int4_mul       | 6                    | -7                  | -42
- int4_mul       | 65536                | 32768               | 22003: integer out of range
- int4_div       | -7                   | 2                   | -3
- int4_div       | 1                    | 0                   | 22012: division by zero
- int4_div       | -2147483648          | -1                  | 22003: integer out of range
- int4_mod       | -7                   | 3                   | -1
- int4_mod       | 5                    | 0                   | 22012: division by zero
- int4_mod       | -2147483648          | -1                  | 0
- int4_um        | 5                    |                     | -5
- int4_um        | -2147483648          |                     | 22003: integer out of range
- int8_pl        | 2                    | 3                   | 5
- int8_pl        | 9223372036854775807  | 1                   | 22003: bigint out of range
- int8_mi        | 2                    | 5                   | -3
- int8_mi        | -9223372036854775808 | 1                   | 22003: bigint out of range
- int8_mul       | 3000000000           | -3                  | -9000000000
- int8_mul       | 4294967296           | 2147483648          | 22003: bigint out of range
- int8_div       | -7                   | 2                   | -3
- int8_div       | 1                    | 0                   | 22012: division by zero
- int8_div       | -9223372036854775808 | -1                  | 22003: bigint out of range
- int8_mod       | -7                   | 3                   | -1
- int8_mod       | 5                    | 0                   | 22012: division by zero
- int8_mod       | -9223372036854775808 | -1                  | 0
- int8_um        | 5                    |                     | -5
- int8_um        | -9223372036854775808 |                     | 22003: bigint out of range
- int48_pl       | 2                    | 3                   | 5
- int48_pl       | 1                    | 9223372036854775807 | 22003: bigint out of range
- int48_mi       | 2                    | 5                   | -3
- int48_mi       | -2                   | 9223372036854775807 | 22003: bigint out of range
- int48_mul      | 3                    | -3000000000         | -9000000000
- int48_mul      | 2                    | 4611686018427387904 | 22003: bigint out of range
- int48_div      | -7                   | 2                   | -3
- int48_div      | 1                    | 0                   | 22012: division by zero
- int48_div      | -2147483648          | -1                  | 2147483648
- int84_pl       | 2                    | 3                   | 5
- int84_pl       | 9223372036854775807  | 1                   | 22003: bigint out of range
- int84_mi       | 2                    | 5                   | -3
- int84_mi       | -9223372036854775808 | 1                   | 22003: bigint out of range
- int84_mul      | -3000000000          | 3                   | -9000000000
- int84_mul      | 4611686018427387904  | 2                   | 22003: bigint out of range
- int84_div      | -7                   | 2                   | -3
- int84_div      | 1                    | 0                   | 22012: division by zero
- int84_div      | -9223372036854775808 | -1                  | 22003: bigint out of range
- int4_from_int8 | -2147483648          |                     | -2147483648
- int4_from_int8 | 2147483648           |                     | 22003: integer out of range
- float8_pl      | 1.5                  | 2.25                | 3.75
- float8_pl      | 1e308                | 1e308               | 22003: value out of range: overflow
- float8_pl      | Infinity             | 1                   | Infinity
- float8_mi      | 1                    | 0.25                | 0.75
- float8_mi      | -1e308               | 1e308               | 22003: value out of range: overflow
- float8_mul     | 1.5                  | -2                  | -3
- float8_mul     | 1e-300               | 1e-300              | 22003: value out of range: underflow
- float8_mul     | Infinity             | 0                   | NaN
- float8_mul     | 0                    | 1e-300              | 0
- float8_div     | 1                    | 3                   | 0.3333333333333333
- float8_div     | 1                    | 0                   | 22012: division by zero
- float8_div     | NaN                  | 0                   | NaN
- float8_um      | 1.5                  |                     | -1.5
- float8_um      | 0                    |                     | -0
- float8_eq      | 1                    | 1                   | true
- float8_eq      | NaN                  | NaN                 | true
- float8_eq      | 0                    | -0                  | true
- float8_ne      | 1                    | 2                   | true
- float8_ne      | NaN                  | NaN                 | false
- float8_lt      | 1                    | 2                   | true
- float8_lt      | 1                    | NaN                 | true
- float8_le      | 2                    | 1                   | false
- float8_le      | NaN                  | NaN                 | true
- float8_gt      | 2                    | 1                   | true
- float8_gt      | NaN                  | Infinity            | true
- float8_ge      | 1                    | 2                   | false
- float8_ge      | 1                    | NaN                 | false
-(75 rows)
+      helper      |          a           |          b          |                       result                        
+------------------+----------------------+---------------------+-----------------------------------------------------
+ int4_pl          | 2                    | 3                   | 5
+ int4_pl          | 2147483647           | 1                   | 22003: integer out of range
+ int4_mi          | 2                    | 5                   | -3
+ int4_mi          | -2147483648          | 1                   | 22003: integer out of range
+ int4_mul         | 6                    | -7                  | -42
+ int4_mul         | 65536                | 32768               | 22003: integer out of range
+ int4_div         | -7                   | 2                   | -3
+ int4_div         | 1                    | 0                   | 22012: division by zero
+ int4_div         | -2147483648          | -1                  | 22003: integer out of range
+ int4_mod         | -7                   | 3                   | -1
+ int4_mod         | 5                    | 0                   | 22012: division by zero
+ int4_mod         | -2147483648          | -1                  | 0
+ int4_um          | 5                    |                     | -5
+ int4_um          | -2147483648          |                     | 22003: integer out of range
+ int8_pl          | 2                    | 3                   | 5
+ int8_pl          | 9223372036854775807  | 1                   | 22003: bigint out of range
+ int8_mi          | 2                    | 5                   | -3
+ int8_mi          | -9223372036854775808 | 1                   | 22003: bigint out of range
+ int8_mul         | 3000000000           | -3                  | -9000000000
+ int8_mul         | 4294967296           | 2147483648          | 22003: bigint out of range
+ int8_div         | -7                   | 2                   | -3
+ int8_div         | 1                    | 0                   | 22012: division by zero
+ int8_div         | -9223372036854775808 | -1                  | 22003: bigint out of range
+ int8_mod         | -7                   | 3                   | -1
+ int8_mod         | 5                    | 0                   | 22012: division by zero
+ int8_mod         | -9223372036854775808 | -1                  | 0
+ int8_um          | 5                    |                     | -5
+ int8_um          | -9223372036854775808 |                     | 22003: bigint out of range
+ int48_pl         | 2                    | 3                   | 5
+ int48_pl         | 1                    | 9223372036854775807 | 22003: bigint out of range
+ int48_mi         | 2                    | 5                   | -3
+ int48_mi         | -2                   | 9223372036854775807 | 22003: bigint out of range
+ int48_mul        | 3                    | -3000000000         | -9000000000
+ int48_mul        | 2                    | 4611686018427387904 | 22003: bigint out of range
+ int48_div        | -7                   | 2                   | -3
+ int48_div        | 1                    | 0                   | 22012: division by zero
+ int48_div        | -2147483648          | -1                  | 2147483648
+ int84_pl         | 2                    | 3                   | 5
+ int84_pl         | 9223372036854775807  | 1                   | 22003: bigint out of range
+ int84_mi         | 2                    | 5                   | -3
+ int84_mi         | -9223372036854775808 | 1                   | 22003: bigint out of range
+ int84_mul        | -3000000000          | 3                   | -9000000000
+ int84_mul        | 4611686018427387904  | 2                   | 22003: bigint out of range
+ int84_div        | -7                   | 2                   | -3
+ int84_div        | 1                    | 0                   | 22012: division by zero
+ int84_div        | -9223372036854775808 | -1                  | 22003: bigint out of range
+ int4_from_int8   | -2147483648          |                     | -2147483648
+ int4_from_int8   | 2147483648           |                     | 22003: integer out of range
+ float8_pl        | 1.5                  | 2.25                | 3.75
+ float8_pl        | 1e308                | 1e308               | 22003: value out of range: overflow
+ float8_pl        | Infinity             | 1                   | Infinity
+ float8_mi        | 1                    | 0.25                | 0.75
+ float8_mi        | -1e308               | 1e308               | 22003: value out of range: overflow
+ float8_mul       | 1.5                  | -2                  | -3
+ float8_mul       | 1e-300               | 1e-300              | 22003: value out of range: underflow
+ float8_mul       | Infinity             | 0                   | NaN
+ float8_mul       | 0                    | 1e-300              | 0
+ float8_div       | 1                    | 3                   | 0.3333333333333333
+ float8_div       | 1                    | 0                   | 22012: division by zero
+ float8_div       | NaN                  | 0                   | NaN
+ float8_um        | 1.5                  |                     | -1.5
+ float8_um        | 0                    |                     | -0
+ float8_abs       | -0                   |                     | 0
+ float8_abs       | -Infinity            |                     | Infinity
+ float8_sqrt      | 2                    |                     | 1.4142135623730951
+ float8_sqrt      | -1                   |                     | 2201F: cannot take square root of a negative number
+ int4_abs         | -5                   |                     | 5
+ int4_abs         | -2147483648          |                     | 22003: integer out of range
+ int8_abs         | -5                   |                     | 5
+ int8_abs         | -9223372036854775808 |                     | 22003: bigint out of range
+ int4_from_float8 | -2.5                 |                     | -2
+ int4_from_float8 | 2147483647.5         |                     | 22003: integer out of range
+ int8_from_float8 | -0.5                 |                     | 0
+ int8_from_float8 | 9223372036854775807  |                     | 22003: bigint out of range
+ float8_eq        | 1                    | 1                   | true
+ float8_eq        | NaN                  | NaN                 | true
+ float8_eq        | 0                    | -0                  | true
+ float8_ne        | 1                    | 2                   | true
+ float8_ne        | NaN                  | NaN                 | false
+ float8_lt        | 1                    | 2                   | true
+ float8_lt        | 1                    | NaN                 | true
+ float8_le        | 2                    | 1                   | false
+ float8_le        | NaN                  | NaN                 | true
+ float8_gt        | 2                    | 1                   | true
+ float8_gt        | NaN                  | Infinity            | true
+ float8_ge        | 1                    | 2                   | false
+ float8_ge        | 1                    | NaN                 | false
+(87 rows)
 
 -- op.<helper>, a PL/LLVM function that calls plllvm_<helper>; the
 -- arguments are read as Datums and converted with the cast of their type
@@ -276,84 +306,96 @@ END
 $do$;
 -- the same result or error as the SQL operator
 SELECT helper, a, b, op_eval(sql) = op_eval(ll) AS ok FROM op_calls ORDER BY n;
-     helper     |          a           |          b          | ok 
-----------------+----------------------+---------------------+----
- int4_pl        | 2                    | 3                   | t
- int4_pl        | 2147483647           | 1                   | t
- int4_mi        | 2                    | 5                   | t
- int4_mi        | -2147483648          | 1                   | t
- int4_mul       | 6                    | -7                  | t
- int4_mul       | 65536                | 32768               | t
- int4_div       | -7                   | 2                   | t
- int4_div       | 1                    | 0                   | t
- int4_div       | -2147483648          | -1                  | t
- int4_mod       | -7                   | 3                   | t
- int4_mod       | 5                    | 0                   | t
- int4_mod       | -2147483648          | -1                  | t
- int4_um        | 5                    |                     | t
- int4_um        | -2147483648          |                     | t
- int8_pl        | 2                    | 3                   | t
- int8_pl        | 9223372036854775807  | 1                   | t
- int8_mi        | 2                    | 5                   | t
- int8_mi        | -9223372036854775808 | 1                   | t
- int8_mul       | 3000000000           | -3                  | t
- int8_mul       | 4294967296           | 2147483648          | t
- int8_div       | -7                   | 2                   | t
- int8_div       | 1                    | 0                   | t
- int8_div       | -9223372036854775808 | -1                  | t
- int8_mod       | -7                   | 3                   | t
- int8_mod       | 5                    | 0                   | t
- int8_mod       | -9223372036854775808 | -1                  | t
- int8_um        | 5                    |                     | t
- int8_um        | -9223372036854775808 |                     | t
- int48_pl       | 2                    | 3                   | t
- int48_pl       | 1                    | 9223372036854775807 | t
- int48_mi       | 2                    | 5                   | t
- int48_mi       | -2                   | 9223372036854775807 | t
- int48_mul      | 3                    | -3000000000         | t
- int48_mul      | 2                    | 4611686018427387904 | t
- int48_div      | -7                   | 2                   | t
- int48_div      | 1                    | 0                   | t
- int48_div      | -2147483648          | -1                  | t
- int84_pl       | 2                    | 3                   | t
- int84_pl       | 9223372036854775807  | 1                   | t
- int84_mi       | 2                    | 5                   | t
- int84_mi       | -9223372036854775808 | 1                   | t
- int84_mul      | -3000000000          | 3                   | t
- int84_mul      | 4611686018427387904  | 2                   | t
- int84_div      | -7                   | 2                   | t
- int84_div      | 1                    | 0                   | t
- int84_div      | -9223372036854775808 | -1                  | t
- int4_from_int8 | -2147483648          |                     | t
- int4_from_int8 | 2147483648           |                     | t
- float8_pl      | 1.5                  | 2.25                | t
- float8_pl      | 1e308                | 1e308               | t
- float8_pl      | Infinity             | 1                   | t
- float8_mi      | 1                    | 0.25                | t
- float8_mi      | -1e308               | 1e308               | t
- float8_mul     | 1.5                  | -2                  | t
- float8_mul     | 1e-300               | 1e-300              | t
- float8_mul     | Infinity             | 0                   | t
- float8_mul     | 0                    | 1e-300              | t
- float8_div     | 1                    | 3                   | t
- float8_div     | 1                    | 0                   | t
- float8_div     | NaN                  | 0                   | t
- float8_um      | 1.5                  |                     | t
- float8_um      | 0                    |                     | t
- float8_eq      | 1                    | 1                   | t
- float8_eq      | NaN                  | NaN                 | t
- float8_eq      | 0                    | -0                  | t
- float8_ne      | 1                    | 2                   | t
- float8_ne      | NaN                  | NaN                 | t
- float8_lt      | 1                    | 2                   | t
- float8_lt      | 1                    | NaN                 | t
- float8_le      | 2                    | 1                   | t
- float8_le      | NaN                  | NaN                 | t
- float8_gt      | 2                    | 1                   | t
- float8_gt      | NaN                  | Infinity            | t
- float8_ge      | 1                    | 2                   | t
- float8_ge      | 1                    | NaN                 | t
-(75 rows)
+      helper      |          a           |          b          | ok 
+------------------+----------------------+---------------------+----
+ int4_pl          | 2                    | 3                   | t
+ int4_pl          | 2147483647           | 1                   | t
+ int4_mi          | 2                    | 5                   | t
+ int4_mi          | -2147483648          | 1                   | t
+ int4_mul         | 6                    | -7                  | t
+ int4_mul         | 65536                | 32768               | t
+ int4_div         | -7                   | 2                   | t
+ int4_div         | 1                    | 0                   | t
+ int4_div         | -2147483648          | -1                  | t
+ int4_mod         | -7                   | 3                   | t
+ int4_mod         | 5                    | 0                   | t
+ int4_mod         | -2147483648          | -1                  | t
+ int4_um          | 5                    |                     | t
+ int4_um          | -2147483648          |                     | t
+ int8_pl          | 2                    | 3                   | t
+ int8_pl          | 9223372036854775807  | 1                   | t
+ int8_mi          | 2                    | 5                   | t
+ int8_mi          | -9223372036854775808 | 1                   | t
+ int8_mul         | 3000000000           | -3                  | t
+ int8_mul         | 4294967296           | 2147483648          | t
+ int8_div         | -7                   | 2                   | t
+ int8_div         | 1                    | 0                   | t
+ int8_div         | -9223372036854775808 | -1                  | t
+ int8_mod         | -7                   | 3                   | t
+ int8_mod         | 5                    | 0                   | t
+ int8_mod         | -9223372036854775808 | -1                  | t
+ int8_um          | 5                    |                     | t
+ int8_um          | -9223372036854775808 |                     | t
+ int48_pl         | 2                    | 3                   | t
+ int48_pl         | 1                    | 9223372036854775807 | t
+ int48_mi         | 2                    | 5                   | t
+ int48_mi         | -2                   | 9223372036854775807 | t
+ int48_mul        | 3                    | -3000000000         | t
+ int48_mul        | 2                    | 4611686018427387904 | t
+ int48_div        | -7                   | 2                   | t
+ int48_div        | 1                    | 0                   | t
+ int48_div        | -2147483648          | -1                  | t
+ int84_pl         | 2                    | 3                   | t
+ int84_pl         | 9223372036854775807  | 1                   | t
+ int84_mi         | 2                    | 5                   | t
+ int84_mi         | -9223372036854775808 | 1                   | t
+ int84_mul        | -3000000000          | 3                   | t
+ int84_mul        | 4611686018427387904  | 2                   | t
+ int84_div        | -7                   | 2                   | t
+ int84_div        | 1                    | 0                   | t
+ int84_div        | -9223372036854775808 | -1                  | t
+ int4_from_int8   | -2147483648          |                     | t
+ int4_from_int8   | 2147483648           |                     | t
+ float8_pl        | 1.5                  | 2.25                | t
+ float8_pl        | 1e308                | 1e308               | t
+ float8_pl        | Infinity             | 1                   | t
+ float8_mi        | 1                    | 0.25                | t
+ float8_mi        | -1e308               | 1e308               | t
+ float8_mul       | 1.5                  | -2                  | t
+ float8_mul       | 1e-300               | 1e-300              | t
+ float8_mul       | Infinity             | 0                   | t
+ float8_mul       | 0                    | 1e-300              | t
+ float8_div       | 1                    | 3                   | t
+ float8_div       | 1                    | 0                   | t
+ float8_div       | NaN                  | 0                   | t
+ float8_um        | 1.5                  |                     | t
+ float8_um        | 0                    |                     | t
+ float8_abs       | -0                   |                     | t
+ float8_abs       | -Infinity            |                     | t
+ float8_sqrt      | 2                    |                     | t
+ float8_sqrt      | -1                   |                     | t
+ int4_abs         | -5                   |                     | t
+ int4_abs         | -2147483648          |                     | t
+ int8_abs         | -5                   |                     | t
+ int8_abs         | -9223372036854775808 |                     | t
+ int4_from_float8 | -2.5                 |                     | t
+ int4_from_float8 | 2147483647.5         |                     | t
+ int8_from_float8 | -0.5                 |                     | t
+ int8_from_float8 | 9223372036854775807  |                     | t
+ float8_eq        | 1                    | 1                   | t
+ float8_eq        | NaN                  | NaN                 | t
+ float8_eq        | 0                    | -0                  | t
+ float8_ne        | 1                    | 2                   | t
+ float8_ne        | NaN                  | NaN                 | t
+ float8_lt        | 1                    | 2                   | t
+ float8_lt        | 1                    | NaN                 | t
+ float8_le        | 2                    | 1                   | t
+ float8_le        | NaN                  | NaN                 | t
+ float8_gt        | 2                    | 1                   | t
+ float8_gt        | NaN                  | Infinity            | t
+ float8_ge        | 1                    | 2                   | t
+ float8_ge        | 1                    | NaN                 | t
+(87 rows)
 
 SET client_min_messages = warning;
 DROP SCHEMA op CASCADE;

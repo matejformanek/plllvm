@@ -28,10 +28,11 @@ declare i64 @plllvm_return_null(ptr %fcinfo)
 declare void @plllvm_error(i32 %sqlstate, ptr %msg)
 ; NOTICE with a message
 declare void @plllvm_notice(ptr %msg)
-; the ERRORs of int4pl, int8pl and int4div
+; the ERRORs of int4pl, int8pl, int4div and sqrt
 declare void @plllvm_int_overflow()
 declare void @plllvm_bigint_overflow()
 declare void @plllvm_div_zero()
+declare void @plllvm_sqrt_negative()
 ; CHECK_FOR_INTERRUPTS() and check_stack_depth().  With plllvm.auto_checks
 ; the compiler adds them where a loop or a recursion has none; calling them
 ; chooses where they go.
@@ -42,8 +43,9 @@ declare void @plllvm_check_stack()
 ;
 ; The int4, int8 and float8 operators, with the results and errors of the
 ; SQL ones: @plllvm_int4_pl is int4pl, @plllvm_int48_div is int48div,
-; @plllvm_int4_from_int8 is int4(int8).  Integer comparisons, int8(int4)
-; and the conversions to float8 are plain IR: icmp, sext, sitofp.
+; @plllvm_int4_from_int8 is int4(int8), @plllvm_int4_from_float8 is
+; int4(float8).  Integer comparisons, int8(int4) and the conversions to
+; float8 are plain IR: icmp, sext, sitofp.
 
 declare i32 @plllvm_int4_pl(i32 %val1, i32 %val2)
 declare i32 @plllvm_int4_mi(i32 %val1, i32 %val2)
@@ -66,6 +68,10 @@ declare i64 @plllvm_int84_mi(i64 %val1, i32 %val2)
 declare i64 @plllvm_int84_mul(i64 %val1, i32 %val2)
 declare i64 @plllvm_int84_div(i64 %val1, i32 %val2)
 declare i32 @plllvm_int4_from_int8(i64 %val)
+declare i32 @plllvm_int4_from_float8(double %val)
+declare i64 @plllvm_int8_from_float8(double %val)
+declare i32 @plllvm_int4_abs(i32 %val)
+declare i64 @plllvm_int8_abs(i64 %val)
 ; NaN is equal to NaN and greater than any other value, as in the SQL
 ; comparisons
 declare double @plllvm_float8_pl(double %val1, double %val2)
@@ -73,6 +79,8 @@ declare double @plllvm_float8_mi(double %val1, double %val2)
 declare double @plllvm_float8_mul(double %val1, double %val2)
 declare double @plllvm_float8_div(double %val1, double %val2)
 declare double @plllvm_float8_um(double %val)
+declare double @plllvm_float8_abs(double %val)
+declare double @plllvm_float8_sqrt(double %val)
 declare i1 @plllvm_float8_eq(double %val1, double %val2)
 declare i1 @plllvm_float8_ne(double %val1, double %val2)
 declare i1 @plllvm_float8_lt(double %val1, double %val2)
@@ -203,6 +211,7 @@ entry:
     i32 5, label %null_result
     i32 6, label %spi
     i32 7, label %arrays
+    i32 8, label %sqrt_negative
   ]
 
 error:
@@ -219,6 +228,10 @@ bigint_overflow:
 
 div_zero:
   call void @plllvm_div_zero()
+  unreachable
+
+sqrt_negative:
+  call void @plllvm_sqrt_negative()
   unreachable
 
 null_result:

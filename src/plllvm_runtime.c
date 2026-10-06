@@ -43,6 +43,7 @@ const plllvm_host_symbol plllvm_host_symbols[] =
 	{"plllvm_int_overflow", (void *) plllvm_int_overflow},
 	{"plllvm_bigint_overflow", (void *) plllvm_bigint_overflow},
 	{"plllvm_div_zero", (void *) plllvm_div_zero},
+	{"plllvm_sqrt_negative", (void *) plllvm_sqrt_negative},
 	{"plllvm_keep", (void *) plllvm_keep},
 	{"plllvm_scratch_reset", (void *) plllvm_scratch_reset},
 	{"plllvm_rt_site_call", (void *) plllvm_rt_site_call},
@@ -126,6 +127,15 @@ plllvm_div_zero(void)
 	ereport(ERROR,
 			(errcode(ERRCODE_DIVISION_BY_ZERO),
 			 errmsg("division by zero")));
+}
+
+/* the message of dsqrt */
+void
+plllvm_sqrt_negative(void)
+{
+	ereport(ERROR,
+			(errcode(ERRCODE_INVALID_ARGUMENT_FOR_POWER_FUNCTION),
+			 errmsg("cannot take square root of a negative number")));
 }
 
 /*
