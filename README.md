@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="docs/images/plllvm.jpeg" alt="PL/LLVM" width="480">
+</p>
+
 # PL/LLVM
 
 An untrusted procedural language for PostgreSQL whose function bodies are
