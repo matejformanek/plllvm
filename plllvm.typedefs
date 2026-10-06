@@ -51,12 +51,14 @@ ExecEvalSubroutine
 ExecProcNodeMtd
 ExecRowMark
 Expr
+ExprBucket
 ExprContext
 ExprContextCallbackFunction
 ExprContext_CB
 ExprDoneCond
 ExprEvalRowtypeCache
 ExprEvalStep
+ExprProgram
 ExprState
 ExprStateEvalFunc
 FieldStore
@@ -74,7 +76,13 @@ Form_pg_proc
 FromExpr
 FuncExpr
 FunctionCallInfo
+HASHCTL
+HASHHDR
 HTAB
+HashAllocFunc
+HashCompareFunc
+HashCopyFunc
+HashValueFunc
 HeapTuple
 HeapTupleData
 HeapTupleFields
@@ -380,6 +388,7 @@ plllvm_frame
 plllvm_function
 plllvm_host_symbol
 plllvm_ir
+plllvm_jit_kind
 plllvm_jit_module
 plllvm_jit_result
 plllvm_jit_session_info

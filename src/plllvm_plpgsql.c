@@ -317,7 +317,8 @@ fire(ExprState *state, ExprContext *econtext)
  * variable of a type passed by value.  The paramfunc of a varlena variable
  * may depend on the assignment target (plpgsql_param_eval_var_check); one
  * passed by value is read the same way also when it is the target, as in
- * "i := i + 1".
+ * "i := i + 1".  The check has taken only PARAM_EXTERN Params of bool,
+ * int4, int8 and float8.
  */
 static bool
 param_check(plllvm_expr_env *env, const Param *p, StringInfo facts)
@@ -326,7 +327,7 @@ param_check(plllvm_expr_env *env, const Param *p, StringInfo facts)
 	int			dno = p->paramid - 1;
 	PLpgSQL_var *var;
 
-	if (p->paramkind != PARAM_EXTERN || dno < 0 || dno >= estate->ndatums)
+	if (dno < 0 || dno >= estate->ndatums)
 		return false;
 
 	var = (PLpgSQL_var *) estate->datums[dno];
@@ -334,17 +335,6 @@ param_check(plllvm_expr_env *env, const Param *p, StringInfo facts)
 		var->datatype->typoid != p->paramtype ||
 		!var->datatype->typbyval)
 		return false;
-
-	switch (p->paramtype)
-	{
-		case BOOLOID:
-		case INT4OID:
-		case INT8OID:
-		case FLOAT8OID:
-			break;
-		default:
-			return false;
-	}
 
 	appendStringInfo(facts, "%d:%u:%d:%d ", p->paramid, p->paramtype,
 					 (int) var->dtype, (int) var->datatype->typlen);
