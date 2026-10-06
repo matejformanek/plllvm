@@ -1,0 +1,580 @@
+--
+-- expr_basic: PL/pgSQL functions whose simple expressions plllvm.expr_jit
+-- compiles, and some it must leave alone
+--
+-- No plllvm statement here: the expected output is stock PL/pgSQL's, and
+-- make installcheck-expr compares every variant against it.  An
+-- expression is compiled at its second evaluation, so every error below
+-- comes from the third or a later one.  Most cases come from the
+-- expr-swap-v2 spike (sql/test.sql).
+--
+
+CREATE FUNCTION eb_inc_loop(n int) RETURNS int LANGUAGE plpgsql AS $$
+DECLARE
+  i int := 0;
+BEGIN
+  WHILE i < n LOOP
+    i := i + 1;
+  END LOOP;
+  RETURN i;
+END
+$$;
+
+CREATE FUNCTION eb_plain_loop(n int) RETURNS bigint LANGUAGE plpgsql AS $$
+DECLARE
+  s bigint := 0;
+BEGIN
+  FOR i IN 1..n LOOP
+    s := s + i;
+  END LOOP;
+  RETURN s;
+END
+$$;
+
+CREATE FUNCTION eb_count_primes(n int) RETURNS int LANGUAGE plpgsql AS $$
+DECLARE
+  c int := 0;
+  i int := 2;
+  d int;
+  p bool;
+BEGIN
+  WHILE i <= n LOOP
+    p := true;
+    d := 2;
+    WHILE d * d <= i LOOP
+      IF i % d = 0 THEN
+        p := false;
+        EXIT;
+      END IF;
+      d := d + 1;
+    END LOOP;
+    IF p THEN
+      c := c + 1;
+    END IF;
+    i := i + 1;
+  END LOOP;
+  RETURN c;
+END
+$$;
+
+CREATE FUNCTION eb_fsum(n int) RETURNS float8 LANGUAGE plpgsql AS $$
+DECLARE
+  x float8 := 0;
+  h float8 := 0.5;
+BEGIN
+  FOR i IN 1..n LOOP
+    x := x * h + 1.0;
+    IF x >= 1.99 THEN
+      x := x - 0.25;
+    END IF;
+  END LOOP;
+  RETURN x;
+END
+$$;
+
+SELECT eb_inc_loop(1000), eb_inc_loop(0), eb_inc_loop(-5), eb_inc_loop(NULL);
+SELECT eb_plain_loop(1000), eb_plain_loop(1);
+SELECT eb_count_primes(1000), eb_count_primes(2), eb_count_primes(10000);
+SELECT eb_fsum(1000);
+
+-- several calls in one transaction share the ExprStates
+BEGIN;
+SELECT eb_inc_loop(100), eb_inc_loop(200), eb_count_primes(100),
+       eb_count_primes(100);
+COMMIT;
+
+-- errors at a late evaluation: message and CONTEXT
+CREATE FUNCTION eb_ovf4() RETURNS int LANGUAGE plpgsql AS $$
+DECLARE
+  i int := 2147483600;
+BEGIN
+  LOOP
+    i := i + 1;
+  END LOOP;
+END
+$$;
+
+CREATE FUNCTION eb_ovf4mul() RETURNS int LANGUAGE plpgsql AS $$
+DECLARE
+  i int := 3;
+BEGIN
+  LOOP
+    i := i * 3;
+  END LOOP;
+END
+$$;
+
+CREATE FUNCTION eb_ovf8() RETURNS bigint LANGUAGE plpgsql AS $$
+DECLARE
+  i bigint := 9223372036854775800;
+BEGIN
+  LOOP
+    i := i + 1;
+  END LOOP;
+END
+$$;
+
+CREATE FUNCTION eb_ovf84() RETURNS bigint LANGUAGE plpgsql AS $$
+DECLARE
+  i bigint := 9223372036854775800;
+  k int := 1;
+BEGIN
+  LOOP
+    i := i + k;
+  END LOOP;
+END
+$$;
+
+CREATE FUNCTION eb_cast84(start bigint) RETURNS int LANGUAGE plpgsql AS $$
+DECLARE
+  i bigint := start;
+  r int;
+BEGIN
+  LOOP
+    r := i::int;
+    i := i + 1;
+  END LOOP;
+END
+$$;
+
+CREATE FUNCTION eb_div0(n int) RETURNS int LANGUAGE plpgsql AS $$
+DECLARE
+  d int := n;
+  s int := 0;
+BEGIN
+  LOOP
+    s := s + 100 / d;
+    d := d - 1;
+  END LOOP;
+END
+$$;
+
+CREATE FUNCTION eb_mod0(n bigint) RETURNS bigint LANGUAGE plpgsql AS $$
+DECLARE
+  d bigint := n;
+  s bigint := 0;
+BEGIN
+  LOOP
+    s := s + 100 % d;
+    d := d - 1;
+  END LOOP;
+END
+$$;
+
+CREATE FUNCTION eb_fovf() RETURNS float8 LANGUAGE plpgsql AS $$
+DECLARE
+  x float8 := 1e300;
+BEGIN
+  LOOP
+    x := x * 1e10;
+  END LOOP;
+END
+$$;
+
+CREATE FUNCTION eb_fund() RETURNS float8 LANGUAGE plpgsql AS $$
+DECLARE
+  x float8 := 1e-300;
+BEGIN
+  LOOP
+    x := x * 1e-10;
+  END LOOP;
+END
+$$;
+
+CREATE FUNCTION eb_fdiv0() RETURNS float8 LANGUAGE plpgsql AS $$
+DECLARE
+  x float8 := 3;
+  d float8 := 3;
+BEGIN
+  LOOP
+    x := x / d;
+    d := d - 1;
+  END LOOP;
+END
+$$;
+
+SELECT eb_ovf4();
+SELECT eb_ovf4mul();
+SELECT eb_ovf8();
+SELECT eb_ovf84();
+SELECT eb_cast84(2147483640);
+SELECT eb_cast84(-2147483660);
+SELECT eb_div0(5);
+SELECT eb_mod0(5);
+SELECT eb_fovf();
+SELECT eb_fund();
+SELECT eb_fdiv0();
+
+-- INT_MIN / -1, INT_MIN % -1, -INT_MIN
+CREATE FUNCTION eb_edge4() RETURNS text LANGUAGE plpgsql AS $$
+DECLARE
+  m int := -2147483648;
+  k int := -1;
+  a int;
+  b int;
+  r text := '';
+BEGIN
+  FOR j IN 1..3 LOOP
+    b := m % k;
+    r := r || b || ',';
+  END LOOP;
+  BEGIN
+    FOR j IN 1..3 LOOP
+      a := m / k;
+    END LOOP;
+  EXCEPTION WHEN numeric_value_out_of_range THEN
+    r := r || 'div:' || SQLERRM || ',';
+  END;
+  BEGIN
+    FOR j IN 1..3 LOOP
+      a := -m;
+    END LOOP;
+  EXCEPTION WHEN numeric_value_out_of_range THEN
+    r := r || 'um:' || SQLERRM;
+  END;
+  RETURN r;
+END
+$$;
+
+SELECT eb_edge4();
+
+-- NaN sorts above everything and equals itself; -0 = 0
+CREATE FUNCTION eb_fnan() RETURNS text LANGUAGE plpgsql AS $$
+DECLARE
+  x float8 := 'NaN';
+  y float8 := 1;
+  z float8 := '-0';
+  r text := '';
+  b1 bool;
+  b2 bool;
+  b3 bool;
+  b4 bool;
+  b5 bool;
+  q float8;
+  w float8;
+BEGIN
+  FOR j IN 1..3 LOOP
+    b1 := x > y;
+    b2 := x = x;
+    b3 := x < y;
+    b4 := z = 0;
+    b5 := x <> x;
+    q := x / 0;
+    w := x + 1;
+    r := r || b1 || b2 || b3 || b4 || b5 || q || w || ' ';
+  END LOOP;
+  RETURN r;
+END
+$$;
+
+SELECT eb_fnan();
+
+-- NULLs in arithmetic, comparisons and WHILE
+CREATE FUNCTION eb_nulls(a int) RETURNS text LANGUAGE plpgsql AS $$
+DECLARE
+  i int := a;
+  s bigint := 10;
+  r text := '';
+  f float8;
+  c int := 0;
+  t1 int;
+  t2 bigint;
+  t3 float8;
+  b bool;
+BEGIN
+  FOR j IN 1..3 LOOP
+    t1 := i + 1;
+    t2 := s + i;
+    t3 := f * 2;
+    b := i > 0;
+    r := r || coalesce(t1::text, 'N') || coalesce(t2::text, 'N')
+           || coalesce(t3::text, 'N') || coalesce(b::text, 'N') || ' ';
+    IF i > 0 THEN
+      r := r || 'T';
+    ELSE
+      r := r || 'F';
+    END IF;
+    WHILE i < 3 LOOP
+      i := i + 1;
+      c := c + 1;
+      EXIT WHEN c > 10;
+    END LOOP;
+  END LOOP;
+  RETURN r || c;
+END
+$$;
+
+SELECT eb_nulls(1), eb_nulls(NULL), eb_nulls(-2);
+
+-- all arguments are evaluated before the strict NULL test, so x NULL does
+-- not hide the division by zero in y / z
+CREATE FUNCTION eb_strict(x int, y int, z int) RETURNS int
+LANGUAGE plpgsql AS $$
+DECLARE
+  w int;
+  r int;
+BEGIN
+  FOR k IN 1..3 LOOP
+    w := CASE k WHEN 3 THEN z ELSE 1 END;
+    r := x + y / w;
+  END LOOP;
+  RETURN r;
+END
+$$;
+
+SELECT eb_strict(NULL, 1, 1), eb_strict(1, NULL, 0), eb_strict(2, 6, 3);
+SELECT eb_strict(NULL, 1, 0);
+
+-- an error caught by EXCEPTION, then the same expression again
+CREATE FUNCTION eb_caught() RETURNS text LANGUAGE plpgsql AS $$
+DECLARE
+  i int := 2147483640;
+  r text := '';
+  n int := 0;
+BEGIN
+  FOR j IN 1..20 LOOP
+    BEGIN
+      i := i + 1;
+    EXCEPTION WHEN numeric_value_out_of_range THEN
+      n := n + 1;
+      i := 0;
+    END;
+  END LOOP;
+  RETURN i || ' ' || n;
+END
+$$;
+
+SELECT eb_caught();
+SELECT eb_caught();
+
+-- recursion: the outer expression is in use, inner calls go through SPI
+CREATE FUNCTION eb_fib(n int) RETURNS int LANGUAGE plpgsql AS $$
+BEGIN
+  IF n < 2 THEN
+    RETURN n;
+  END IF;
+  RETURN eb_fib(n - 1) + eb_fib(n - 2);
+END
+$$;
+
+SELECT eb_fib(15);
+
+-- a procedure with COMMIT: new ExprStates in every transaction
+CREATE PROCEDURE eb_inc_proc(n int, c bool, INOUT r int DEFAULT 0)
+LANGUAGE plpgsql AS $$
+DECLARE
+  i int := 0;
+BEGIN
+  WHILE i < n LOOP
+    i := i + 1;
+    IF c THEN
+      COMMIT;
+    END IF;
+  END LOOP;
+  r := i;
+END
+$$;
+
+CALL eb_inc_proc(50, true);
+CALL eb_inc_proc(50, false);
+
+-- an inlined SQL function replaced inside a transaction: replanned
+CREATE FUNCTION eb_addk(x int) RETURNS int LANGUAGE sql IMMUTABLE
+AS $$ SELECT x + 1 $$;
+
+CREATE FUNCTION eb_use_addk(n int) RETURNS int LANGUAGE plpgsql AS $$
+DECLARE
+  s int := 0;
+BEGIN
+  FOR i IN 1..n LOOP
+    s := eb_addk(s);
+  END LOOP;
+  RETURN s;
+END
+$$;
+
+BEGIN;
+SELECT eb_use_addk(10);
+CREATE OR REPLACE FUNCTION eb_addk(x int) RETURNS int LANGUAGE sql IMMUTABLE
+AS $$ SELECT x + 2 $$;
+SELECT eb_use_addk(10);
+COMMIT;
+SELECT eb_use_addk(10);
+
+-- shapes outside T0: int2, numeric, a record field, CASE, AND, a domain
+-- with a CHECK
+CREATE DOMAIN eb_posint AS int CHECK (VALUE > 0);
+CREATE TYPE eb_pair AS (x int, y int);
+
+CREATE FUNCTION eb_mixed(n int) RETURNS text LANGUAGE plpgsql AS $$
+DECLARE
+  s2 int2 := 0;
+  nm numeric := 0;
+  t text := '';
+  r eb_pair := ROW(1, 2);
+  k int := 0;
+  d eb_posint := 5;
+  s int := 0;
+BEGIN
+  FOR i IN 1..n LOOP
+    s2 := s2 + 1;
+    nm := nm + 0.5;
+    r.x := r.x + 1;
+    k := CASE WHEN i % 2 = 0 THEN k + 1 ELSE k END;
+    IF i > 1 AND k / i >= 0 THEN
+      s := s + 1;
+    END IF;
+    s := s + abs(i - 3);
+  END LOOP;
+  t := s2 || ' ' || nm || ' ' || r.x || ' ' || k || ' ' || s;
+  BEGIN
+    LOOP
+      d := d - 1;
+    END LOOP;
+  EXCEPTION WHEN check_violation THEN
+    t := t || ' dom:' || SQLERRM || ' d=' || d;
+  END;
+  RETURN t;
+END
+$$;
+
+SELECT eb_mixed(20);
+
+-- a trigger: TG_NARGS is a PROMISE datum
+CREATE TABLE eb_tt (a int);
+
+CREATE FUNCTION eb_trg() RETURNS trigger LANGUAGE plpgsql AS $$
+DECLARE
+  k int := 0;
+BEGIN
+  FOR i IN 1..3 LOOP
+    k := k + TG_NARGS + i;
+  END LOOP;
+  NEW.a := NEW.a + k;
+  RETURN NEW;
+END
+$$;
+
+CREATE TRIGGER eb_tt_trg BEFORE INSERT ON eb_tt
+  FOR EACH ROW EXECUTE FUNCTION eb_trg('x', 'y');
+
+INSERT INTO eb_tt VALUES (1), (2), (3) RETURNING a;
+
+-- a query and a simple expression in every iteration
+CREATE TABLE eb_kv (id int PRIMARY KEY, v int);
+INSERT INTO eb_kv SELECT g, g % 7 FROM generate_series(1, 2000) g;
+ANALYZE eb_kv;
+
+CREATE FUNCTION eb_glue(n int) RETURNS bigint LANGUAGE plpgsql AS $$
+DECLARE
+  s bigint := 0;
+  r int;
+BEGIN
+  FOR i IN 1..n LOOP
+    SELECT v INTO r FROM eb_kv WHERE id = i;
+    s := s + r;
+  END LOOP;
+  RETURN s;
+END
+$$;
+
+SELECT eb_glue(2000);
+
+-- DO blocks have their own simple-expression EState
+DO $$
+DECLARE
+  i int := 0;
+  s bigint := 0;
+BEGIN
+  WHILE i < 500 LOOP
+    i := i + 1;
+    s := s + i * i;
+  END LOOP;
+  RAISE NOTICE 'do: % %', i, s;
+END
+$$;
+
+DO $$
+DECLARE
+  i int := 2147483000;
+BEGIN
+  LOOP
+    i := i + 1;
+  END LOOP;
+END
+$$;
+
+SELECT eb_inc_loop(10);
+
+-- a polymorphic function has one PL/pgSQL function per argument type, and
+-- the same source text compiles differently in each
+CREATE FUNCTION c_sum_p(n anyelement) RETURNS bigint LANGUAGE plpgsql AS $$
+DECLARE
+  s bigint := 0;
+BEGIN
+  FOR i IN 1..n LOOP
+    s := s + i;
+  END LOOP;
+  RETURN s;
+END
+$$;
+
+SELECT c_sum_p(3) AS int4_3, c_sum_p(3::bigint) AS int8_3,
+       c_sum_p(3.0::numeric) AS numeric_3;
+SELECT c_sum_p((2^32)::bigint + 3) AS int8_2p32_plus_3;
+
+CREATE FUNCTION eb_twice_p(n anyelement) RETURNS anyelement
+LANGUAGE plpgsql AS $$
+DECLARE
+  r ALIAS FOR $0;
+BEGIN
+  FOR k IN 1..3 LOOP
+    r := n + n;
+  END LOOP;
+  RETURN r;
+END
+$$;
+
+SELECT eb_twice_p(3) AS int4, eb_twice_p(2000000000::bigint) AS int8,
+       eb_twice_p(1.25::float8) AS float8, eb_twice_p(2.5::numeric) AS numeric;
+SELECT eb_twice_p((2^32)::bigint + 3) AS int8_2p32_plus_3;
+SELECT eb_twice_p(2000000000);
+BEGIN;
+SELECT eb_twice_p(1000000000), eb_twice_p(3000000000::bigint);
+SELECT eb_twice_p(3000000000::bigint), eb_twice_p(1000000000);
+COMMIT;
+
+-- statement_timeout: compiled expressions have no interrupt check, the
+-- interpreter checks before every statement, so CONTEXT names the
+-- assignment
+CREATE FUNCTION eb_spin(spin bool) RETURNS text LANGUAGE plpgsql AS $$
+DECLARE
+  i int := 0;
+  ctx text;
+BEGIN
+  WHILE spin LOOP
+    i := i + 1;
+  END LOOP;
+  RETURN 'not run';
+EXCEPTION WHEN query_canceled THEN
+  GET STACKED DIAGNOSTICS ctx = PG_EXCEPTION_CONTEXT;
+  RETURN SQLERRM || ' at ' || substring(ctx FROM 'line [0-9]+ at [a-zA-Z ]+');
+END
+$$;
+
+SELECT eb_spin(false);
+SET statement_timeout = '300ms';
+SELECT eb_spin(true);
+RESET statement_timeout;
+
+DROP FUNCTION eb_inc_loop(int), eb_plain_loop(int), eb_count_primes(int),
+  eb_fsum(int), eb_ovf4(), eb_ovf4mul(), eb_ovf8(), eb_ovf84(),
+  eb_cast84(bigint), eb_div0(int), eb_mod0(bigint), eb_fovf(), eb_fund(),
+  eb_fdiv0(), eb_edge4(), eb_fnan(), eb_nulls(int), eb_strict(int, int, int),
+  eb_caught(), eb_fib(int), eb_use_addk(int), eb_addk(int), eb_mixed(int),
+  eb_glue(int), c_sum_p(anyelement), eb_twice_p(anyelement), eb_spin(bool);
+DROP PROCEDURE eb_inc_proc(int, bool, int);
+DROP TABLE eb_tt, eb_kv;
+DROP FUNCTION eb_trg();
+DROP TYPE eb_pair;
+DROP DOMAIN eb_posint;
