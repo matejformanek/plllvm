@@ -132,10 +132,11 @@ Only `plllvm_jit.c` and `plllvm_error.cpp` include LLVM headers.
   per Param its type, datum kind and length. A Param is taken only if it
   is a PL/pgSQL variable passed by value (`int4`, `int8`, `float8`,
   `bool`).
-* Cache: a hash of the key (opt level, eager flag, tags, functions,
-  types) leads to the programs with that key; one is taken when its tree
-  is `equal()` to the ExprState's and its facts match. Otherwise the tree
-  is compiled, and a failed build is kept too, so it is not tried again.
+* Cache: a hash of the key (opt level, eager flag, tags with their kind
+  and arity, functions, types) leads to the programs with that key; one
+  is taken when its tree is `equal()` to the ExprState's and its facts
+  match. Otherwise the tree is compiled, and a failed build is kept too,
+  so it is not tried again.
   Programs are never freed; `plllvm.expr_max_programs` caps them and
   beyond it expressions stay interpreted. Stack too deep, an unsupported
   tree or a failed build leave the expression interpreted; only the
@@ -146,7 +147,10 @@ Only `plllvm_jit.c` and `plllvm_error.cpp` include LLVM headers.
   `paramFetchArg` (the estate) and `datums[paramid - 1]`, with offsets of
   this library's compile of `plpgsql.h`. Operators are the
   `plllvm_ops.h` helpers of `plllvm_types.bc`; the result is boxed as a
-  Datum (an `int4` sign extended), 0 when NULL.
+  Datum (an `int4` sign extended), 0 when NULL. `AND`, `OR`, `CASE` and
+  `COALESCE` branch to a block that joins the results with phis, so an
+  argument the interpreter skips is not evaluated; a `select` would
+  evaluate it, and it may raise an error.
 * `plllvm_jit_compile_expr()` is the PL/LLVM compile with the other entry
   type, no call sites and no interrupt checks (an expression has no
   loops). Expression modules do not count in `plllvm_session_info()` or

@@ -162,11 +162,16 @@ compiled whole or not at all. This version takes:
   comparisons;
 * `+ - * /`, unary minus and the comparisons of `float8`; `=` and `<>` of
   `bool`;
-* the casts `int8(int4)`, `int4(int8)`, `float8(int4)`, `float8(int8)`.
+* `abs()` of `int4`, `int8` and `float8`, `sqrt()`;
+* the casts `int8(int4)`, `int4(int8)`, `float8(int4)`, `float8(int8)`,
+  `int4(float8)`, `int8(float8)`;
+* `AND`, `OR`, `NOT`, `IS [NOT] NULL`, `IS [NOT] TRUE|FALSE|UNKNOWN`,
+  `CASE`, `COALESCE` and `NULLIF` over these.
 
-Anything else (`numeric`, `text`, other functions, `CASE`, `AND`/`OR`,
-arrays) stays interpreted. Results and errors are those of PL/pgSQL;
-integer errors under `VERBOSITY verbose` name another source location.
+Anything else (`numeric`, `text`, other functions, arrays) stays
+interpreted. Results and errors are those of PL/pgSQL; `AND`, `OR`, `CASE`
+and `COALESCE` skip the arguments PL/pgSQL skips. Errors under `VERBOSITY
+verbose` name another source location.
 
 A compiled expression is kept for the session and found again by its
 tree, so the next transaction pays only a lookup. The code is never freed:
@@ -182,6 +187,9 @@ debuggers and profilers use.
 * A plugin loaded after plllvm that chains keeps both working. One that
   overwrites the slot turns expression JIT off without notice;
   `plllvm_expr_stats()` then shows `not_in_slot`.
+* pldebugger (`plugin_debugger`) overwrites the slot, so list it before
+  plllvm in `shared_preload_libraries` (or `LOAD` it first). plpgsql_check
+  chains and works in either order.
 * `state` is `declined:paramfunc` when PL/pgSQL's parameter functions are
   not what plllvm expects; expression JIT is then off for the session.
 * An expression evaluated once per transaction is never taken. Parallel

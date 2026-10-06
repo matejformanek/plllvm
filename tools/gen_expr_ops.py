@@ -12,9 +12,10 @@
 # row.  An error at a harmless evaluation shows as "B", which the expected
 # output must never contain.
 #
-# With plllvm.expr_jit on, every case but those in REFUSED must have been
-# given code once per row; the test checks the count, so that a class of
-# cases the compiler starts to refuse does not pass unnoticed.
+# With plllvm.expr_jit on, every case but those in REFUSED, and the two
+# CASEs that pick its values, must have been given code once per row; the
+# test checks the count, so that a class of cases the compiler starts to
+# refuse does not pass unnoticed.
 #
 # Run from the top directory: tools/gen_expr_ops.py > sql/expr_ops.sql
 # Adapted from the plllvm-v1 spike (swapv2/gen_ops.py).
@@ -203,12 +204,13 @@ def main():
           f'    END LOOP;\n'
           f'  END LOOP;\n')
     w('END\n$$;\n\n')
-    # each row is one transaction, so a case is installed once per row
+    # each row is one transaction, so a case is installed once per row,
+    # with the two CASEs that pick its values
     installs = 0
     for name, params, _, cases in GROUPS:
         (_, _, xv), (_, _, yv) = params
         installs += len(xv) * len(yv) * \
-            sum(1 for case in cases if case[0] not in REFUSED)
+            sum(3 if case[0] not in REFUSED else 2 for case in cases)
     # only where plllvm is loaded: a stock run must not load it
     w('-- with plllvm loaded, what it installed before the run\n'
       'DO $$\n'
@@ -221,7 +223,7 @@ def main():
       '$$;\n\n')
     w('CALL expr_ops_run();\n\n')
     w(f'-- with plllvm.expr_jit on, every case but {len(REFUSED)} got code '
-      f'in every row\n'
+      f'in every row,\n-- and so did the two CASEs that pick its values\n'
       f'DO $$\n'
       f'DECLARE\n'
       f'  n int8;\n'

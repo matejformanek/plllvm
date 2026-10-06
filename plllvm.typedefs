@@ -11,6 +11,10 @@ AttrNumber
 Bitmapset
 BlockIdData
 BlockNumber
+BoolExpr
+BoolExprType
+BoolTestType
+BooleanTest
 BufferAccessStrategy
 BulkInsertStateData
 CTECycleClause
@@ -22,8 +26,12 @@ CachedFunctionHashKey
 CachedPlan
 CachedPlanSource
 Cardinality
+CaseExpr
+CaseTestExpr
+CaseWhen
 CheckState
 CmdType
+CoalesceExpr
 CoerceParamHook
 CoercionForm
 ColumnRef
@@ -41,6 +49,7 @@ DatumTupleFields
 Dl_info
 DomainConstraintCache
 EState
+EmitState
 ErrorContextCallback
 ErrorData
 ErrorSaveContext
@@ -171,6 +180,9 @@ Node
 NodeIndex
 NodeInstrumentation
 NodeTag
+NullIfExpr
+NullTest
+NullTestType
 NullableDatum
 OffsetNumber
 Oid
@@ -224,6 +236,7 @@ PartitionKey
 Pg_abi_values
 Pg_finfo_record
 Pg_magic_struct
+PhiJoin
 Plan
 PlanState
 PlannedStmt

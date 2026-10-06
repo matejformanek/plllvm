@@ -1424,7 +1424,8 @@ BEGIN
 END
 $$;
 CALL expr_ops_run();
--- with plllvm.expr_jit on, every case but 1 got code in every row
+-- with plllvm.expr_jit on, every case but 1 got code in every row,
+-- and so did the two CASEs that pick its values
 DO $$
 DECLARE
   n int8;
@@ -1432,8 +1433,8 @@ BEGIN
   IF current_setting('plllvm.expr_jit', true)::bool THEN
     EXECUTE 'SELECT s.installed - b.installed
                FROM plllvm_expr_stats() s, expr_ops_before b' INTO n;
-    IF n <> 15238 THEN
-      RAISE EXCEPTION '% expressions installed, not 15238', n;
+    IF n <> 45956 THEN
+      RAISE EXCEPTION '% expressions installed, not 45956', n;
     END IF;
   END IF;
   IF current_setting('plllvm.expr_jit', true) IS NOT NULL THEN

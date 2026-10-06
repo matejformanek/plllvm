@@ -85,6 +85,7 @@ extern void plllvm_notice(const char *msg);
 pg_noreturn extern void plllvm_int_overflow(void);
 pg_noreturn extern void plllvm_bigint_overflow(void);
 pg_noreturn extern void plllvm_div_zero(void);
+pg_noreturn extern void plllvm_sqrt_negative(void);
 extern Datum plllvm_keep(Datum value);
 extern void plllvm_scratch_reset(void);
 extern Datum plllvm_rt_site_call(plllvm_site *site, NullableDatum *args,

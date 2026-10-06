@@ -1,0 +1,361 @@
+--
+-- expr_bool: AND, OR, NOT, NULL and boolean tests, CASE, COALESCE, NULLIF,
+-- abs(), sqrt() and the casts from float8 under plllvm.expr_jit
+--
+-- The expected output is stock PL/pgSQL's, and make installcheck-expr
+-- compares every variant against it; the plllvm check runs only where
+-- plllvm is loaded, and prints nothing.  Each case runs three times in one
+-- ExprState, the edge values third (after the group's harmless values,
+-- where it has them).  A result is the value, "N" for NULL, "E" and the
+-- SQLSTATE for an error, or "B" for an error at a harmless evaluation,
+-- which must never appear.  An argument the interpreter skips must not
+-- raise an error here either.
+--
+-- the groups: parameter types, harmless values (NULL: the edge values all
+-- three times)
+CREATE TABLE xb_groups (grp text PRIMARY KEY, ta text, tb text,
+                        ha text, hb text);
+INSERT INTO xb_groups VALUES
+  ('bool', 'bool', 'bool', NULL, NULL),
+  ('int', 'int4', 'int4', '1', '1'),
+  ('mixed', 'int8', 'int4', '1', '1'),
+  ('float', 'float8', 'float8', '1', '1');
+-- the edge values of each group
+CREATE TABLE xb_values (id serial, grp text, a text, b text);
+INSERT INTO xb_values (grp, a, b) VALUES
+  ('bool', 'true', 'true'), ('bool', 'true', 'false'),
+  ('bool', 'true', NULL), ('bool', 'false', 'true'),
+  ('bool', 'false', 'false'), ('bool', 'false', NULL),
+  ('bool', NULL, 'true'), ('bool', NULL, 'false'), ('bool', NULL, NULL),
+  ('int', '0', '0'), ('int', '1', '0'), ('int', '-1', '0'),
+  ('int', '3', '2'), ('int', '-4', '2'), ('int', '10', '3'),
+  ('int', NULL, '0'), ('int', '0', NULL), ('int', NULL, NULL),
+  ('int', '-2147483648', '1'), ('int', '2147483647', '-1'),
+  ('mixed', '1', '1'), ('mixed', '3000000000', '1'), ('mixed', '2', '2'),
+  ('mixed', '-3', '0'), ('mixed', NULL, '5'), ('mixed', '5', NULL),
+  ('mixed', NULL, NULL), ('mixed', '-9223372036854775808', '0'),
+  ('float', '4', '2'), ('float', '2', '0'), ('float', '0', '0'),
+  ('float', '-0', '-0'), ('float', '-1', '1'), ('float', '1e-320', '0'),
+  ('float', 'Infinity', '1'), ('float', '-Infinity', '1'),
+  ('float', 'NaN', 'NaN'), ('float', '0.5', NULL), ('float', NULL, '0.5'),
+  ('float', NULL, NULL), ('float', '2.5', '0.5'), ('float', '3.5', '0'),
+  ('float', '-2.5', '0'), ('float', '2147483647.4', '0'),
+  ('float', '2147483647.5', '0'), ('float', '-2147483648.5', '0'),
+  ('float', '-2147483649', '0'), ('float', '-9223372036854775808', '0'),
+  ('float', '9223372036854775807', '0'), ('float', '1e19', '0');
+-- the cases: an expression of a and b, of type tr
+CREATE TABLE xb_cases (id serial, grp text, expr text, tr text);
+INSERT INTO xb_cases (grp, expr, tr) VALUES
+  ('bool', 'a AND b', 'bool'),
+  ('bool', 'a OR b', 'bool'),
+  ('bool', 'NOT a', 'bool'),
+  ('bool', 'NOT (a AND b)', 'bool'),
+  ('bool', 'a AND NOT b AND a IS NOT NULL', 'bool'),
+  ('bool', 'a OR NOT b OR b IS NULL', 'bool'),
+  ('bool', '(a OR b) AND (a = b)', 'bool'),
+  ('bool', 'a IS TRUE', 'bool'),
+  ('bool', 'a IS NOT TRUE', 'bool'),
+  ('bool', 'a IS FALSE', 'bool'),
+  ('bool', 'a IS NOT FALSE', 'bool'),
+  ('bool', 'a IS UNKNOWN', 'bool'),
+  ('bool', 'a IS NOT UNKNOWN', 'bool'),
+  ('bool', 'a IS NULL', 'bool'),
+  ('bool', '(a AND b) IS NOT NULL', 'bool'),
+  ('bool', 'coalesce(a, b)', 'bool'),
+  ('bool', 'nullif(a, b)', 'bool'),
+  ('bool', 'CASE a WHEN b THEN 1 ELSE 0 END', 'int4'),
+  ('bool', 'CASE WHEN a THEN 1 WHEN b THEN 2 END', 'int4'),
+  ('int', 'a <> 0 AND 10 / a > 1', 'bool'),
+  ('int', 'a = 0 OR 10 / a > 1', 'bool'),
+  ('int', 'b = 0 OR a / b > 1', 'bool'),
+  ('int', 'a > 0 AND b > 0 AND a / b > 1', 'bool'),
+  ('int', 'a IS NULL OR a / b = 1', 'bool'),
+  ('int', 'CASE WHEN a = 0 THEN 0 ELSE 10 / a END', 'int4'),
+  ('int', 'CASE WHEN a > 0 THEN a WHEN a < 0 THEN 10 / b ELSE a / b END',
+   'int4'),
+  ('int', 'CASE WHEN a > 0 THEN a * 2 END', 'int4'),
+  ('int', 'CASE a WHEN 1 THEN 10 WHEN 2 THEN 20 ELSE 0 END', 'int4'),
+  ('int', 'CASE a WHEN 0 THEN 0 WHEN 10 / a THEN 1 ELSE 2 END', 'int4'),
+  ('int', 'CASE a WHEN 1 THEN CASE b WHEN 1 THEN 11 ELSE 10 END '
+          'ELSE CASE WHEN b = 1 THEN 1 ELSE 0 END END', 'int4'),
+  ('int', 'CASE a + 1 WHEN b THEN a / b WHEN 0 THEN -1 END', 'int4'),
+  ('int', 'coalesce(a, b)', 'int4'),
+  ('int', 'coalesce(a, b, 7)', 'int4'),
+  ('int', 'coalesce(a, 10 / b)', 'int4'),
+  ('int', 'coalesce(nullif(a, 0), 1)', 'int4'),
+  ('int', 'nullif(a, b)', 'int4'),
+  ('int', 'nullif(a, 10 / b)', 'int4'),
+  ('int', 'a IS NULL', 'bool'),
+  ('int', '(a + b) IS NOT NULL', 'bool'),
+  ('int', '(a / b) IS NULL', 'bool'),
+  ('int', 'abs(a)', 'int4'),
+  ('int', '@ b', 'int4'),
+  ('int', 'abs(a - b)', 'int4'),
+  ('mixed', 'CASE a WHEN 1 THEN 10 WHEN 3000000000 THEN 30 END', 'int4'),
+  ('mixed', 'CASE a WHEN b THEN 1 ELSE 0 END', 'int4'),
+  ('mixed', 'nullif(a, b)', 'int8'),
+  ('mixed', 'coalesce(a, b)', 'int8'),
+  ('mixed', 'abs(a)', 'int8'),
+  ('mixed', 'a IS NULL AND b IS NULL', 'bool'),
+  ('mixed', 'a > b OR a / b > 0', 'bool'),
+  ('float', 'sqrt(a)', 'float8'),
+  ('float', '|/ a', 'float8'),
+  ('float', 'dsqrt(a)', 'float8'),
+  ('float', 'sqrt(a) * b', 'float8'),
+  ('float', 'abs(a)', 'float8'),
+  ('float', '@ a', 'float8'),
+  ('float', 'a::int4', 'int4'),
+  ('float', 'int4(a)', 'int4'),
+  ('float', 'a::int8', 'int8'),
+  ('float', '(a::int8 + 1)::float8', 'float8'),
+  ('float', 'nullif(a, b)', 'float8'),
+  ('float', 'coalesce(a, b)', 'float8'),
+  ('float', 'CASE a WHEN 0.5 THEN 1 ELSE 0 END', 'int4'),
+  ('float', 'a > 0 AND sqrt(a) > b', 'bool'),
+  ('float', 'a < 0 OR sqrt(a) > b', 'bool'),
+  ('float', 'CASE WHEN a >= 0 THEN sqrt(a) ELSE -sqrt(-a) END', 'float8'),
+  ('float', 'a IS NOT NULL AND b IS NULL', 'bool');
+-- one function per case: xb_<id>(a0, b0)
+DO $do$
+DECLARE
+  c record;
+BEGIN
+  FOR c IN
+    SELECT x.id, x.expr, x.tr, g.ta, g.tb, g.ha, g.hb
+      FROM xb_cases x JOIN xb_groups g USING (grp)
+  LOOP
+    EXECUTE format($f$
+CREATE FUNCTION xb_%1$s(a0 %2$s, b0 %3$s) RETURNS text
+LANGUAGE plpgsql AS $$
+DECLARE
+  a %2$s;
+  b %3$s;
+  n int;
+  r %4$s;
+BEGIN
+  FOR k IN 1..3 LOOP
+    n := k;
+    %5$s
+    r := %6$s;
+  END LOOP;
+  RETURN coalesce(r::text, 'N');
+EXCEPTION WHEN OTHERS THEN
+  RETURN CASE WHEN n < 3 THEN 'B' ELSE 'E' || SQLSTATE END;
+END
+$$$f$, c.id, c.ta, c.tb, c.tr,
+      CASE WHEN c.ha IS NULL THEN 'a := a0; b := b0;'
+           ELSE format('a := CASE k WHEN 3 THEN a0 ELSE %s END; '
+                       'b := CASE k WHEN 3 THEN b0 ELSE %s END;',
+                       c.ha, c.hb)
+      END,
+      c.expr);
+  END LOOP;
+END
+$do$;
+-- every case on every value of its group, one transaction each
+CREATE TABLE xb_res (case_id int, value_id int, r text);
+CREATE PROCEDURE xb_run()
+LANGUAGE plpgsql AS $$
+DECLARE
+  c record;
+  r text;
+BEGIN
+  FOR c IN
+    SELECT x.id AS case_id, v.id AS value_id, v.a, v.b, g.ta, g.tb
+      FROM xb_cases x JOIN xb_values v USING (grp) JOIN xb_groups g USING (grp)
+     ORDER BY x.id, v.id
+  LOOP
+    EXECUTE format('SELECT xb_%s(%L::%s, %L::%s)',
+                   c.case_id, c.a, c.ta, c.b, c.tb) INTO r;
+    INSERT INTO xb_res VALUES (c.case_id, c.value_id, r);
+    COMMIT;
+  END LOOP;
+END
+$$;
+-- with plllvm loaded, what it installed before the run
+DO $$
+BEGIN
+  IF current_setting('plllvm.expr_jit', true) IS NOT NULL THEN
+    EXECUTE 'CREATE TEMP TABLE xb_before AS
+               SELECT installed FROM plllvm_expr_stats()';
+  END IF;
+END
+$$;
+CALL xb_run();
+-- with plllvm.expr_jit on, every case got code for every value, and so did
+-- the CASEs that pick the harmless values
+DO $$
+DECLARE
+  n int8;
+  want int8;
+BEGIN
+  IF current_setting('plllvm.expr_jit', true)::bool THEN
+    SELECT sum(CASE WHEN g.ha IS NULL THEN 1 ELSE 3 END) INTO want
+      FROM xb_cases x JOIN xb_values v USING (grp) JOIN xb_groups g USING (grp);
+    EXECUTE 'SELECT s.installed - b.installed
+               FROM plllvm_expr_stats() s, xb_before b' INTO n;
+    IF n <> want THEN
+      RAISE EXCEPTION '% expressions installed, not %', n, want;
+    END IF;
+  END IF;
+  IF current_setting('plllvm.expr_jit', true) IS NOT NULL THEN
+    EXECUTE 'DROP TABLE xb_before';
+  END IF;
+END
+$$;
+-- the values of each group, then each case's results in that order
+\a
+SELECT grp, string_agg(coalesce(a, 'N') || ',' || coalesce(b, 'N'), ' '
+                       ORDER BY id) AS "values"
+  FROM xb_values GROUP BY grp ORDER BY grp;
+grp|values
+bool|true,true true,false true,N false,true false,false false,N N,true N,false N,N
+float|4,2 2,0 0,0 -0,-0 -1,1 1e-320,0 Infinity,1 -Infinity,1 NaN,NaN 0.5,N N,0.5 N,N 2.5,0.5 3.5,0 -2.5,0 2147483647.4,0 2147483647.5,0 -2147483648.5,0 -2147483649,0 -9223372036854775808,0 9223372036854775807,0 1e19,0
+int|0,0 1,0 -1,0 3,2 -4,2 10,3 N,0 0,N N,N -2147483648,1 2147483647,-1
+mixed|1,1 3000000000,1 2,2 -3,0 N,5 5,N N,N -9223372036854775808,0
+(4 rows)
+SELECT x.grp, x.expr, string_agg(r.r, ' ' ORDER BY r.value_id) AS results
+  FROM xb_cases x JOIN xb_res r ON r.case_id = x.id
+ GROUP BY x.id, x.grp, x.expr ORDER BY x.id;
+grp|expr|results
+bool|a AND b|true false N false false false N false N
+bool|a OR b|true true true true false N true N N
+bool|NOT a|false false false true true true N N N
+bool|NOT (a AND b)|false true N true true true N true N
+bool|a AND NOT b AND a IS NOT NULL|false true N false false false false false false
+bool|a OR NOT b OR b IS NULL|true true true false true true N true true
+bool|(a OR b) AND (a = b)|true false N false false N N N N
+bool|a IS TRUE|true true true false false false false false false
+bool|a IS NOT TRUE|false false false true true true true true true
+bool|a IS FALSE|false false false true true true false false false
+bool|a IS NOT FALSE|true true true false false false true true true
+bool|a IS UNKNOWN|false false false false false false true true true
+bool|a IS NOT UNKNOWN|true true true true true true false false false
+bool|a IS NULL|false false false false false false true true true
+bool|(a AND b) IS NOT NULL|true true false true true true false true false
+bool|coalesce(a, b)|true true true false false false true false N
+bool|nullif(a, b)|N true true false N false N N N
+bool|CASE a WHEN b THEN 1 ELSE 0 END|1 0 0 0 1 0 0 0 0
+bool|CASE WHEN a THEN 1 WHEN b THEN 2 END|1 1 1 2 N N 2 N N
+int|a <> 0 AND 10 / a > 1|false true false true false false N false N false false
+int|a = 0 OR 10 / a > 1|true true false true false false N true N false false
+int|b = 0 OR a / b > 1|true true true false false true true N N false false
+int|a > 0 AND b > 0 AND a / b > 1|false false false false false true false false N false false
+int|a IS NULL OR a / b = 1|E22012 E22012 E22012 true false false true N true false false
+int|CASE WHEN a = 0 THEN 0 ELSE 10 / a END|0 10 -10 3 -2 1 N 0 N 0 0
+int|CASE WHEN a > 0 THEN a WHEN a < 0 THEN 10 / b ELSE a / b END|E22012 1 E22012 3 5 10 N N N 10 2147483647
+int|CASE WHEN a > 0 THEN a * 2 END|N 2 N 6 N 20 N N N N E22003
+int|CASE a WHEN 1 THEN 10 WHEN 2 THEN 20 ELSE 0 END|0 10 0 0 0 0 0 0 0 0 0
+int|CASE a WHEN 0 THEN 0 WHEN 10 / a THEN 1 ELSE 2 END|0 2 2 1 2 2 2 0 2 2 2
+int|CASE a WHEN 1 THEN CASE b WHEN 1 THEN 11 ELSE 10 END ELSE CASE WHEN b = 1 THEN 1 ELSE 0 END END|0 10 0 0 0 0 0 0 0 1 0
+int|CASE a + 1 WHEN b THEN a / b WHEN 0 THEN -1 END|N N E22012 N N N N N N N E22003
+int|coalesce(a, b)|0 1 -1 3 -4 10 0 0 N -2147483648 2147483647
+int|coalesce(a, b, 7)|0 1 -1 3 -4 10 0 0 7 -2147483648 2147483647
+int|coalesce(a, 10 / b)|0 1 -1 3 -4 10 E22012 0 N -2147483648 2147483647
+int|coalesce(nullif(a, 0), 1)|1 1 -1 3 -4 10 1 1 1 -2147483648 2147483647
+int|nullif(a, b)|N 1 -1 3 -4 10 N 0 N -2147483648 2147483647
+int|nullif(a, 10 / b)|E22012 E22012 E22012 3 -4 10 E22012 0 N -2147483648 2147483647
+int|a IS NULL|false false false false false false true false true false false
+int|(a + b) IS NOT NULL|true true true true true true false false false true true
+int|(a / b) IS NULL|E22012 E22012 E22012 false false false true true true false false
+int|abs(a)|0 1 1 3 4 10 N 0 N E22003 2147483647
+int|@ b|0 0 0 2 2 3 0 N N 1 1
+int|abs(a - b)|0 1 1 1 6 7 N N N E22003 E22003
+mixed|CASE a WHEN 1 THEN 10 WHEN 3000000000 THEN 30 END|10 30 N N N N N N
+mixed|CASE a WHEN b THEN 1 ELSE 0 END|1 0 1 0 0 0 0 0
+mixed|nullif(a, b)|N 3000000000 N -3 N 5 N -9223372036854775808
+mixed|coalesce(a, b)|1 3000000000 2 -3 5 5 N -9223372036854775808
+mixed|abs(a)|1 3000000000 2 3 N 5 N E22003
+mixed|a IS NULL AND b IS NULL|false false false false false false true false
+mixed|a > b OR a / b > 0|true true true E22012 N N N E22012
+float|sqrt(a)|2 1.4142135623730951 0 -0 E2201F 9.99994433575849e-161 Infinity E2201F NaN 0.7071067811865476 N N 1.5811388300841898 1.8708286933869707 E2201F 46340.95000536782 46340.95000644678 E2201F E2201F E2201F 3037000499.97605 3162277660.1683793
+float||/ a|2 1.4142135623730951 0 -0 E2201F 9.99994433575849e-161 Infinity E2201F NaN 0.7071067811865476 N N 1.5811388300841898 1.8708286933869707 E2201F 46340.95000536782 46340.95000644678 E2201F E2201F E2201F 3037000499.97605 3162277660.1683793
+float|dsqrt(a)|2 1.4142135623730951 0 -0 E2201F 9.99994433575849e-161 Infinity E2201F NaN 0.7071067811865476 N N 1.5811388300841898 1.8708286933869707 E2201F 46340.95000536782 46340.95000644678 E2201F E2201F E2201F 3037000499.97605 3162277660.1683793
+float|sqrt(a) * b|4 0 0 0 E2201F 0 Infinity E2201F NaN N N N 0.7905694150420949 0 E2201F 0 0 E2201F E2201F E2201F 0 0
+float|abs(a)|4 2 0 0 1 1e-320 Infinity Infinity NaN 0.5 N N 2.5 3.5 2.5 2147483647.4 2147483647.5 2147483648.5 2147483649 9.223372036854776e+18 9.223372036854776e+18 1e+19
+float|@ a|4 2 0 0 1 1e-320 Infinity Infinity NaN 0.5 N N 2.5 3.5 2.5 2147483647.4 2147483647.5 2147483648.5 2147483649 9.223372036854776e+18 9.223372036854776e+18 1e+19
+float|a::int4|4 2 0 0 -1 0 E22003 E22003 E22003 0 N N 2 4 -2 2147483647 E22003 -2147483648 E22003 E22003 E22003 E22003
+float|int4(a)|4 2 0 0 -1 0 E22003 E22003 E22003 0 N N 2 4 -2 2147483647 E22003 -2147483648 E22003 E22003 E22003 E22003
+float|a::int8|4 2 0 0 -1 0 E22003 E22003 E22003 0 N N 2 4 -2 2147483647 2147483648 -2147483648 -2147483649 -9223372036854775808 E22003 E22003
+float|(a::int8 + 1)::float8|5 3 1 1 0 1 E22003 E22003 E22003 1 N N 3 5 -1 2147483648 2147483649 -2147483647 -2147483648 -9.223372036854776e+18 E22003 E22003
+float|nullif(a, b)|4 2 N N -1 1e-320 Infinity -Infinity N 0.5 N N 2.5 3.5 -2.5 2147483647.4 2147483647.5 -2147483648.5 -2147483649 -9.223372036854776e+18 9.223372036854776e+18 1e+19
+float|coalesce(a, b)|4 2 0 -0 -1 1e-320 Infinity -Infinity NaN 0.5 0.5 N 2.5 3.5 -2.5 2147483647.4 2147483647.5 -2147483648.5 -2147483649 -9.223372036854776e+18 9.223372036854776e+18 1e+19
+float|CASE a WHEN 0.5 THEN 1 ELSE 0 END|0 0 0 0 0 0 0 0 0 1 0 0 0 0 0 0 0 0 0 0 0 0
+float|a > 0 AND sqrt(a) > b|false true false false false true true false false N N N true true false true true false false false true true
+float|a < 0 OR sqrt(a) > b|false true false false true true true true false N N N true true true true true true true true true true
+float|CASE WHEN a >= 0 THEN sqrt(a) ELSE -sqrt(-a) END|2 1.4142135623730951 0 -0 -1 9.99994433575849e-161 Infinity -Infinity NaN 0.7071067811865476 N N 1.5811388300841898 1.8708286933869707 -1.5811388300841898 46340.95000536782 46340.95000644678 -46340.95001723638 -46340.95002263117 -3037000499.97605 3037000499.97605 3162277660.1683793
+float|a IS NOT NULL AND b IS NULL|false false false false false false false false false true false false false false false false false false false false false false
+(67 rows)
+\a
+-- errors at the third evaluation: message and CONTEXT
+CREATE FUNCTION xb_err(e float8, x int, c int8, p bool) RETURNS bool
+LANGUAGE plpgsql AS $$
+DECLARE
+  f float8;
+  y int;
+  d int8;
+  q bool;
+  rf float8;
+  ri int;
+  rl int8;
+  rb bool;
+BEGIN
+  FOR k IN 1..3 LOOP
+    f := CASE k WHEN 3 THEN e ELSE 1 END;
+    y := CASE k WHEN 3 THEN x ELSE 1 END;
+    d := CASE k WHEN 3 THEN c ELSE 1 END;
+    q := CASE k WHEN 3 THEN p ELSE true END;
+    rf := sqrt(f);
+    ri := abs(y);
+    rl := abs(d);
+    rl := f::int8;
+    ri := f::int4;
+    rb := q AND 10 / y > 1;
+  END LOOP;
+  RETURN rb;
+END
+$$;
+SELECT xb_err(1, 1, 1, NULL);
+ xb_err 
+--------
+ 
+(1 row)
+
+SELECT xb_err(-1, 1, 1, true);
+ERROR:  cannot take square root of a negative number
+CONTEXT:  PL/pgSQL function xb_err(double precision,integer,bigint,boolean) line 17 at assignment
+SELECT xb_err(1, -2147483648, 1, true);
+ERROR:  integer out of range
+CONTEXT:  PL/pgSQL function xb_err(double precision,integer,bigint,boolean) line 18 at assignment
+SELECT xb_err(1, 1, -9223372036854775808, true);
+ERROR:  bigint out of range
+CONTEXT:  PL/pgSQL function xb_err(double precision,integer,bigint,boolean) line 19 at assignment
+SELECT xb_err(1e19, 1, 1, true);
+ERROR:  bigint out of range
+CONTEXT:  PL/pgSQL function xb_err(double precision,integer,bigint,boolean) line 20 at assignment
+SELECT xb_err(2147483647.5, 1, 1, true);
+ERROR:  integer out of range
+CONTEXT:  PL/pgSQL function xb_err(double precision,integer,bigint,boolean) line 21 at assignment
+SELECT xb_err(1, 0, 1, false);
+ xb_err 
+--------
+ f
+(1 row)
+
+SELECT xb_err(1, 0, 1, NULL);
+ERROR:  division by zero
+CONTEXT:  PL/pgSQL function xb_err(double precision,integer,bigint,boolean) line 22 at assignment
+DO $$
+DECLARE
+  c record;
+BEGIN
+  FOR c IN SELECT id, g.ta, g.tb
+             FROM xb_cases x JOIN xb_groups g USING (grp)
+  LOOP
+    EXECUTE format('DROP FUNCTION xb_%s(%s, %s)', c.id, c.ta, c.tb);
+  END LOOP;
+END
+$$;
+DROP FUNCTION xb_err(float8, int, int8, bool);
+DROP PROCEDURE xb_run();
+DROP TABLE xb_res, xb_cases, xb_values, xb_groups;

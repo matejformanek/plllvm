@@ -111,6 +111,12 @@ extern float8 plllvm_float8_mi(float8 val1, float8 val2);
 extern float8 plllvm_float8_mul(float8 val1, float8 val2);
 extern float8 plllvm_float8_div(float8 val1, float8 val2);
 extern float8 plllvm_float8_um(float8 val);
+extern int32 plllvm_int4_abs(int32 val);
+extern int64 plllvm_int8_abs(int64 val);
+extern float8 plllvm_float8_abs(float8 val);
+extern float8 plllvm_float8_sqrt(float8 val);
+extern int32 plllvm_int4_from_float8(float8 val);
+extern int64 plllvm_int8_from_float8(float8 val);
 extern bool plllvm_float8_eq(float8 val1, float8 val2);
 extern bool plllvm_float8_ne(float8 val1, float8 val2);
 extern bool plllvm_float8_lt(float8 val1, float8 val2);
@@ -493,6 +499,42 @@ plllvm_float8_um(float8 val)
 	return float8_um(val);
 }
 
+pg_always_inline int32
+plllvm_int4_abs(int32 val)
+{
+	return int4_abs(val);
+}
+
+pg_always_inline int64
+plllvm_int8_abs(int64 val)
+{
+	return int8_abs(val);
+}
+
+pg_always_inline float8
+plllvm_float8_abs(float8 val)
+{
+	return float8_abs(val);
+}
+
+pg_always_inline float8
+plllvm_float8_sqrt(float8 val)
+{
+	return float8_sqrt(val);
+}
+
+pg_always_inline int32
+plllvm_int4_from_float8(float8 val)
+{
+	return int4_from_float8(val);
+}
+
+pg_always_inline int64
+plllvm_int8_from_float8(float8 val)
+{
+	return int8_from_float8(val);
+}
+
 pg_always_inline bool
 plllvm_float8_eq(float8 val1, float8 val2)
 {
@@ -540,6 +582,7 @@ void	   *referenced_functions[] =
 	plllvm_int_overflow,
 	plllvm_bigint_overflow,
 	plllvm_div_zero,
+	plllvm_sqrt_negative,
 	plllvm_keep,
 	plllvm_scratch_reset,
 	plllvm_array_arg,

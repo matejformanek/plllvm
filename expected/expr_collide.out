@@ -707,3 +707,224 @@ END
 $$;
 DROP FUNCTION ec_k1a(int), ec_k1b(int);
 DROP OPERATOR ### (int, int);
+--
+-- Trees whose nodes differ only in their kind (IS NULL or IS NOT NULL, AND
+-- or OR, ...) or in their number of arguments, which the key must tell
+-- apart; each pair runs as above
+--
+CREATE TABLE ec_t1 (pair text, params text, rt text, a text, b text);
+INSERT INTO ec_t1 VALUES
+  ('t1', 'x int', 'bool', 'x IS NULL', 'x IS NOT NULL'),
+  ('t2', 'p bool, q bool', 'bool', 'p AND q', 'p OR q'),
+  ('t3', 'p bool', 'bool', 'p IS TRUE', 'p IS NOT FALSE'),
+  ('t4', 'p bool', 'bool', 'NOT p', 'p IS NOT TRUE'),
+  ('t5', 'x int, y int, z int, w int', 'int',
+   'coalesce(coalesce(x, y), z, w)', 'coalesce(coalesce(x, y, z), w)'),
+  ('t6', 'p bool, q bool, r bool, s bool', 'bool',
+   '(p OR q) AND r AND s', '(p OR q OR r) AND s'),
+  ('t7', 'x int', 'int',
+   'CASE WHEN x > 0 THEN 1 END', 'CASE WHEN x > 0 THEN 1 ELSE 0 END'),
+  ('t8', 'x int', 'int',
+   'CASE x WHEN 1 THEN 10 ELSE 0 END', 'CASE WHEN x = 1 THEN 10 ELSE 0 END');
+CREATE TABLE ec_t1_args (id serial, pair text, args text);
+INSERT INTO ec_t1_args (pair, args) VALUES
+  ('t1', '5'), ('t1', 'NULL'),
+  ('t2', 'true, false'), ('t2', 'NULL, true'), ('t2', 'false, NULL'),
+  ('t3', 'true'), ('t3', 'NULL'), ('t3', 'false'),
+  ('t4', 'true'), ('t4', 'NULL'),
+  ('t5', 'NULL, NULL, 3, 4'), ('t5', 'NULL, 2, 3, 4'),
+  ('t5', 'NULL, NULL, NULL, 4'),
+  ('t6', 'false, true, true, true'), ('t6', 'false, false, true, false'),
+  ('t6', 'NULL, true, true, true'),
+  ('t7', '5'), ('t7', '-5'), ('t7', 'NULL'),
+  ('t8', '1'), ('t8', '2'), ('t8', 'NULL');
+DO $do$
+DECLARE
+  t record;
+BEGIN
+  FOR t IN SELECT pair, params, rt, 'a' AS v, a AS expr FROM ec_t1
+           UNION ALL
+           SELECT pair, params, rt, 'b', b FROM ec_t1
+  LOOP
+    EXECUTE format($f$
+CREATE FUNCTION ec_%s%s(%s) RETURNS %s
+LANGUAGE plpgsql AS $$
+DECLARE
+  res %s;
+BEGIN
+  FOR k IN 1..3 LOOP
+    res := %s;
+  END LOOP;
+  RETURN res;
+END
+$$$f$, t.pair, t.v, t.params, t.rt, t.rt, t.expr);
+  END LOOP;
+END
+$do$;
+CREATE FUNCTION ec_call(fn text, args text) RETURNS text
+LANGUAGE plpgsql AS $$
+DECLARE
+  r text;
+BEGIN
+  EXECUTE format('SELECT %s(%s)::text', fn, args) INTO r;
+  RETURN coalesce(r, 'N');
+END
+$$;
+DO $$
+BEGIN
+  IF current_setting('plllvm.expr_jit', true) IS NOT NULL THEN
+    EXECUTE 'CREATE TEMP TABLE ec_before AS
+               SELECT compiled, installed FROM plllvm_expr_stats()';
+  END IF;
+END
+$$;
+-- a first
+SELECT pair, args, ec_call('ec_' || pair || 'a', args) AS a,
+       ec_call('ec_' || pair || 'b', args) AS b
+  FROM ec_t1_args ORDER BY id;
+ pair |           args            |   a   |   b   
+------+---------------------------+-------+-------
+ t1   | 5                         | false | true
+ t1   | NULL                      | true  | false
+ t2   | true, false               | false | true
+ t2   | NULL, true                | N     | true
+ t2   | false, NULL               | false | N
+ t3   | true                      | true  | true
+ t3   | NULL                      | false | true
+ t3   | false                     | false | false
+ t4   | true                      | false | false
+ t4   | NULL                      | N     | true
+ t5   | NULL, NULL, 3, 4          | 3     | 3
+ t5   | NULL, 2, 3, 4             | 2     | 2
+ t5   | NULL, NULL, NULL, 4       | 4     | 4
+ t6   | false, true, true, true   | true  | true
+ t6   | false, false, true, false | false | false
+ t6   | NULL, true, true, true    | true  | true
+ t7   | 5                         | 1     | 1
+ t7   | -5                        | N     | 0
+ t7   | NULL                      | N     | 0
+ t8   | 1                         | 10    | 10
+ t8   | 2                         | 0     | 0
+ t8   | NULL                      | 0     | 0
+(22 rows)
+
+SELECT pair, args, ec_call('ec_' || pair || 'a', args) AS a,
+       ec_call('ec_' || pair || 'b', args) AS b
+  FROM ec_t1_args ORDER BY id;
+ pair |           args            |   a   |   b   
+------+---------------------------+-------+-------
+ t1   | 5                         | false | true
+ t1   | NULL                      | true  | false
+ t2   | true, false               | false | true
+ t2   | NULL, true                | N     | true
+ t2   | false, NULL               | false | N
+ t3   | true                      | true  | true
+ t3   | NULL                      | false | true
+ t3   | false                     | false | false
+ t4   | true                      | false | false
+ t4   | NULL                      | N     | true
+ t5   | NULL, NULL, 3, 4          | 3     | 3
+ t5   | NULL, 2, 3, 4             | 2     | 2
+ t5   | NULL, NULL, NULL, 4       | 4     | 4
+ t6   | false, true, true, true   | true  | true
+ t6   | false, false, true, false | false | false
+ t6   | NULL, true, true, true    | true  | true
+ t7   | 5                         | 1     | 1
+ t7   | -5                        | N     | 0
+ t7   | NULL                      | N     | 0
+ t8   | 1                         | 10    | 10
+ t8   | 2                         | 0     | 0
+ t8   | NULL                      | 0     | 0
+(22 rows)
+
+-- with plllvm.expr_jit on: one program per function, installed once per
+-- transaction
+DO $$
+DECLARE
+  c int8;
+  i int8;
+BEGIN
+  IF current_setting('plllvm.expr_jit', true)::bool THEN
+    EXECUTE 'SELECT s.compiled - b.compiled, s.installed - b.installed
+               FROM plllvm_expr_stats() s, ec_before b' INTO c, i;
+    IF c <> 16 OR i <> 32 THEN
+      RAISE EXCEPTION '% compiled and % installed, not 16 and 32', c, i;
+    END IF;
+  END IF;
+  IF current_setting('plllvm.expr_jit', true) IS NOT NULL THEN
+    EXECUTE 'DROP TABLE ec_before';
+  END IF;
+END
+$$;
+-- a fresh cache, b first
+\c
+SELECT pair, args, ec_call('ec_' || pair || 'b', args) AS b,
+       ec_call('ec_' || pair || 'a', args) AS a
+  FROM ec_t1_args ORDER BY id;
+ pair |           args            |   b   |   a   
+------+---------------------------+-------+-------
+ t1   | 5                         | true  | false
+ t1   | NULL                      | false | true
+ t2   | true, false               | true  | false
+ t2   | NULL, true                | true  | N
+ t2   | false, NULL               | N     | false
+ t3   | true                      | true  | true
+ t3   | NULL                      | true  | false
+ t3   | false                     | false | false
+ t4   | true                      | false | false
+ t4   | NULL                      | true  | N
+ t5   | NULL, NULL, 3, 4          | 3     | 3
+ t5   | NULL, 2, 3, 4             | 2     | 2
+ t5   | NULL, NULL, NULL, 4       | 4     | 4
+ t6   | false, true, true, true   | true  | true
+ t6   | false, false, true, false | false | false
+ t6   | NULL, true, true, true    | true  | true
+ t7   | 5                         | 1     | 1
+ t7   | -5                        | 0     | N
+ t7   | NULL                      | 0     | N
+ t8   | 1                         | 10    | 10
+ t8   | 2                         | 0     | 0
+ t8   | NULL                      | 0     | 0
+(22 rows)
+
+SELECT pair, args, ec_call('ec_' || pair || 'b', args) AS b,
+       ec_call('ec_' || pair || 'a', args) AS a
+  FROM ec_t1_args ORDER BY id;
+ pair |           args            |   b   |   a   
+------+---------------------------+-------+-------
+ t1   | 5                         | true  | false
+ t1   | NULL                      | false | true
+ t2   | true, false               | true  | false
+ t2   | NULL, true                | true  | N
+ t2   | false, NULL               | N     | false
+ t3   | true                      | true  | true
+ t3   | NULL                      | true  | false
+ t3   | false                     | false | false
+ t4   | true                      | false | false
+ t4   | NULL                      | true  | N
+ t5   | NULL, NULL, 3, 4          | 3     | 3
+ t5   | NULL, 2, 3, 4             | 2     | 2
+ t5   | NULL, NULL, NULL, 4       | 4     | 4
+ t6   | false, true, true, true   | true  | true
+ t6   | false, false, true, false | false | false
+ t6   | NULL, true, true, true    | true  | true
+ t7   | 5                         | 1     | 1
+ t7   | -5                        | 0     | N
+ t7   | NULL                      | 0     | N
+ t8   | 1                         | 10    | 10
+ t8   | 2                         | 0     | 0
+ t8   | NULL                      | 0     | 0
+(22 rows)
+
+DO $do$
+DECLARE
+  t record;
+BEGIN
+  FOR t IN SELECT pair, params FROM ec_t1 LOOP
+    EXECUTE format('DROP FUNCTION ec_%sa(%s), ec_%sb(%s)',
+                   t.pair, t.params, t.pair, t.params);
+  END LOOP;
+END
+$do$;
+DROP FUNCTION ec_call(text, text);
+DROP TABLE ec_t1, ec_t1_args;
