@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="docs/images/plllvm.jpeg" alt="PL/LLVM" width="480">
+  <img src="docs/images/plllvm.jpeg" alt="PL/LLVM" width="360">
 </p>
 
 # PL/LLVM
@@ -323,3 +323,10 @@ macOS 26 arm64 (`PG_PIN`). The server must be built with LLVM.
 
 PostgreSQL Licence, see `LICENSE`. The kernels derived from the Computer
 Language Benchmarks Game are under `LICENSES/BENCHMARKS-GAME-BSD-3.md`.
+
+## Trademarks
+
+PL/LLVM is an independent PostgreSQL extension. It is not affiliated with,
+endorsed by or sponsored by the PostgreSQL Community Association or the LLVM
+Foundation. Postgres and PostgreSQL are trademarks of the PostgreSQL
+Community Association of Canada. LLVM is a trademark of the LLVM Foundation.
