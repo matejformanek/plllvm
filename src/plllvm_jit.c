@@ -373,6 +373,15 @@ plllvm_jit_session_ensure(void)
 }
 
 /*
+ * Is the session set up; false also after a failed attempt
+ */
+bool
+plllvm_jit_session_ready(void)
+{
+	return session.initialized;
+}
+
+/*
  * Fill *info with palloc'd copies, setting the session up if needed
  */
 void

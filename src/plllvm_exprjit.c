@@ -28,14 +28,15 @@
  *    toward the cap.  A build refused by plllvm.max_ir_instructions is not
  *    kept, as that limit is not in the key.
  *
- * 4) A build that raises an ERROR, as the LLVM session setup does without
- *    a usable plllvm_types.bc, would raise it again in every later
- *    ExprState and make PL/pgSQL unusable.  After one, the session builds
- *    nothing more until plllvm.types_bc_path is set.
- *
  * 3) Under plllvm.expr_eager the program also counts its evaluations
  *    (compiled_evals of plllvm_expr_stats()), so that the tests can see
  *    that compiled code ran.  The eager flag is in the key.
+ *
+ * 4) The LLVM session setup raises an ERROR without a usable
+ *    plllvm_types.bc, and would raise it again in every later ExprState,
+ *    which would make PL/pgSQL unusable.  After a build that failed so,
+ *    the session builds nothing more until plllvm.types_bc_path is set.
+ *    Other ERRORs of a build are only counted.
  *
  */
 #include "postgres.h"
@@ -76,7 +77,7 @@ int64		plllvm_expr_capped = 0;
 int64		plllvm_expr_programs = 0;
 int64		plllvm_expr_compiled_evals = 0;
 
-/* true, when a build raised an ERROR (note 4) */
+/* true, when the LLVM session setup failed in a build (note 4) */
 bool		plllvm_expr_build_broken = false;
 
 static MemoryContext expr_cxt = NULL;
@@ -91,7 +92,7 @@ static const char *datum_box(plllvm_ir *ir, const plllvm_value *val);
  *
  * Called at its second evaluation (or the first, under plllvm.expr_eager),
  * with evalfunc still the interpreter's.  Anything that cannot be compiled
- * stays interpreted.  Only a build may raise an ERROR, once (note 4).
+ * stays interpreted.  Only a build may raise an ERROR (note 4).
  */
 void
 plllvm_exprjit_install(ExprState *state, plllvm_expr_env *env)
@@ -184,7 +185,8 @@ plllvm_exprjit_install(ExprState *state, plllvm_expr_env *env)
 	}
 	PG_CATCH();
 	{
-		plllvm_expr_build_broken = true;
+		if (!plllvm_jit_session_ready())
+			plllvm_expr_build_broken = true;
 		plllvm_expr_failures++;
 		PG_RE_THROW();
 	}

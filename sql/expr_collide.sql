@@ -4,11 +4,11 @@
 -- get its own program
 --
 -- The expected output is stock PL/pgSQL's, and make installcheck-expr
--- compares every variant against it; the one plllvm query is true in
--- every variant.  Every
--- function evaluates its expression three times per call.  Each list runs
--- twice (the second time from the cache), then again in a new session with
--- the other function of each pair first.
+-- compares every variant against it; the plllvm check runs only where
+-- plllvm is loaded, and prints nothing.  Every function evaluates its
+-- expression three times per call.  Each list runs twice (the second time
+-- from the cache), then again in a new session with the other function of
+-- each pair first.
 --
 
 -- Consts that differ only in value
@@ -541,9 +541,9 @@ DROP FUNCTION ec_p1a(int),
   ec_p9a(int),
   ec_p9b(int);
 
--- The same key, trees not equal(): an operator over int4pl other than +
--- differs from x + 12345 only in its OID, which the key leaves out.  The
--- second function must get its own program, not the first one's.
+-- Trees that differ only in what the key leaves out: an operator over
+-- int4pl other than + differs from x + 12345 only in its OID.  Each
+-- function must get its own program, not reuse the other's.
 CREATE OPERATOR ### (LEFTARG = int, RIGHTARG = int, FUNCTION = int4pl);
 CREATE FUNCTION ec_k1a(x int) RETURNS int
 LANGUAGE plpgsql AS $$
@@ -568,19 +568,36 @@ BEGIN
 END
 $$;
 
-CREATE TEMP TABLE ec_before AS
-  SELECT compiled, installed FROM plllvm_expr_stats();
+DO $$
+BEGIN
+  IF current_setting('plllvm.expr_jit', true) IS NOT NULL THEN
+    EXECUTE 'CREATE TEMP TABLE ec_before AS
+               SELECT compiled, installed FROM plllvm_expr_stats()';
+  END IF;
+END
+$$;
 SELECT ec_k1a(1);
 SELECT ec_k1b(2);
 SELECT ec_k1a(3);
 SELECT ec_k1b(4);
 
 -- with plllvm.expr_jit on: two programs, each taken again from the cache
-SELECT NOT coalesce(current_setting('plllvm.expr_jit', true), 'off')::bool
-       OR (s.compiled - b.compiled = 2 AND s.installed - b.installed = 4)
-         AS two_programs
-  FROM plllvm_expr_stats() s, ec_before b;
-
-DROP TABLE ec_before;
+DO $$
+DECLARE
+  c int8;
+  i int8;
+BEGIN
+  IF current_setting('plllvm.expr_jit', true)::bool THEN
+    EXECUTE 'SELECT s.compiled - b.compiled, s.installed - b.installed
+               FROM plllvm_expr_stats() s, ec_before b' INTO c, i;
+    IF c <> 2 OR i <> 4 THEN
+      RAISE EXCEPTION '% compiled and % installed, not 2 and 4', c, i;
+    END IF;
+  END IF;
+  IF current_setting('plllvm.expr_jit', true) IS NOT NULL THEN
+    EXECUTE 'DROP TABLE ec_before';
+  END IF;
+END
+$$;
 DROP FUNCTION ec_k1a(int), ec_k1b(int);
 DROP OPERATOR ### (int, int);
