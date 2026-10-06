@@ -124,3 +124,38 @@ RESET plllvm.expr_jit;
 SELECT state FROM plllvm_expr_stats();
 
 DROP FUNCTION ep_worker(int), ep_switch(), ep_fired(), ep_once(int), ep_loop(int);
+
+-- A build that raises an ERROR does so once: without a usable
+-- plllvm_types.bc, the session builds nothing more until the path is set.
+\c
+LOAD 'plllvm';
+SET plllvm.regress_test_mode = on;
+SET plllvm.types_bc_path = '/nonexistent/plllvm_types.bc';
+SET plllvm.expr_jit = on;
+
+CREATE FUNCTION ep_sum(n int) RETURNS int LANGUAGE plpgsql AS $$
+DECLARE
+  s int := 0;
+BEGIN
+  FOR i IN 1..n LOOP
+    s := s + i;
+  END LOOP;
+  RETURN s;
+END
+$$;
+
+DO $$
+BEGIN
+  PERFORM ep_sum(10);
+EXCEPTION WHEN OTHERS THEN
+  RAISE NOTICE 'first build: %', SQLSTATE;
+END
+$$;
+SELECT ep_sum(10);
+SELECT installed, failures FROM plllvm_expr_stats();
+
+RESET plllvm.types_bc_path;
+SELECT ep_sum(10);
+SELECT installed > 0 AS installed, failures FROM plllvm_expr_stats();
+
+DROP FUNCTION ep_sum(int);

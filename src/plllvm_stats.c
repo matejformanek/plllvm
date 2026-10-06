@@ -94,8 +94,8 @@ plllvm_code_cache(PG_FUNCTION_ARGS)
 
 	for (plllvm_jit_module *mod = plllvm_jit_modules(); mod; mod = mod->next)
 	{
-		Datum		values[18];
-		bool		nulls[18] = {0};
+		Datum		values[19];
+		bool		nulls[19] = {0};
 
 		if (OidIsValid(mod->owner_oid))
 			values[0] = ObjectIdGetDatum(mod->owner_oid);
@@ -128,6 +128,8 @@ plllvm_code_cache(PG_FUNCTION_ARGS)
 		values[15] = BoolGetDatum(mod->released);
 		values[16] = CStringGetTextDatum(psprintf("%p", mod->addr));
 		values[17] = BoolGetDatum(mod->needs_frame);
+		values[18] = CStringGetTextDatum(mod->kind == PLLLVM_JIT_EXPR ?
+										 "expr" : "function");
 
 		tuplestore_putvalues(rsinfo->setResult, rsinfo->setDesc, values, nulls);
 	}
@@ -329,8 +331,6 @@ plllvm_call_sites(PG_FUNCTION_ARGS)
 
 /*
  * Expression JIT in the PL/pgSQL functions of this backend
- *
- * Nothing is compiled yet, so only state, fired and declined move.
  */
 Datum
 plllvm_expr_stats(PG_FUNCTION_ARGS)
@@ -342,11 +342,15 @@ plllvm_expr_stats(PG_FUNCTION_ARGS)
 	if (get_call_result_type(fcinfo, NULL, &tupdesc) != TYPEFUNC_COMPOSITE)
 		elog(ERROR, "return type must be a row type");
 
-	for (int i = 0; i < lengthof(values); i++)
-		values[i] = Int64GetDatum(0);
 	values[0] = CStringGetTextDatum(plllvm_plpgsql_state());
 	values[1] = Int64GetDatum(plllvm_expr_fired);
+	values[2] = Int64GetDatum(plllvm_expr_compiled + plllvm_expr_hits);
+	values[3] = Int64GetDatum(plllvm_expr_compiled);
 	values[4] = Int64GetDatum(plllvm_expr_declined);
+	values[5] = Int64GetDatum(plllvm_expr_failures);
+	values[6] = Int64GetDatum(plllvm_expr_capped);
+	values[7] = Int64GetDatum(plllvm_expr_programs);
+	values[8] = Int64GetDatum(plllvm_expr_compiled_evals);
 
 	PG_RETURN_DATUM(HeapTupleGetDatum(heap_form_tuple(tupdesc, values, nulls)));
 }

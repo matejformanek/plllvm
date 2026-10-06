@@ -63,6 +63,8 @@ int			plllvm_debug_inject = PLLLVM_INJECT_NONE;
 bool		plllvm_auto_checks = true;
 bool		plllvm_expr_jit = false;
 bool		plllvm_expr_eager = false;
+int			plllvm_expr_opt_level = 2;
+int			plllvm_expr_max_programs = 1000;
 
 static const struct config_enum_entry debug_inject_options[] = {
 	{"none", PLLLVM_INJECT_NONE, false},
@@ -71,6 +73,7 @@ static const struct config_enum_entry debug_inject_options[] = {
 	{NULL, 0, false}
 };
 
+static void types_bc_path_assign(const char *newval, void *extra);
 static void call_end(plllvm_function *func, plllvm_frame *frame);
 static void exec_error_callback(void *arg);
 static void plllvm_xact_callback(XactEvent event, void *arg);
@@ -104,7 +107,7 @@ _PG_init(void)
 							   &plllvm_types_bc_path,
 							   "",
 							   PGC_SUSET, GUC_NOT_IN_SAMPLE,
-							   NULL, NULL, NULL);
+							   NULL, types_bc_path_assign, NULL);
 
 	DefineCustomIntVariable("plllvm.opt_level",
 							gettext_noop("Sets the LLVM optimization level of compiled functions."),
@@ -171,6 +174,22 @@ _PG_init(void)
 							 PGC_SUSET, GUC_NO_SHOW_ALL | GUC_NOT_IN_SAMPLE,
 							 NULL, NULL, NULL);
 
+	DefineCustomIntVariable("plllvm.expr_opt_level",
+							gettext_noop("Sets the LLVM optimization level of compiled PL/pgSQL expressions."),
+							NULL,
+							&plllvm_expr_opt_level,
+							2, 0, 3,
+							PGC_SUSET, 0,
+							NULL, NULL, NULL);
+
+	DefineCustomIntVariable("plllvm.expr_max_programs",
+							gettext_noop("Sets the maximum number of compiled PL/pgSQL expressions kept in a session."),
+							gettext_noop("They are never freed; beyond the limit, new expressions are interpreted."),
+							&plllvm_expr_max_programs,
+							1000, 1, 1000000,
+							PGC_SUSET, 0,
+							NULL, NULL, NULL);
+
 	plllvm_plpgsql_init();
 
 	MarkGUCPrefixReserved("plllvm");
@@ -181,6 +200,15 @@ _PG_init(void)
 	plllvm_sites_init();
 
 	inited = true;
+}
+
+/*
+ * A fixed path lets expression JIT try to build again (plllvm_exprjit.c)
+ */
+static void
+types_bc_path_assign(const char *newval, void *extra)
+{
+	plllvm_expr_build_broken = false;
 }
 
 /*

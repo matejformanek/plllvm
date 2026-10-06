@@ -36,8 +36,13 @@ REGRESS_KERNELS = kernel_loop \
 		kernel_spectralnorm \
 		kernel_rowudf \
 		kernel_ispras
+# PL/pgSQL only, with stock PL/pgSQL's output (installcheck-expr)
+REGRESS_EXPR = expr_basic \
+		expr_ops \
+		expr_kernels \
+		expr_collide
 REGRESS = plllvm_setup $(REGRESS_FEATURES) $(REGRESS_KERNELS) expr_plugin \
-	plllvm_fatal plllvm_teardown
+	$(REGRESS_EXPR) expr_stats plllvm_fatal plllvm_teardown
 
 REGRESS_OPTS = --dbname=$(PL_TESTDB)
 
@@ -167,7 +172,7 @@ endif
 
 .PHONY: port-ok doctor stage cluster-init cluster-start cluster-stop pgindent \
 	installcheck-discard installcheck-opt installcheck-hazard installcheck-plpgsql \
-	check-host-api kernels check-kernels
+	installcheck-expr check-host-api kernels check-kernels
 
 # 5432, 5433 belong to pg-claude, 5444 to the perf cluster
 port-ok:
@@ -226,6 +231,27 @@ installcheck-opt:
 	$(MAKE) installcheck REGRESS='plllvm_setup plllvm_ops $(REGRESS_KERNELS)' \
 		PGOPTIONS='-c plllvm.opt_level=3'
 
+#
+# The expression tests against the same expected output, interpreted and
+# compiled: at O0 and O2, and taken at the first evaluation.  expr_stats
+# checks that compiled code ran where it should.  Under cache flushes every
+# evaluation plans again (tens of ms each) and gets a new ExprState, which
+# never reaches its second evaluation; so that variant runs only
+# expr_stats, taken at the first evaluation.
+#
+EXPR_JIT = -c session_preload_libraries=plllvm -c plllvm.expr_jit=on
+
+installcheck-expr:
+	$(MAKE) installcheck REGRESS='plllvm_setup $(REGRESS_EXPR) expr_stats'
+	$(MAKE) installcheck REGRESS='plllvm_setup $(REGRESS_EXPR) expr_stats' \
+		PGOPTIONS='$(EXPR_JIT) -c plllvm.expr_opt_level=0'
+	$(MAKE) installcheck REGRESS='plllvm_setup $(REGRESS_EXPR) expr_stats' \
+		PGOPTIONS='$(EXPR_JIT) -c plllvm.expr_opt_level=2'
+	$(MAKE) installcheck REGRESS='plllvm_setup $(REGRESS_EXPR) expr_stats' \
+		PGOPTIONS='$(EXPR_JIT) -c plllvm.expr_opt_level=2 -c plllvm.expr_eager=on'
+	$(MAKE) installcheck REGRESS='plllvm_setup expr_stats' \
+		PGOPTIONS='$(EXPR_JIT) -c plllvm.expr_opt_level=2 -c plllvm.expr_eager=on -c debug_discard_caches=1'
+
 # tests that crash the server when their fix regresses, so never part of
 # installcheck: only on a throwaway cluster, with PLLLVM_PORT given
 installcheck-hazard: port-ok
@@ -237,8 +263,8 @@ installcheck-hazard: port-ok
 #
 # PostgreSQL's PL/pgSQL tests (src/pl/plpgsql and the core plpgsql test),
 # without plllvm and then with it loaded: plllvm.expr_jit off, on, and on
-# with eager trampolines.  Each run must give the output of the first, and
-# with plllvm.expr_jit on the trampolines must have fired.  test_setup
+# taken at the first evaluation.  Each run must give the output of the
+# first, and with plllvm.expr_jit on a loop must have run compiled.  test_setup
 # creates a tablespace, which outlives its database, so this is for a
 # throwaway cluster only.  With plllvm in shared_preload_libraries the
 # first run has it loaded too, and compares nothing against stock PL/pgSQL.
@@ -269,8 +295,8 @@ plpgsql_fired = \
 	r=`PGOPTIONS='$(1)' '$(bindir)/psql' -X -q -At -h /tmp -p $(PLLLVM_PORT) -d pl_regression \
 		-c 'CREATE EXTENSION plllvm' \
 		-c 'DO $$$$ DECLARE s int := 0; BEGIN FOR i IN 1..10 LOOP s := s + i; END LOOP; END $$$$' \
-		-c "SELECT state = 'active' AND fired > 0 FROM plllvm_expr_stats()"` && \
-	[ "$$r" = t ] || { echo 'plllvm did not fire with $(1)' >&2; exit 1; }
+		-c "SELECT state = 'active' AND installed > 0 AND failures = 0 FROM plllvm_expr_stats()"` && \
+	[ "$$r" = t ] || { echo 'plllvm did not compile with $(1)' >&2; exit 1; }
 
 installcheck-plpgsql: port-ok
 	@case "$(origin PLLLVM_PORT):$(PLLLVM_PORT)" in file:*|*:|*:544[2-5]) \

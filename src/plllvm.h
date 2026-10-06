@@ -88,6 +88,8 @@ extern int	plllvm_debug_inject;
 extern bool plllvm_auto_checks;
 extern bool plllvm_expr_jit;
 extern bool plllvm_expr_eager;
+extern int	plllvm_expr_opt_level;
+extern int	plllvm_expr_max_programs;
 
 /* plllvm.c */
 extern const char *plllvm_display_path(const char *path);
@@ -103,6 +105,20 @@ extern int64 plllvm_expr_fired;
 extern int64 plllvm_expr_declined;
 extern void plllvm_plpgsql_init(void);
 extern const char *plllvm_plpgsql_state(void);
+
+/* plllvm_exprjit.c */
+struct ExprState;
+struct plllvm_expr_env;
+
+extern int64 plllvm_expr_compiled;
+extern int64 plllvm_expr_hits;
+extern int64 plllvm_expr_failures;
+extern int64 plllvm_expr_capped;
+extern int64 plllvm_expr_programs;
+extern int64 plllvm_expr_compiled_evals;
+extern bool plllvm_expr_build_broken;
+extern void plllvm_exprjit_install(struct ExprState *state,
+								   struct plllvm_expr_env *env);
 
 /* plllvm_spi.c */
 extern int64 plllvm_spi_statements(void);
