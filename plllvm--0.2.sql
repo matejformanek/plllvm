@@ -1,4 +1,4 @@
-/* plllvm--0.1.sql */
+/* plllvm--0.2.sql */
 
 -- complain if script is sourced in psql, rather than via CREATE EXTENSION
 \echo Use "CREATE EXTENSION plllvm" to load this file. \quit
@@ -42,6 +42,18 @@ CREATE FUNCTION plllvm_call_sites()
   LANGUAGE c AS 'MODULE_PATHNAME';
 
 REVOKE ALL ON FUNCTION plllvm_call_sites() FROM PUBLIC;
+
+-- expression JIT in the PL/pgSQL functions of this backend; state is off,
+-- active, declined:paramfunc or not_in_slot
+CREATE FUNCTION plllvm_expr_stats(OUT state text, OUT fired int8,
+                                  OUT installed int8, OUT compiled int8,
+                                  OUT declined int8, OUT failures int8,
+                                  OUT capped int8, OUT programs int8,
+                                  OUT compiled_evals int8)
+  RETURNS record
+  VOLATILE LANGUAGE c AS 'MODULE_PATHNAME';
+
+REVOKE ALL ON FUNCTION plllvm_expr_stats() FROM PUBLIC;
 
 -- of this backend: not_compiled, live, stale or dropped; compiles counts the
 -- resident ones, retired those released and freed at the next compile

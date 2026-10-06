@@ -5,7 +5,7 @@ MODULE_big = plllvm
 OBJS = $(patsubst %.c,%.o,$(filter-out src/plllvm_types.c,$(wildcard src/*.c))) \
 	src/plllvm_error.o
 EXTENSION = plllvm
-DATA = plllvm--0.1.sql
+DATA = plllvm--0.2.sql
 PGFILEDESC = "plllvm - PL/LLVM procedural language"
 
 # setup, features, kernels (examples/kernels/*.ll), fatal, teardown
@@ -35,11 +35,12 @@ REGRESS_KERNELS = kernel_loop \
 		kernel_spectralnorm \
 		kernel_rowudf \
 		kernel_ispras
-REGRESS = plllvm_setup $(REGRESS_FEATURES) $(REGRESS_KERNELS) plllvm_fatal plllvm_teardown
+REGRESS = plllvm_setup $(REGRESS_FEATURES) $(REGRESS_KERNELS) expr_plugin \
+	plllvm_fatal plllvm_teardown
 
 REGRESS_OPTS = --dbname=$(PL_TESTDB)
 
-EXTRA_CLEAN = stage src/plllvm_types.bc src/plllvm_types_stale.bc
+EXTRA_CLEAN = stage results-plpgsql src/plllvm_types.bc src/plllvm_types_stale.bc
 
 # PGXS of a meson-built server has empty LLVM_* variables
 LLVM ?= /opt/homebrew/opt/llvm@22
@@ -163,7 +164,8 @@ endif
 endif
 
 .PHONY: port-ok doctor stage cluster-init cluster-start cluster-stop pgindent \
-	installcheck-discard installcheck-opt installcheck-hazard check-host-api kernels check-kernels
+	installcheck-discard installcheck-opt installcheck-hazard installcheck-plpgsql \
+	check-host-api kernels check-kernels
 
 # 5432, 5433 belong to pg-claude, 5444 to the perf cluster
 port-ok:
@@ -228,6 +230,43 @@ installcheck-hazard: port-ok
 	  echo "installcheck-hazard needs the PLLLVM_PORT of a throwaway cluster" >&2; \
 	  exit 1;; esac
 	$(MAKE) installcheck REGRESS='plllvm_setup plllvm_hazard'
+
+#
+# PostgreSQL's PL/pgSQL tests (src/pl/plpgsql and the core plpgsql test),
+# without plllvm and then with it loaded: plllvm.expr_jit off, on, and on
+# with eager trampolines.  Each run must give the output of the first.
+# test_setup creates a tablespace, which outlives its database.
+#
+PG_SRC ?= $(THESIS_ROOT)/code
+PG_BUILD ?= $(THESIS_ROOT)/code/build-jit
+PLPGSQL_TESTS = plpgsql_array plpgsql_cache plpgsql_call plpgsql_control \
+	plpgsql_copy plpgsql_domain plpgsql_misc plpgsql_record plpgsql_simple \
+	plpgsql_transaction plpgsql_trap plpgsql_trigger plpgsql_varprops
+PLPGSQL_LOAD = -c session_preload_libraries=plllvm
+
+# $(call plpgsql_suite,name,PGOPTIONS)
+plpgsql_suite = \
+	$(MKDIR_P) results-plpgsql/$(1)/pl results-plpgsql/$(1)/core && \
+	PGOPTIONS='$(2)' $(pg_regress_installcheck) --host=/tmp --port=$(PLLLVM_PORT) \
+		--inputdir=$(PG_SRC)/src/pl/plpgsql/src --outputdir=results-plpgsql/$(1)/pl \
+		--dbname=pl_regression $(PLPGSQL_TESTS) && \
+	'$(bindir)/psql' -X -q -h /tmp -p $(PLLLVM_PORT) -d postgres \
+		-c 'DROP DATABASE IF EXISTS regression' \
+		-c 'DROP TABLESPACE IF EXISTS regress_tblspace' && \
+	PGOPTIONS='$(2)' $(pg_regress_installcheck) --host=/tmp --port=$(PLLLVM_PORT) \
+		--inputdir=$(PG_SRC)/src/test/regress --dlpath=$(PG_BUILD)/src/test/regress \
+		--outputdir=results-plpgsql/$(1)/core --dbname=regression test_setup plpgsql
+
+installcheck-plpgsql: port-ok
+	rm -rf results-plpgsql
+	$(call plpgsql_suite,base,)
+	$(call plpgsql_suite,off,$(PLPGSQL_LOAD))
+	$(call plpgsql_suite,on,$(PLPGSQL_LOAD) -c plllvm.expr_jit=on)
+	$(call plpgsql_suite,eager,$(PLPGSQL_LOAD) -c plllvm.expr_jit=on -c plllvm.expr_eager=on)
+	for m in off on eager; do \
+	  diff -r results-plpgsql/base/pl/results results-plpgsql/$$m/pl/results && \
+	  diff -r results-plpgsql/base/core/results results-plpgsql/$$m/core/results || exit 1; \
+	done
 
 # runtime functions that only the inline helpers call
 HOST_API_INTERNAL = plllvm_rt_site_call plllvm_rt_site_null plllvm_rt_array_access

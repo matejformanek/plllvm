@@ -35,7 +35,9 @@ make PG_CONFIG=/path/to/pg_config install
 same shared `libLLVM` as the server's `llvmjit`. `install` also writes
 `plllvm/build-info.txt` (git head and checksums of the installed files).
 
-`CREATE EXTENSION plllvm` needs a superuser.
+`CREATE EXTENSION plllvm` needs a superuser. There is no upgrade script
+yet: to move to a new version, `DROP EXTENSION plllvm CASCADE` and create it
+again.
 
 ## Usage
 
@@ -138,10 +140,33 @@ All are superuser only and show the current backend.
 | `plllvm_code_cache()` | compiled code, newest first, with the time of each stage (`parse_bc`, `parse`, `link`, `verify`, `resolve`, `optimize`, `emit`) and whether it runs in a scratch context (`frame`) |
 | `plllvm_call_sites()` | call sites, their state and how often each was prepared, checked and re-entered |
 | `plllvm_function_status(regprocedure)` | `not_compiled`, `live`, `stale` or `dropped`, with resident and retired compiles |
+| `plllvm_expr_stats()` | expression JIT in PL/pgSQL (below): `state`, `fired`, `declined`; the other counters stay 0 in this version |
 | `plllvm_jit_test(ir, opt_level, codegen)` | compiles a body without calling it: `ok`, SQLSTATE, message, detail, line and column of a parse error, instruction and helper counts, checks added; `codegen => false` only checks the IR |
 
 Retired code (replaced, no call running it) is listed until the next compile
 frees it.
+
+## PL/pgSQL expressions
+
+`plllvm.expr_jit` is to compile the simple expressions of `LANGUAGE plpgsql`
+functions. This version compiles nothing yet: it only finds the expressions,
+at their second evaluation in a transaction, and counts them.
+
+The library has to be loaded before the PL/pgSQL function starts: `LOAD
+'plllvm'`, `session_preload_libraries` or `shared_preload_libraries`. Once
+loaded, it takes PL/pgSQL's plugin slot (`PLpgSQL_plugin`), the one that
+debuggers and profilers use.
+
+* A plugin loaded before plllvm is chained: its callbacks still run.
+* A plugin loaded after plllvm that chains keeps both working. One that
+  overwrites the slot turns expression JIT off without notice;
+  `plllvm_expr_stats()` then shows `not_in_slot`.
+* `state` is `declined:paramfunc` when PL/pgSQL's parameter functions are
+  not what plllvm expects; expression JIT is then off for the session.
+* An expression evaluated once per transaction is never taken. Parallel
+  workers leave their expressions alone.
+* Loaded, every PL/pgSQL call goes through plllvm's `func_setup`, also with
+  `plllvm.expr_jit` off.
 
 ## Configuration
 
@@ -153,6 +178,8 @@ frees it.
 | `plllvm.max_ir_instructions` | int, 0 = no limit | 100000 | superuser | largest body accepted (SQLSTATE 54000) |
 | `plllvm.dump_ir` | bool | off | superuser | log the optimized IR of every compile |
 | `plllvm.types_bc_path` | string | empty | superuser | the `plllvm_types.bc` to use; empty means `plllvm/plllvm_types.bc` next to the library; read once per session |
+| `plllvm.expr_jit` | bool | off | superuser | expression JIT in PL/pgSQL functions; compiles nothing yet (above) |
+| `plllvm.expr_eager` | bool | off | superuser | tests only: take an expression at its first evaluation instead of the second |
 | `plllvm.regress_test_mode` | bool | off | any user | reduce volatile output (times, addresses) in regression tests |
 | `plllvm.debug_inject` | `none`, `llvm_fatal`, `bad_alloc` | none | superuser | tests only: raise that LLVM error in the next compile, which ends the session with FATAL |
 
@@ -218,15 +245,15 @@ user can. Only superusers create PL/LLVM functions.
 
 ## Status
 
-v0.1, the PL/LLVM language, is done. `examples/kernels/` has the benchmark
+v0.1, the PL/LLVM language, is done. v0.2 adds the PL/pgSQL plugin for
+expression JIT; the compiler is not in yet. `examples/kernels/` has the benchmark
 kernels of the thesis in IR; `nbody` and `revcomp` are compiled from C
 (`examples/kernels/src/`). The neword kernel (TPC-C New-Order) is not
 ported: it needs `UPDATE` and `INSERT` through SPI, and its checksum does
 not depend on these writes, so a port without them would skip the work it
 measures.
 
-Planned, depending on the thesis: expression JIT for PL/pgSQL and a
-`plpgsql_jit` language. Neither exists yet.
+Planned, depending on the thesis: a `plpgsql_jit` language.
 
 ## Building and testing
 
@@ -254,6 +281,7 @@ make stage cluster-start installcheck doctor cluster-stop
 | `installcheck-discard` | call-site and cache tests under `debug_discard_caches=1` |
 | `installcheck-opt` | the kernel tests at `plllvm.opt_level` 0 and 3 |
 | `installcheck-hazard PLLLVM_PORT=<port>` | tests that crash the server if their fix regresses; throwaway cluster only |
+| `installcheck-plpgsql PLLLVM_PORT=<port>` | PostgreSQL's PL/pgSQL tests without plllvm, then with it loaded and `plllvm.expr_jit` off, on, and on with `plllvm.expr_eager`; every output must match the first. `PG_SRC` and `PG_BUILD` are the server's source and build tree (the workspace's `code/` and `code/build-jit`) |
 | `kernels`, `check-kernels` | compile `examples/kernels/src/*.c` to IR with the install-perf headers; check the committed `.ll` files are current |
 | `pgindent` | format the C sources (`docs/style.md`) |
 

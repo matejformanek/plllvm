@@ -1,7 +1,8 @@
 # plllvm architecture
 
-One extension, `plllvm`, with no changes to PostgreSQL. v0.1 is the PL/LLVM
-language only; everything else depends on the thesis plan.
+One extension, `plllvm`, with no changes to PostgreSQL: the PL/LLVM
+language (v0.1) and the PL/pgSQL plugin for expression JIT (v0.2, which
+compiles nothing yet).
 
 ## Files
 
@@ -18,7 +19,8 @@ language only; everything else depends on the thesis plan.
 | `src/plllvm_compile.c` | funccache callbacks, signature and scope checks |
 | `src/plllvm_spi.c` | read-only prepared statements: prepare into a slot, SELECT INTO, result checks (`plllvm_spi_*` host functions) |
 | `src/plllvm_sites.c` | call sites and constants: resolution, rebuild, EXECUTE checks, invalidation callbacks (`plllvm_rt_site_*` host functions) |
-| `src/plllvm_stats.c` | `plllvm_session_info()`, `plllvm_code_cache()`, `plllvm_call_sites()`, `plllvm_jit_test()`, `plllvm_function_status()` |
+| `src/plllvm_plpgsql.c` | the PL/pgSQL plugin: slot and chaining, `paramCompile` wrapper, trampolines on simple expressions; the only file that includes `plpgsql.h` |
+| `src/plllvm_stats.c` | `plllvm_session_info()`, `plllvm_code_cache()`, `plllvm_call_sites()`, `plllvm_jit_test()`, `plllvm_function_status()`, `plllvm_expr_stats()` |
 
 Only `plllvm_jit.c` and `plllvm_error.cpp` include LLVM headers.
 
@@ -95,3 +97,22 @@ Only `plllvm_jit.c` and `plllvm_error.cpp` include LLVM headers.
 * Out of scope for v0.1: other SQL than SELECT INTO, multi-dimensional
   arrays, sets, OUT parameters, records, polymorphic types,
   triggers, procedures, `DO`, trusted mode.
+
+## PL/pgSQL plugin (v0.2)
+
+* `_PG_init` takes the `PLpgSQL_plugin` rendezvous slot and keeps the
+  previous occupant. Its `func_beg`, `func_end`, `stmt_beg` and `stmt_end`
+  are forwarded only if it has them; before its `func_setup` it gets
+  PL/pgSQL's helper pointers, which PL/pgSQL writes into the slot owner's
+  struct only.
+* `func_setup` (with `plllvm.expr_jit` on, not in a parallel worker)
+  replaces `paramLI->paramCompile` with a wrapper. The wrapper runs inside
+  `ExecInitExprWithParams()`; on the ExprState of a simple expression
+  (`parent == NULL`, `expr == expr_simple_expr`) it puts a trampoline on
+  the first `PARAM_CALLBACK` step.
+* The trampoline re-arms itself at the first evaluation and fires at the
+  second, after restoring the original paramfunc. `plllvm.expr_eager`
+  fires at the first. A fired trampoline is counted; nothing is compiled
+  yet.
+* `plpgsql_param_eval_var` is learnt as the paramfunc of a non-varlena
+  variable; a second value turns the plugin off (`declined:paramfunc`).
