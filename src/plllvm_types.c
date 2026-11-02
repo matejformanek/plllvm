@@ -472,25 +472,25 @@ plllvm_int4_from_int8(int64 val)
 pg_always_inline float8
 plllvm_float8_pl(float8 val1, float8 val2)
 {
-	return float8_pl(val1, val2);
+	return float8_plus(val1, val2);
 }
 
 pg_always_inline float8
 plllvm_float8_mi(float8 val1, float8 val2)
 {
-	return float8_mi(val1, val2);
+	return float8_minus(val1, val2);
 }
 
 pg_always_inline float8
 plllvm_float8_mul(float8 val1, float8 val2)
 {
-	return float8_mul(val1, val2);
+	return float8_times(val1, val2);
 }
 
 pg_always_inline float8
 plllvm_float8_div(float8 val1, float8 val2)
 {
-	return float8_div(val1, val2);
+	return float8_divide(val1, val2);
 }
 
 pg_always_inline float8

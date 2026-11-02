@@ -8,8 +8,11 @@
  *
  * The functions behind the SQL operators, abs(), sqrt() and the casts
  * from float8 (int.c, int8.c, float.c), with the same results and errors,
- * but without fmgr.  The other float8 operators are those of
- * utils/float.h, which float.c uses itself.  plllvm_types.c
+ * but without fmgr.  float8 + - * / are the bodies of float8_pl() and the
+ * like (utils/float.h:116-225), but raise through the noreturn
+ * float_*_error(): float.h's inline functions return float_*_error_ext(NULL)
+ * to the caller, which the optimizer cannot know never returns.  The
+ * remaining float8 operators are those of utils/float.h.  plllvm_types.c
  * exports them as plllvm_int4_pl() and so on.  Cites are of PostgreSQL
  * 9510a826e4a.
  *
@@ -200,6 +203,54 @@ int8_abs(int64 val)
 	if (unlikely(val == PG_INT64_MIN))
 		plllvm_bigint_overflow();
 	return (val < 0) ? -val : val;
+}
+
+/* float8pl() and the like, see the header comment */
+static pg_always_inline float8
+float8_plus(float8 val1, float8 val2)
+{
+	float8		result = val1 + val2;
+
+	if (unlikely(isinf(result)) && !isinf(val1) && !isinf(val2))
+		float_overflow_error();
+	return result;
+}
+
+static pg_always_inline float8
+float8_minus(float8 val1, float8 val2)
+{
+	float8		result = val1 - val2;
+
+	if (unlikely(isinf(result)) && !isinf(val1) && !isinf(val2))
+		float_overflow_error();
+	return result;
+}
+
+static pg_always_inline float8
+float8_times(float8 val1, float8 val2)
+{
+	float8		result = val1 * val2;
+
+	if (unlikely(isinf(result)) && !isinf(val1) && !isinf(val2))
+		float_overflow_error();
+	if (unlikely(result == 0.0) && val1 != 0.0 && val2 != 0.0)
+		float_underflow_error();
+	return result;
+}
+
+static pg_always_inline float8
+float8_divide(float8 val1, float8 val2)
+{
+	float8		result;
+
+	if (unlikely(val2 == 0.0) && !isnan(val1))
+		float_zero_divide_error();
+	result = val1 / val2;
+	if (unlikely(isinf(result)) && !isinf(val1))
+		float_overflow_error();
+	if (unlikely(result == 0.0) && val1 != 0.0 && !isinf(val2))
+		float_underflow_error();
+	return result;
 }
 
 /* float8abs() (float.c:698) */
