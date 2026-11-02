@@ -145,6 +145,8 @@ All are superuser only and show the current backend.
 | `plllvm_call_sites()` | call sites, their state and how often each was prepared, checked and re-entered |
 | `plllvm_function_status(regprocedure)` | `not_compiled`, `live`, `stale` or `dropped`, with resident and retired compiles |
 | `plllvm_expr_stats()` | expression JIT in PL/pgSQL (below): `state`; expressions `fired`, `installed` (given code), `compiled`, `declined`, failed (`failures`) and left interpreted at the cap (`capped`); `programs` kept; `compiled_evals`, evaluations of code compiled under `plllvm.expr_eager` |
+| `plllvm_pj_stats()` | `LANGUAGE plpgsql_jit` (below): handler entries `calls` = `compiled_calls` + `deopts` + `interpreted_calls`, and among the interpreted `declines`, `guard_misses`, `null_args`, `plugin_fallbacks`, `capped`; `translations`, `attempts`, `failures`, `boxed_evals`, `resident`, `peak_tuple_bytes` |
+| `plllvm_pj_status(regprocedure)` | one row per signature and input collation of a `plpgsql_jit` function: `state` (`new`, `seen`, `declined`), `reason`, `calls`, `last_path`; the columns about compiled code are NULL |
 | `plllvm_jit_test(ir, opt_level, codegen)` | compiles a body without calling it: `ok`, SQLSTATE, message, detail, line and column of a parse error, instruction and helper counts, checks added; `codegen => false` only checks the IR |
 
 Retired code (replaced, no call running it) is listed until the next compile
@@ -203,6 +205,20 @@ debuggers and profilers use.
 * Loaded, every PL/pgSQL call goes through plllvm's `func_setup`, also with
   `plllvm.expr_jit` off.
 
+## LANGUAGE plpgsql_jit
+
+`CREATE EXTENSION plllvm` also creates `plpgsql_jit`: PL/pgSQL's syntax,
+compiler, validator, `DO` handler and error messages, with a call handler
+of its own. A function is created as with PL/pgSQL, with `LANGUAGE
+plpgsql_jit`. For now every call runs in PL/pgSQL; the handler only keeps an
+entry per function, counted in `plllvm_pj_stats()` and shown by
+`plllvm_pj_status()` (`docs/architecture.md`).
+
+The language is untrusted: only a superuser creates functions in it
+(`GRANT USAGE` on an untrusted language is refused). `SET
+plllvm.plpgsql_jit = off` sends every call straight to PL/pgSQL. A
+PL/pgSQL function and a `plpgsql_jit` one call each other freely.
+
 ## Configuration
 
 | GUC | type | default | set by | meaning |
@@ -215,6 +231,7 @@ debuggers and profilers use.
 | `plllvm.types_bc_path` | string | empty | superuser | the `plllvm_types.bc` to use; empty means `plllvm/plllvm_types.bc` next to the library; read once per session |
 | `plllvm.expr_jit` | bool | off | superuser | expression JIT in PL/pgSQL functions (above); turning it off stops new expressions, code already installed runs until the transaction ends |
 | `plllvm.expr_opt_level` | int 0–3 | 2 | superuser | LLVM optimization level of compiled expressions |
+| `plllvm.plpgsql_jit` | bool | on | superuser | the handler of `LANGUAGE plpgsql_jit` (above); off sends every call to PL/pgSQL |
 | `plllvm.expr_max_programs` | int 1–1000000 | 1000 | superuser | compiled expressions (and failed builds) kept in a session; beyond it, new expressions are interpreted |
 | `plllvm.expr_eager` | bool | off | superuser | tests only: take an expression at its first evaluation instead of the second |
 | `plllvm.regress_test_mode` | bool | off | any user | reduce volatile output (times, addresses) in regression tests |
@@ -291,7 +308,7 @@ ported: it needs `UPDATE` and `INSERT` through SPI, and its checksum does
 not depend on these writes, so a port without them would skip the work it
 measures.
 
-Planned, depending on the thesis: a `plpgsql_jit` language.
+v0.3 adds `LANGUAGE plpgsql_jit`; the compiler for whole functions follows.
 
 ## Building and testing
 
@@ -320,6 +337,10 @@ make stage cluster-start installcheck doctor cluster-stop
 | `installcheck-opt` | the kernel tests at `plllvm.opt_level` 0 and 3 |
 | `installcheck-hazard PLLLVM_PORT=<port>` | tests that crash the server if their fix regresses; throwaway cluster only |
 | `installcheck-plpgsql PLLLVM_PORT=<port>` | PostgreSQL's PL/pgSQL tests without plllvm, then with it loaded and `plllvm.expr_jit` off, on, and on with `plllvm.expr_eager`; every output must match the first. `PG_SRC` and `PG_BUILD` are the server's source and build tree (the workspace's `code/` and `code/build-jit`) |
+| `installcheck-pj` | the `pj_` tests, written for stock PL/pgSQL's output and run with `LANGUAGE plpgsql_jit` (`PJ_LANG`): the handler off and on, with `plllvm.expr_jit` and `plllvm.expr_eager`, and `pj_stats` under cache flushes |
+| `installcheck-pj-once`, `installcheck-pj-opt` | the `pj_` tests whose output comes from plllvm, in one variant, and at the highest opt level |
+| `installcheck-plpgsql-pj PLLLVM_PORT=<port>` | the tests of `installcheck-plpgsql` without plllvm, then with `LANGUAGE plpgsql` changed to `plpgsql_jit` and the handler off and on; the results must match the first, but for the hunks of `tools/plpgsql_pj_allowed.diff` |
+| `verify PLLLVM_PORT=<port>` | every suite of a PR in order, with the commit and the exit code of each in `results-verify.log` |
 | `kernels`, `check-kernels` | compile `examples/kernels/src/*.c` to IR with the install-perf headers; check the committed `.ll` files are current |
 | `pgindent` | format the C sources (`docs/style.md`) |
 
@@ -330,7 +351,10 @@ macOS 26 arm64 (`PG_PIN`). The server must be built with LLVM.
 
 ## Licence
 
-PostgreSQL Licence, see `LICENSE`. The kernels derived from the Computer
+PostgreSQL Licence, see `LICENSE`; `src/plllvm_pj.c` follows PL/pgSQL's call
+handler (Portions Copyright PostgreSQL Global Development Group).
+
+The kernels derived from the Computer
 Language Benchmarks Game are under `LICENSES/BENCHMARKS-GAME-BSD-3.md`.
 
 ## Trademarks

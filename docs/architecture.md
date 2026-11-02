@@ -1,7 +1,8 @@
 # plllvm architecture
 
 One extension, `plllvm`, with no changes to PostgreSQL: the PL/LLVM
-language (v0.1) and expression JIT for PL/pgSQL (v0.2).
+language (v0.1), expression JIT for PL/pgSQL (v0.2) and `LANGUAGE
+plpgsql_jit` (v0.3).
 
 ## Files
 
@@ -18,11 +19,12 @@ language (v0.1) and expression JIT for PL/pgSQL (v0.2).
 | `src/plllvm_compile.c` | funccache callbacks, signature and scope checks |
 | `src/plllvm_spi.c` | read-only prepared statements: prepare into a slot, SELECT INTO, result checks (`plllvm_spi_*` host functions) |
 | `src/plllvm_sites.c` | call sites and constants: resolution, rebuild, EXECUTE checks, invalidation callbacks (`plllvm_rt_site_*` host functions) |
-| `src/plllvm_plpgsql.c` | the PL/pgSQL plugin: slot and chaining, `paramCompile` wrapper, trampolines on simple expressions, the Params of compiled code (`param_check`, `param_emit`); the only file that includes `plpgsql.h` |
+| `src/plllvm_plpgsql.c` | the PL/pgSQL plugin: slot and chaining, `paramCompile` wrapper, trampolines on simple expressions, the Params of compiled code (`param_check`, `param_emit`); with `plllvm_pj.c`, the only file that includes `plpgsql.h` |
+| `src/plllvm_pj.c`, `src/plllvm_pj.h` | `LANGUAGE plpgsql_jit`: the call handler, the side entry of each PL/pgSQL function, the counters of `plllvm_pj_stats()`; includes `plpgsql.h` |
 | `src/plllvm_ir.c` | IR text builder: temporaries, blocks, declarations |
 | `src/plllvm_expr.c` | planned expression tree to IR: the check (whole tree or nothing) and the emitter; knows neither LLVM nor PL/pgSQL |
 | `src/plllvm_exprjit.c` | compiled expressions: key, stored tree and facts, cache, cap, the `ExprStateEvalFunc` wrapper, install |
-| `src/plllvm_stats.c` | `plllvm_session_info()`, `plllvm_code_cache()`, `plllvm_call_sites()`, `plllvm_jit_test()`, `plllvm_function_status()`, `plllvm_expr_stats()` |
+| `src/plllvm_stats.c` | `plllvm_session_info()`, `plllvm_code_cache()`, `plllvm_call_sites()`, `plllvm_jit_test()`, `plllvm_function_status()`, `plllvm_expr_stats()`, `plllvm_pj_stats()`, `plllvm_pj_status()` |
 
 Only `plllvm_jit.c` and `plllvm_error.cpp` include LLVM headers.
 
@@ -155,3 +157,22 @@ Only `plllvm_jit.c` and `plllvm_error.cpp` include LLVM headers.
   type, no call sites and no interrupt checks (an expression has no
   loops). Expression modules do not count in `plllvm_session_info()` or
   `plllvm.max_resident_compiles`.
+
+## LANGUAGE plpgsql_jit (v0.3)
+
+* `plllvm--0.3.sql` creates the language with `plpgsql_jit_call_handler`
+  (`plllvm_pj_call_handler`) and, as inline handler and validator, two
+  `pg_proc` rows that point into `$libdir/plpgsql`
+  (`plpgsql_inline_handler`, `plpgsql_validator`). Not `TRUSTED`.
+* The handler looks up `plpgsql_compile` and `plpgsql_call_handler` in the
+  plpgsql library at its first call. It compiles with `plpgsql_compile()`
+  (no SPI connection needed, `pl_comp.c` has no `SPI_` call), keeps a side
+  entry per `PLpgSQL_function` in its own hash table, and calls
+  `plpgsql_call_handler()` with the same `fcinfo`; `fn_extra` stays
+  PL/pgSQL's.
+* An entry is stale when its function's `fn_cxt` has gone: a reset callback
+  sets the flag, and the next lookup of the same pointer (funccache reuses a
+  struct in place) starts a new entry. A declined function is found by its
+  `fn_extra` without compiling again.
+* `plllvm.plpgsql_jit` off sends the call to PL/pgSQL before any entry is
+  looked at.

@@ -1,0 +1,467 @@
+--
+-- pj_language: functions in LANGUAGE plpgsql_jit
+--
+-- The output must be PL/pgSQL's.  PJ_LANG=plpgsql_jit makes make installcheck-pj run it
+-- in that language; without it the functions are plpgsql, and that run made
+-- the expected file.  pj_language_1.out is for plpgsql_jit being untrusted
+-- (a role without USAGE cannot create a function).  A function is called
+-- several times where it matters: the handler treats the first, the second
+-- and later calls differently.
+--
+\getenv pj_lang PJ_LANG
+\if :{?pj_lang}
+\else
+  \set pj_lang plpgsql
+\endif
+SET pj.lang = :'pj_lang';
+CREATE ROLE regress_pj_owner;
+CREATE ROLE regress_pj_user;
+GRANT CREATE ON SCHEMA public TO regress_pj_owner, regress_pj_user;
+-- create, call, replace, drop
+CREATE FUNCTION pjl_add(a int, b int) RETURNS int LANGUAGE :pj_lang AS $$
+BEGIN
+  RETURN a + b;
+END
+$$;
+SELECT pjl_add(i, 10) FROM generate_series(1, 4) i;
+ pjl_add 
+---------
+      11
+      12
+      13
+      14
+(4 rows)
+
+SELECT pjl_add(1, 2), pjl_add(3, 4);
+ pjl_add | pjl_add 
+---------+---------
+       3 |       7
+(1 row)
+
+CREATE OR REPLACE FUNCTION pjl_add(a int, b int) RETURNS int LANGUAGE :pj_lang AS $$
+BEGIN
+  RETURN a * b;
+END
+$$;
+SELECT pjl_add(i, 10) FROM generate_series(1, 4) i;
+ pjl_add 
+---------
+      10
+      20
+      30
+      40
+(4 rows)
+
+DROP FUNCTION pjl_add(int, int);
+SELECT pjl_add(1, 2);  -- fail
+ERROR:  function pjl_add(integer, integer) does not exist
+LINE 1: SELECT pjl_add(1, 2);
+               ^
+DETAIL:  There is no function of that name.
+-- a call that replaces its own function, while its frame runs
+CREATE FUNCTION pjl_swap(n int) RETURNS text LANGUAGE :pj_lang AS $$
+DECLARE
+  r text;
+BEGIN
+  IF n = 0 THEN
+    RETURN 'leaf old';
+  END IF;
+  EXECUTE format($f$CREATE OR REPLACE FUNCTION pjl_swap(n int) RETURNS text
+                    LANGUAGE %s AS 'BEGIN RETURN ''leaf new''; END'$f$,
+                 current_setting('pj.lang'));
+  r := pjl_swap(0);
+  RETURN 'outer old, ' || r;
+END
+$$;
+SELECT pjl_swap(0);
+ pjl_swap 
+----------
+ leaf old
+(1 row)
+
+SELECT pjl_swap(1);
+      pjl_swap       
+---------------------
+ outer old, leaf new
+(1 row)
+
+SELECT pjl_swap(0);
+ pjl_swap 
+----------
+ leaf new
+(1 row)
+
+-- the validator: PL/pgSQL's own
+CREATE FUNCTION pjl_bad() RETURNS int LANGUAGE :pj_lang AS $$
+BEGIN
+  RETRN 1;
+END
+$$;  -- fail
+ERROR:  syntax error at or near "RETRN"
+LINE 3:   RETRN 1;
+          ^
+CREATE FUNCTION pjl_bad(c cstring) RETURNS int LANGUAGE :pj_lang AS $$
+BEGIN
+  RETURN 1;
+END
+$$;  -- fail
+ERROR:  PL/pgSQL functions cannot accept type cstring
+SET check_function_bodies = off;
+CREATE FUNCTION pjl_late() RETURNS int LANGUAGE :pj_lang AS $$
+BEGIN
+  RETRN 1;
+END
+$$;
+RESET check_function_bodies;
+SELECT pjl_late();  -- fail
+ERROR:  syntax error at or near "RETRN"
+LINE 1: RETRN 1
+        ^
+QUERY:  RETRN 1
+CONTEXT:  PL/pgSQL function pjl_late() line 3 at SQL statement
+SELECT pjl_late();  -- fail
+ERROR:  syntax error at or near "RETRN"
+LINE 1: RETRN 1
+        ^
+QUERY:  RETRN 1
+CONTEXT:  PL/pgSQL function pjl_late() line 3 at SQL statement
+-- errors and their CONTEXT
+CREATE FUNCTION pjl_raise(n int) RETURNS int LANGUAGE :pj_lang AS $$
+BEGIN
+  IF n > 1 THEN
+    RAISE EXCEPTION 'pjl_raise %', n USING ERRCODE = 'P0042';
+  END IF;
+  RETURN n;
+END
+$$;
+SELECT pjl_raise(1);
+ pjl_raise 
+-----------
+         1
+(1 row)
+
+SELECT pjl_raise(2);  -- fail
+ERROR:  pjl_raise 2
+CONTEXT:  PL/pgSQL function pjl_raise(integer) line 4 at RAISE
+SELECT pjl_raise(2);  -- fail
+ERROR:  pjl_raise 2
+CONTEXT:  PL/pgSQL function pjl_raise(integer) line 4 at RAISE
+SELECT pjl_raise(3);  -- fail
+ERROR:  pjl_raise 3
+CONTEXT:  PL/pgSQL function pjl_raise(integer) line 4 at RAISE
+-- DO
+DO LANGUAGE :pj_lang $$
+BEGIN
+  RAISE NOTICE 'in a DO block';
+END
+$$;
+NOTICE:  in a DO block
+-- trigger and event trigger
+CREATE TABLE pjl_t (a int, b text);
+CREATE FUNCTION pjl_trg() RETURNS trigger LANGUAGE :pj_lang AS $$
+BEGIN
+  NEW.b := coalesce(NEW.b, '') || '/' || TG_OP || '/' || TG_NARGS;
+  RETURN NEW;
+END
+$$;
+CREATE TRIGGER pjl_trg BEFORE INSERT OR UPDATE ON pjl_t
+  FOR EACH ROW EXECUTE FUNCTION pjl_trg('x');
+INSERT INTO pjl_t SELECT i, 'r' || i FROM generate_series(1, 3) i;
+UPDATE pjl_t SET b = b || '!' WHERE a > 1;
+SELECT * FROM pjl_t ORDER BY a;
+ a |           b           
+---+-----------------------
+ 1 | r1/INSERT/1
+ 2 | r2/INSERT/1!/UPDATE/1
+ 3 | r3/INSERT/1!/UPDATE/1
+(3 rows)
+
+CREATE FUNCTION pjl_evt() RETURNS event_trigger LANGUAGE :pj_lang AS $$
+BEGIN
+  RAISE NOTICE 'event %, tag %', TG_EVENT, TG_TAG;
+END
+$$;
+CREATE EVENT TRIGGER pjl_evt ON ddl_command_end EXECUTE FUNCTION pjl_evt();
+CREATE TABLE pjl_t2 (a int);
+NOTICE:  event ddl_command_end, tag CREATE TABLE
+DROP TABLE pjl_t2;
+NOTICE:  event ddl_command_end, tag DROP TABLE
+DROP EVENT TRIGGER pjl_evt;
+-- procedures: INOUT, and transaction control, which needs a non-atomic call
+CREATE PROCEDURE pjl_proc(INOUT x int) LANGUAGE :pj_lang AS $$
+BEGIN
+  x := x * 2;
+END
+$$;
+CALL pjl_proc(21);
+ x  
+----
+ 42
+(1 row)
+
+CALL pjl_proc(21);
+ x  
+----
+ 42
+(1 row)
+
+CALL pjl_proc(21);
+ x  
+----
+ 42
+(1 row)
+
+CREATE PROCEDURE pjl_commit(n int) LANGUAGE :pj_lang AS $$
+BEGIN
+  FOR i IN 1..n LOOP
+    INSERT INTO pjl_t VALUES (100 + i, 'commit');
+    COMMIT;
+    INSERT INTO pjl_t VALUES (200 + i, 'rollback');
+    ROLLBACK;
+  END LOOP;
+END
+$$;
+CALL pjl_commit(2);
+CALL pjl_commit(2);
+CALL pjl_commit(2);
+SELECT a, b FROM pjl_t WHERE a > 3 ORDER BY a;
+  a  |        b        
+-----+-----------------
+ 101 | commit/INSERT/1
+ 101 | commit/INSERT/1
+ 101 | commit/INSERT/1
+ 102 | commit/INSERT/1
+ 102 | commit/INSERT/1
+ 102 | commit/INSERT/1
+(6 rows)
+
+DELETE FROM pjl_t WHERE a > 3;
+-- STRICT, NULL arguments, OUT parameters, sets
+CREATE FUNCTION pjl_strict(a int) RETURNS int STRICT LANGUAGE :pj_lang AS $$
+BEGIN
+  RETURN a + 1;
+END
+$$;
+CREATE FUNCTION pjl_nullable(a int) RETURNS text LANGUAGE :pj_lang AS $$
+BEGIN
+  RETURN coalesce(a::text, 'null');
+END
+$$;
+SELECT pjl_strict(NULL), pjl_nullable(NULL), pjl_strict(1), pjl_nullable(1);
+ pjl_strict | pjl_nullable | pjl_strict | pjl_nullable 
+------------+--------------+------------+--------------
+            | null         |          2 | 1
+(1 row)
+
+SELECT pjl_strict(NULL), pjl_nullable(NULL), pjl_strict(1), pjl_nullable(1);
+ pjl_strict | pjl_nullable | pjl_strict | pjl_nullable 
+------------+--------------+------------+--------------
+            | null         |          2 | 1
+(1 row)
+
+CREATE FUNCTION pjl_out(a int, OUT b int, OUT c text) LANGUAGE :pj_lang AS $$
+BEGIN
+  b := a * 2;
+  c := 'x' || a;
+END
+$$;
+SELECT * FROM pjl_out(4);
+ b | c  
+---+----
+ 8 | x4
+(1 row)
+
+SELECT * FROM pjl_out(5);
+ b  | c  
+----+----
+ 10 | x5
+(1 row)
+
+SELECT (pjl_out(i)).c FROM generate_series(1, 3) i;
+ c  
+----
+ x1
+ x2
+ x3
+(3 rows)
+
+CREATE FUNCTION pjl_series(n int) RETURNS SETOF int LANGUAGE :pj_lang AS $$
+BEGIN
+  FOR i IN 1..n LOOP
+    RETURN NEXT i * i;
+  END LOOP;
+END
+$$;
+SELECT * FROM pjl_series(4);
+ pjl_series 
+------------
+          1
+          4
+          9
+         16
+(4 rows)
+
+SELECT * FROM pjl_series(3);
+ pjl_series 
+------------
+          1
+          4
+          9
+(3 rows)
+
+SELECT sum(s) FROM generate_series(1, 3) g, LATERAL pjl_series(g) s;
+ sum 
+-----
+  20
+(1 row)
+
+-- polymorphic: one function, a compile per resolved type
+CREATE FUNCTION pjl_poly(a anyelement, b anyelement) RETURNS anyarray
+LANGUAGE :pj_lang AS $$
+BEGIN
+  RETURN ARRAY[a, b];
+END
+$$;
+SELECT pjl_poly(1, 2), pjl_poly('a'::text, 'b'), pjl_poly(1.5, 2.5);
+ pjl_poly | pjl_poly | pjl_poly  
+----------+----------+-----------
+ {1,2}    | {a,b}    | {1.5,2.5}
+(1 row)
+
+SELECT pjl_poly(1, 2), pjl_poly('a'::text, 'b'), pjl_poly(1.5, 2.5);
+ pjl_poly | pjl_poly | pjl_poly  
+----------+----------+-----------
+ {1,2}    | {a,b}    | {1.5,2.5}
+(1 row)
+
+SELECT pjl_poly(1, 2), pjl_poly('a'::text, 'b'), pjl_poly(1.5, 2.5);
+ pjl_poly | pjl_poly | pjl_poly  
+----------+----------+-----------
+ {1,2}    | {a,b}    | {1.5,2.5}
+(1 row)
+
+-- plpgsql and plpgsql_jit calling each other, and themselves
+CREATE FUNCTION pjl_ping(n int) RETURNS int LANGUAGE :pj_lang AS $$
+BEGIN
+  IF n <= 0 THEN
+    RETURN 0;
+  END IF;
+  RETURN 1 + pjl_pong(n - 1);
+END
+$$;
+CREATE FUNCTION pjl_pong(n int) RETURNS int LANGUAGE plpgsql AS $$
+BEGIN
+  IF n <= 0 THEN
+    RETURN 0;
+  END IF;
+  RETURN 1 + pjl_ping(n - 1);
+END
+$$;
+SELECT pjl_ping(10), pjl_pong(10);
+ pjl_ping | pjl_pong 
+----------+----------
+       10 |       10
+(1 row)
+
+SELECT pjl_ping(10), pjl_pong(11);
+ pjl_ping | pjl_pong 
+----------+----------
+       10 |       11
+(1 row)
+
+CREATE FUNCTION pjl_fact(n int) RETURNS numeric LANGUAGE :pj_lang AS $$
+BEGIN
+  IF n <= 1 THEN
+    RETURN 1;
+  END IF;
+  RETURN n * pjl_fact(n - 1);
+END
+$$;
+SELECT pjl_fact(20);
+      pjl_fact       
+---------------------
+ 2432902008176640000
+(1 row)
+
+SELECT pjl_fact(25);
+          pjl_fact          
+----------------------------
+ 15511210043330985984000000
+(1 row)
+
+-- an error caught three frames up
+CREATE FUNCTION pjl_deep(n int) RETURNS int LANGUAGE :pj_lang AS $$
+BEGIN
+  IF n = 0 THEN
+    RETURN 1 / n;
+  END IF;
+  RETURN pjl_deep(n - 1);
+END
+$$;
+CREATE FUNCTION pjl_catch() RETURNS text LANGUAGE :pj_lang AS $$
+BEGIN
+  PERFORM pjl_deep(3);
+  RETURN 'no error';
+EXCEPTION WHEN division_by_zero THEN
+  RETURN 'caught ' || SQLERRM;
+END
+$$;
+SELECT pjl_catch();
+        pjl_catch        
+-------------------------
+ caught division by zero
+(1 row)
+
+SELECT pjl_catch();
+        pjl_catch        
+-------------------------
+ caught division by zero
+(1 row)
+
+SELECT pjl_catch();
+        pjl_catch        
+-------------------------
+ caught division by zero
+(1 row)
+
+-- SECURITY DEFINER runs as the owner
+CREATE FUNCTION pjl_definer() RETURNS text SECURITY DEFINER LANGUAGE :pj_lang AS $$
+BEGIN
+  RETURN current_user;
+END
+$$;
+ALTER FUNCTION pjl_definer() OWNER TO regress_pj_owner;
+SET ROLE regress_pj_user;
+SELECT pjl_definer(), current_user;
+   pjl_definer    |  current_user   
+------------------+-----------------
+ regress_pj_owner | regress_pj_user
+(1 row)
+
+SELECT pjl_definer(), current_user;
+   pjl_definer    |  current_user   
+------------------+-----------------
+ regress_pj_owner | regress_pj_user
+(1 row)
+
+RESET ROLE;
+-- plpgsql_jit is untrusted, so only a superuser can create a function in it;
+-- plpgsql, trusted, lets everybody (hence pj_language_1.out)
+SET ROLE regress_pj_user;
+CREATE FUNCTION pjl_user() RETURNS int LANGUAGE :pj_lang AS $$
+BEGIN
+  RETURN 1;
+END
+$$;
+RESET ROLE;
+DROP FUNCTION IF EXISTS pjl_user();
+-- clean up
+DROP OWNED BY regress_pj_owner, regress_pj_user;
+DROP TABLE pjl_t;
+DROP PROCEDURE pjl_proc(int), pjl_commit(int);
+DROP FUNCTION pjl_swap(int), pjl_late(), pjl_raise(int), pjl_trg(), pjl_evt(),
+  pjl_strict(int), pjl_nullable(int),
+  pjl_out(int), pjl_series(int), pjl_poly(anyelement, anyelement),
+  pjl_ping(int), pjl_pong(int), pjl_fact(int), pjl_deep(int), pjl_catch();
+DROP ROLE regress_pj_owner;
+DROP ROLE regress_pj_user;

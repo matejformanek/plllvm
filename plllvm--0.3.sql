@@ -1,4 +1,4 @@
-/* plllvm--0.2.sql */
+/* plllvm--0.3.sql */
 
 -- complain if script is sourced in psql, rather than via CREATE EXTENSION
 \echo Use "CREATE EXTENSION plllvm" to load this file. \quit
@@ -15,6 +15,26 @@ CREATE LANGUAGE plllvm
   VALIDATOR plllvm_validator;
 
 COMMENT ON LANGUAGE plllvm IS 'PL/LLVM untrusted procedural language';
+
+-- PL/pgSQL's syntax, compiler and error messages; the handler is ours.  The
+-- inline handler and the validator are PL/pgSQL's own.  Not TRUSTED: only a
+-- superuser can create functions in it, or grant it.
+CREATE FUNCTION plpgsql_jit_call_handler() RETURNS language_handler
+  LANGUAGE c AS 'MODULE_PATHNAME', 'plllvm_pj_call_handler';
+
+CREATE FUNCTION plpgsql_jit_inline_handler(internal) RETURNS void
+  STRICT LANGUAGE c AS '$libdir/plpgsql', 'plpgsql_inline_handler';
+
+CREATE FUNCTION plpgsql_jit_validator(oid) RETURNS void
+  STRICT LANGUAGE c AS '$libdir/plpgsql', 'plpgsql_validator';
+
+CREATE LANGUAGE plpgsql_jit
+  HANDLER plpgsql_jit_call_handler
+  INLINE plpgsql_jit_inline_handler
+  VALIDATOR plpgsql_jit_validator;
+
+COMMENT ON LANGUAGE plpgsql_jit IS
+  'PL/pgSQL functions compiled with LLVM, with PL/pgSQL as the fallback';
 
 CREATE FUNCTION plllvm_session_info()
   RETURNS TABLE(llvm_version text, triple text, data_layout text,
@@ -78,3 +98,32 @@ CREATE FUNCTION plllvm_jit_test(ir text, opt_level int4 DEFAULT NULL,
   CALLED ON NULL INPUT LANGUAGE c AS 'MODULE_PATHNAME';
 
 REVOKE ALL ON FUNCTION plllvm_jit_test(text, int4, bool) FROM PUBLIC;
+
+-- of this backend: every handler entry of LANGUAGE plpgsql_jit is one call,
+-- and calls = compiled_calls + deopts + interpreted_calls.  declines (calls
+-- that fell back because the function is declined), guard_misses, null_args,
+-- plugin_fallbacks and capped are among the interpreted_calls
+CREATE FUNCTION plllvm_pj_stats(OUT calls int8, OUT compiled_calls int8,
+                                OUT deopts int8, OUT interpreted_calls int8,
+                                OUT declines int8, OUT guard_misses int8,
+                                OUT null_args int8, OUT plugin_fallbacks int8,
+                                OUT capped int8, OUT translations int8,
+                                OUT attempts int8, OUT failures int8,
+                                OUT boxed_evals int8, OUT resident int8,
+                                OUT peak_tuple_bytes int8)
+  RETURNS record
+  VOLATILE LANGUAGE c AS 'MODULE_PATHNAME';
+
+REVOKE ALL ON FUNCTION plllvm_pj_stats() FROM PUBLIC;
+
+-- one row per signature and input collation of fn in this backend; state is
+-- new, seen or declined
+CREATE FUNCTION plllvm_pj_status(fn regprocedure)
+  RETURNS TABLE(signature text, collation regcollation, state text,
+                reason text, calls int8, compiled_calls int8, deopts int8,
+                guard_misses int8, translations int8, last_path text,
+                exprs int4, unplanned int4, variants int4, native bool,
+                boxed bool, restartable bool, translate_ms float8)
+  STRICT VOLATILE LANGUAGE c AS 'MODULE_PATHNAME';
+
+REVOKE ALL ON FUNCTION plllvm_pj_status(regprocedure) FROM PUBLIC;

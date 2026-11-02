@@ -24,3 +24,5 @@ lcov.info
 /tmp_check/
 regression.diffs
 regression.out
+/results-plpgsql-pj/
+/results-verify.log

@@ -86,7 +86,9 @@ FromExpr
 FuncExpr
 FunctionCallInfo
 HASHCTL
+HASHELEMENT
 HASHHDR
+HASH_SEQ_STATUS
 HTAB
 HashAllocFunc
 HashCompareFunc
@@ -237,6 +239,8 @@ Pg_abi_values
 Pg_finfo_record
 Pg_magic_struct
 PhiJoin
+PjEntry
+PjState
 Plan
 PlanState
 PlannedStmt
@@ -406,11 +410,15 @@ plllvm_jit_module
 plllvm_jit_result
 plllvm_jit_session_info
 plllvm_path
+plllvm_pj_counters
+plllvm_pj_info
 plllvm_refs
 plllvm_repr
 plllvm_site
 plllvm_spi_stmt
 plllvm_value
+plpgsql_call_handler_t
+plpgsql_compile_t
 policy_t
 regproc
 sigjmp_buf

@@ -26,9 +26,10 @@ SET plllvm.regress_test_mode = on;
 SELECT extversion, extrelocatable, extnamespace::regnamespace
   FROM pg_extension WHERE extname = 'plllvm';
 
-SELECT lanpltrusted, lanplcallfoid::regprocedure, laninline,
-       lanvalidator::regprocedure
-  FROM pg_language WHERE lanname = 'plllvm';
+-- plpgsql_jit takes PL/pgSQL's inline handler and validator
+SELECT lanname, lanpltrusted, lanplcallfoid::regprocedure,
+       laninline::regprocedure, lanvalidator::regprocedure
+  FROM pg_language WHERE lanname IN ('plllvm', 'plpgsql_jit') ORDER BY 1;
 
 -- the extension owns the language and its support functions
 SELECT pg_describe_object(classid, objid, objsubid) AS member
