@@ -23,6 +23,7 @@
 
 #include "plllvm.h"
 #include "plllvm_jit.h"
+#include "plllvm_pj.h"
 
 PG_FUNCTION_INFO_V1(plllvm_session_info);
 PG_FUNCTION_INFO_V1(plllvm_code_cache);
@@ -30,6 +31,8 @@ PG_FUNCTION_INFO_V1(plllvm_jit_test);
 PG_FUNCTION_INFO_V1(plllvm_function_status);
 PG_FUNCTION_INFO_V1(plllvm_call_sites);
 PG_FUNCTION_INFO_V1(plllvm_expr_stats);
+PG_FUNCTION_INFO_V1(plllvm_pj_stats);
+PG_FUNCTION_INFO_V1(plllvm_pj_status);
 
 static bool resident_size(int64 *bytes);
 
@@ -353,6 +356,81 @@ plllvm_expr_stats(PG_FUNCTION_ARGS)
 	values[8] = Int64GetDatum(plllvm_expr_compiled_evals);
 
 	PG_RETURN_DATUM(HeapTupleGetDatum(heap_form_tuple(tupdesc, values, nulls)));
+}
+
+/*
+ * LANGUAGE plpgsql_jit in this backend
+ */
+Datum
+plllvm_pj_stats(PG_FUNCTION_ARGS)
+{
+	const plllvm_pj_counters *c = &plllvm_pj_count;
+	TupleDesc	tupdesc;
+	Datum		values[15];
+	bool		nulls[15] = {0};
+
+	if (get_call_result_type(fcinfo, NULL, &tupdesc) != TYPEFUNC_COMPOSITE)
+		elog(ERROR, "return type must be a row type");
+
+	values[0] = Int64GetDatum(c->calls);
+	values[1] = Int64GetDatum(c->compiled_calls);
+	values[2] = Int64GetDatum(c->deopts);
+	values[3] = Int64GetDatum(c->interpreted_calls);
+	values[4] = Int64GetDatum(c->declines);
+	values[5] = Int64GetDatum(c->guard_misses);
+	values[6] = Int64GetDatum(c->null_args);
+	values[7] = Int64GetDatum(c->plugin_fallbacks);
+	values[8] = Int64GetDatum(c->capped);
+	values[9] = Int64GetDatum(c->translations);
+	values[10] = Int64GetDatum(c->attempts);
+	values[11] = Int64GetDatum(c->failures);
+	values[12] = Int64GetDatum(c->boxed_evals);
+	values[13] = Int64GetDatum(c->resident);
+	values[14] = Int64GetDatum(c->peak_tuple_bytes);
+
+	PG_RETURN_DATUM(HeapTupleGetDatum(heap_form_tuple(tupdesc, values, nulls)));
+}
+
+/*
+ * The side entries of a plpgsql_jit function, one per signature and input
+ * collation.  Nothing is compiled yet, so the columns about compiled code
+ * are NULL.
+ */
+Datum
+plllvm_pj_status(PG_FUNCTION_ARGS)
+{
+	ReturnSetInfo *rsinfo = (ReturnSetInfo *) fcinfo->resultinfo;
+	plllvm_pj_info *infos;
+	int			ninfos;
+
+	InitMaterializedSRF(fcinfo, 0);
+
+	ninfos = plllvm_pj_infos(PG_GETARG_OID(0), &infos);
+	for (int i = 0; i < ninfos; i++)
+	{
+		Datum		values[17] = {0};
+		bool		nulls[17] = {0};
+
+		values[0] = CStringGetTextDatum(infos[i].signature);
+		values[1] = ObjectIdGetDatum(infos[i].collation);
+		values[2] = CStringGetTextDatum(infos[i].state);
+		if (infos[i].reason != NULL)
+			values[3] = CStringGetTextDatum(infos[i].reason);
+		else
+			nulls[3] = true;
+		values[4] = Int64GetDatum(infos[i].calls);
+		values[5] = Int64GetDatum(0);	/* compiled_calls */
+		values[6] = Int64GetDatum(0);	/* deopts */
+		values[7] = Int64GetDatum(0);	/* guard_misses */
+		values[8] = Int64GetDatum(0);	/* translations */
+		values[9] = CStringGetTextDatum(infos[i].last_path);
+		for (int j = 10; j < 17; j++)
+			nulls[j] = true;
+
+		tuplestore_putvalues(rsinfo->setResult, rsinfo->setDesc, values, nulls);
+	}
+
+	return (Datum) 0;
 }
 
 /*

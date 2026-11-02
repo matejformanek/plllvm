@@ -1,0 +1,92 @@
+--
+-- pj_stats: the counters of plllvm_pj_stats() and plllvm_pj_status() after
+-- calls of a plpgsql_jit function, in every variant of make installcheck-pj
+--
+-- Counters are per backend and pg_regress starts one per file, so the numbers
+-- are exact.  Each column is true in every variant: only plllvm.plpgsql_jit
+-- changes what a correct run looks like.  Nothing compiles yet, so on the
+-- second call the function is declined and every call is an interpreted one.
+--
+LOAD 'plllvm';
+CREATE FUNCTION ps_inc(n int) RETURNS int LANGUAGE plpgsql_jit AS $$
+BEGIN
+  RETURN n + 1;
+END
+$$;
+SELECT pj_mark() \gset
+SELECT ps_inc(1);
+ ps_inc 
+--------
+      2
+(1 row)
+
+SELECT ps_inc(2);
+ ps_inc 
+--------
+      3
+(1 row)
+
+SELECT ps_inc(3);
+ ps_inc 
+--------
+      4
+(1 row)
+
+SELECT ps_inc(4);
+ ps_inc 
+--------
+      5
+(1 row)
+
+SELECT pj_delta(0, 4, NULL, 0, 0) \gset
+SELECT pj_expect('ps_inc(int)', 'declined:not implemented') \gset
+SELECT calls = 4 AS calls_ok,
+       calls = compiled_calls + deopts + interpreted_calls AS balanced,
+       compiled_calls = 0 AS compiled_ok,
+       declines = CASE WHEN s.jit THEN 3 ELSE 0 END AS declines_ok,
+       guard_misses + null_args + plugin_fallbacks + capped + translations +
+       attempts + failures + boxed_evals + resident + peak_tuple_bytes = 0
+         AS rest_ok
+  FROM plllvm_pj_stats(),
+       (SELECT current_setting('plllvm.plpgsql_jit')::bool AS jit) s;
+ calls_ok | balanced | compiled_ok | declines_ok | rest_ok 
+----------+----------+-------------+-------------+---------
+ t        | t        | t           | t           | t
+(1 row)
+
+-- an entry exists only for a call that went through the handler's own
+-- compile: with the kill switch off there is none
+SELECT count(*) = current_setting('plllvm.plpgsql_jit')::bool::int AS entries_ok,
+       coalesce(bool_and(state = 'declined' AND reason = 'not implemented' AND
+                         calls = 4 AND compiled_calls = 0 AND
+                         last_path = 'declined:not implemented' AND
+                         exprs IS NULL AND native IS NULL),
+                NOT current_setting('plllvm.plpgsql_jit')::bool) AS status_ok
+  FROM plllvm_pj_status('ps_inc(int)');
+ entries_ok | status_ok 
+------------+-----------
+ t          | t
+(1 row)
+
+-- the entry goes with the definition
+CREATE OR REPLACE FUNCTION ps_inc(n int) RETURNS int LANGUAGE plpgsql_jit AS $$
+BEGIN
+  RETURN n + 2;
+END
+$$;
+SELECT ps_inc(1);
+ ps_inc 
+--------
+      3
+(1 row)
+
+SELECT count(*) = current_setting('plllvm.plpgsql_jit')::bool::int AS entries_ok,
+       coalesce(bool_and(state = 'seen' AND calls = 1),
+                NOT current_setting('plllvm.plpgsql_jit')::bool) AS fresh_ok
+  FROM plllvm_pj_status('ps_inc(int)');
+ entries_ok | fresh_ok 
+------------+----------
+ t          | t
+(1 row)
+
+DROP FUNCTION ps_inc(int);

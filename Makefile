@@ -5,7 +5,7 @@ MODULE_big = plllvm
 OBJS = $(patsubst %.c,%.o,$(filter-out src/plllvm_types.c,$(wildcard src/*.c))) \
 	src/plllvm_error.o
 EXTENSION = plllvm
-DATA = plllvm--0.2.sql
+DATA = plllvm--0.3.sql
 PGFILEDESC = "plllvm - PL/LLVM procedural language"
 
 # setup, features, kernels (examples/kernels/*.ll), fatal, teardown
@@ -44,6 +44,13 @@ REGRESS_EXPR = expr_basic \
 		expr_bool
 REGRESS = plllvm_setup $(REGRESS_FEATURES) $(REGRESS_KERNELS) expr_plugin \
 	$(REGRESS_EXPR) expr_stats plllvm_fatal plllvm_teardown
+
+# LANGUAGE plpgsql_jit, with PJ_LANG=plpgsql_jit (make installcheck-pj); the
+# files run against stock PL/pgSQL's output.  REGRESS_PJ_ONCE runs in one
+# variant only, REGRESS_PJ_OPT at opt level 3.
+REGRESS_PJ = pj_language
+REGRESS_PJ_ONCE =
+REGRESS_PJ_OPT =
 
 REGRESS_OPTS = --dbname=$(PL_TESTDB)
 
@@ -173,7 +180,8 @@ endif
 
 .PHONY: port-ok doctor stage cluster-init cluster-start cluster-stop pgindent \
 	installcheck-discard installcheck-opt installcheck-hazard installcheck-plpgsql \
-	installcheck-expr check-host-api kernels check-kernels
+	installcheck-expr installcheck-pj installcheck-pj-once installcheck-pj-opt \
+	installcheck-plpgsql-pj verify check-host-api kernels check-kernels
 
 # 5432, 5433 belong to pg-claude, 5444 to the perf cluster
 port-ok:
@@ -210,9 +218,10 @@ cluster-init: port-ok
 	  >> '$(PLLLVM_DATA)/postgresql.conf'
 
 # stage.conf is written at each start, so the cluster serves the ./stage of
-# the checkout (or worktree) that started it
+# the checkout (or worktree) that started it.  The first hit wins in both
+# paths, and $system may hold an older plllvm.control.
 cluster-start: port-ok
-	printf "extension_control_path = '\$$system:$(STAGE)/share'\ndynamic_library_path = '$(STAGE)/lib:\$$libdir'\n" \
+	printf "extension_control_path = '$(STAGE)/share:\$$system'\ndynamic_library_path = '$(STAGE)/lib:\$$libdir'\n" \
 	  > '$(PLLLVM_DATA)/stage.conf'
 	'$(bindir)/pg_ctl' -D '$(PLLLVM_DATA)' -l '$(PLLLVM_DATA).log' -w start
 
@@ -314,6 +323,116 @@ installcheck-plpgsql: port-ok
 	  diff -r results-plpgsql/base/pl/results results-plpgsql/$$m/pl/results && \
 	  diff -r results-plpgsql/base/core/results results-plpgsql/$$m/core/results || exit 1; \
 	done
+
+#
+# LANGUAGE plpgsql_jit: the pj_ files create their functions in the language
+# of :pj_lang, plpgsql unless PJ_LANG says otherwise, so one expected output
+# is stock PL/pgSQL's.  Every variant has plllvm preloaded: pj_expect takes a
+# session without plllvm.plpgsql_jit for stock.  Under cache flushes only
+# pj_stats runs, as installcheck-expr does with expr_stats.
+#
+PJ_FIXTURE = plllvm_setup pj_setup
+
+# $(call pj_run,PGOPTIONS,files)
+pj_run = PJ_LANG=plpgsql_jit $(MAKE) installcheck REGRESS='$(2)' PGOPTIONS='$(1)'
+
+installcheck-pj:
+	$(call pj_run,$(PLPGSQL_LOAD) -c plllvm.plpgsql_jit=off,$(PJ_FIXTURE) $(REGRESS_PJ) pj_stats)
+	$(call pj_run,$(PLPGSQL_LOAD),$(PJ_FIXTURE) $(REGRESS_PJ) pj_stats)
+	$(call pj_run,$(EXPR_JIT) -c plllvm.expr_eager=on,$(PJ_FIXTURE) $(REGRESS_PJ) pj_stats)
+	$(call pj_run,$(PLPGSQL_LOAD) -c debug_discard_caches=1,$(PJ_FIXTURE) pj_stats)
+
+# expected from plllvm, so not against stock
+installcheck-pj-once:
+	@[ -z '$(REGRESS_PJ_ONCE)' ] || \
+	  $(call pj_run,$(PLPGSQL_LOAD),$(PJ_FIXTURE) $(REGRESS_PJ_ONCE))
+
+installcheck-pj-opt:
+	@[ -z '$(REGRESS_PJ_OPT)' ] || \
+	  $(call pj_run,$(PLPGSQL_LOAD) -c plllvm.pj_opt_level=3,$(PJ_FIXTURE) $(REGRESS_PJ_OPT))
+
+#
+# The same tests with every LANGUAGE plpgsql changed to plpgsql_jit, in a
+# generated copy of their inputs: the unchanged tests without plllvm (base),
+# then the copy with plllvm.plpgsql_jit off and on.  The results, with the
+# language name changed back, must be base's, except the hunks in
+# tools/plpgsql_pj_allowed.diff, each with its reason there (a role that is no
+# superuser creates no function in an untrusted language).  test_setup runs
+# unchanged: it reads data files from its inputdir.  The tests create roles
+# and a tablespace, so this is for a throwaway cluster only.
+#
+PJPL = results-plpgsql-pj
+PJPL_SWAP = perl -pe 's/\b(language\s+)(["\x27]?)plpgsql\2\b/$$1plpgsql_jit/gi'
+PJPL_BACK = perl -pe 's/plpgsql_jit/plpgsql/g'
+
+# $(call pjpl_inputs,dir,source dir,tests)
+pjpl_inputs = \
+	rm -rf $(1) && $(MKDIR_P) $(1)/sql $(1)/expected && \
+	{ [ ! -d $(2)/data ] || cp -R $(2)/data $(1); } && \
+	for t in $(3); do \
+	  $(PJPL_SWAP) $(2)/sql/$$t.sql > $(1)/sql/$$t.sql && \
+	  $(PJPL_SWAP) $(2)/expected/$$t.out > $(1)/expected/$$t.out || exit 1; done
+
+# $(call pjpl_suite,name,PGOPTIONS,regress options,pl inputdir,core inputdir):
+# the tests as installcheck-plpgsql's suites; a failed test shows in the diff
+# against base, not here
+pjpl_suite = \
+	$(MKDIR_P) $(PJPL)/$(1)/pl $(PJPL)/$(1)/core && \
+	{ PGOPTIONS='$(2)' $(pg_regress_installcheck) --host=/tmp --port=$(PLLLVM_PORT) $(3) \
+		--inputdir=$(4) --outputdir=$(PJPL)/$(1)/pl --dbname=pl_regression \
+		$(PLPGSQL_TESTS) || true; } && \
+	'$(bindir)/psql' -X -q -h /tmp -p $(PLLLVM_PORT) -d postgres \
+		-c 'DROP DATABASE IF EXISTS regression' \
+		-c 'DROP DATABASE IF EXISTS regression_utf8' \
+		-c 'DROP TABLESPACE IF EXISTS regress_tblspace' && \
+	PGOPTIONS='$(2)' $(pg_regress_installcheck) --host=/tmp --port=$(PLLLVM_PORT) $(3) \
+		--inputdir=$(PG_SRC)/src/test/regress --dlpath=$(PG_BUILD)/src/test/regress \
+		--outputdir=$(PJPL)/$(1)/core --dbname=regression test_setup && \
+	{ PGOPTIONS='$(2)' $(pg_regress_installcheck) --host=/tmp --port=$(PLLLVM_PORT) --use-existing \
+		--inputdir=$(5) --dlpath=$(PG_BUILD)/src/test/regress \
+		--outputdir=$(PJPL)/$(1)/core --dbname=regression plpgsql || true; }
+
+installcheck-plpgsql-pj: port-ok
+	@case "$(origin PLLLVM_PORT):$(PLLLVM_PORT)" in file:*|*:|*:544[2-5]) \
+	  echo "installcheck-plpgsql-pj needs the PLLLVM_PORT of a throwaway cluster" >&2; \
+	  exit 1;; esac
+	rm -rf $(PJPL)
+	$(call pjpl_inputs,$(PJPL)/in/pl,$(PG_SRC)/src/pl/plpgsql/src,$(PLPGSQL_TESTS))
+	$(call pjpl_inputs,$(PJPL)/in/core,$(PG_SRC)/src/test/regress,plpgsql)
+	$(call pjpl_suite,base,,,$(PG_SRC)/src/pl/plpgsql/src,$(PG_SRC)/src/test/regress)
+	$(call pjpl_suite,off,$(PLPGSQL_LOAD) -c plllvm.plpgsql_jit=off,--load-extension=plllvm,$(PJPL)/in/pl,$(PJPL)/in/core)
+	$(call pjpl_suite,on,$(PLPGSQL_LOAD),--load-extension=plllvm,$(PJPL)/in/pl,$(PJPL)/in/core)
+	rc=0; for m in off on; do \
+	  cp -r $(PJPL)/$$m $(PJPL)/$$m-back && \
+	  for f in $(PJPL)/$$m-back/*/results/*.out; do $(PJPL_BACK) $$f > $$f.tmp && mv $$f.tmp $$f; done; \
+	  diff -r -x regression.out -x regression.diffs -x '*.diff' $(PJPL)/base $(PJPL)/$$m-back \
+	    | sed "s#$(PJPL)/##g; s#$$m-back#MODE#g" > $(PJPL)/$$m.diff; \
+	  grep -v '^#' tools/plpgsql_pj_allowed.diff | diff - $(PJPL)/$$m.diff > /dev/null || \
+	    { echo "installcheck-plpgsql-pj: $$m differs from base, see $(PJPL)/$$m.diff" >&2; rc=1; }; \
+	done; exit $$rc
+
+#
+# Everything a PR runs: the suites in order, the exit code of each in
+# results-verify.log with the commit, and a failure does not stop the rest.
+# A cluster that is already running is used as it is.
+#
+VERIFY_LOG = results-verify.log
+
+verify: port-ok
+	@echo "plllvm `git rev-parse HEAD` dirty=`git status --porcelain --untracked-files=no | wc -l | tr -d ' '`" > $(VERIFY_LOG); \
+	fail=0; \
+	step() { echo "== $$*"; "$$@"; rc=$$?; echo "$$rc $$*" >> $(VERIFY_LOG); [ $$rc = 0 ] || fail=1; }; \
+	step $(MAKE) all stage; \
+	[ -d '$(PLLLVM_DATA)' ] || step $(MAKE) cluster-init; \
+	'$(bindir)/pg_ctl' -D '$(PLLLVM_DATA)' status > /dev/null || step $(MAKE) cluster-start; \
+	for t in installcheck installcheck-opt installcheck-discard installcheck-hazard \
+	  check-host-api pgindent doctor installcheck-expr installcheck-plpgsql \
+	  installcheck-pj installcheck-pj-once installcheck-pj-opt installcheck-plpgsql-pj; do \
+	  step $(MAKE) $$t; \
+	  [ $$t != pgindent ] || step git diff --exit-code; \
+	done; \
+	step $(MAKE) cluster-stop; \
+	exit $$fail
 
 # runtime functions that only the inline helpers call
 HOST_API_INTERNAL = plllvm_rt_site_call plllvm_rt_site_null plllvm_rt_array_access

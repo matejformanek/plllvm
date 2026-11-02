@@ -16,7 +16,7 @@
 #include "utils/funccache.h"
 
 /* keep in sync with META.json; plllvm.control carries major.minor only */
-#define PLLLVM_VERSION "0.2.0"
+#define PLLLVM_VERSION "0.3.0"
 
 /* the memory of a running function that calls other functions */
 typedef struct plllvm_frame
@@ -90,6 +90,7 @@ extern bool plllvm_expr_jit;
 extern bool plllvm_expr_eager;
 extern int	plllvm_expr_opt_level;
 extern int	plllvm_expr_max_programs;
+extern bool plllvm_plpgsql_jit;
 
 /* plllvm.c */
 extern const char *plllvm_display_path(const char *path);

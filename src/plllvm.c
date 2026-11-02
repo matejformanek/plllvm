@@ -65,6 +65,7 @@ bool		plllvm_expr_jit = false;
 bool		plllvm_expr_eager = false;
 int			plllvm_expr_opt_level = 2;
 int			plllvm_expr_max_programs = 1000;
+bool		plllvm_plpgsql_jit = true;
 
 static const struct config_enum_entry debug_inject_options[] = {
 	{"none", PLLLVM_INJECT_NONE, false},
@@ -189,6 +190,14 @@ _PG_init(void)
 							1000, 1, 1000000,
 							PGC_SUSET, 0,
 							NULL, NULL, NULL);
+
+	DefineCustomBoolVariable("plllvm.plpgsql_jit",
+							 gettext_noop("Enables the handler of LANGUAGE plpgsql_jit."),
+							 gettext_noop("Off sends every call of such a function straight to PL/pgSQL."),
+							 &plllvm_plpgsql_jit,
+							 true,
+							 PGC_SUSET, 0,
+							 NULL, NULL, NULL);
 
 	plllvm_plpgsql_init();
 
