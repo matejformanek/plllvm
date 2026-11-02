@@ -48,8 +48,8 @@ REGRESS = plllvm_setup $(REGRESS_FEATURES) $(REGRESS_KERNELS) expr_plugin \
 # LANGUAGE plpgsql_jit, with PJ_LANG=plpgsql_jit (make installcheck-pj); the
 # files run against stock PL/pgSQL's output.  REGRESS_PJ_ONCE runs in one
 # variant only, REGRESS_PJ_OPT at opt level 3.
-REGRESS_PJ = pj_language
-REGRESS_PJ_ONCE =
+REGRESS_PJ = pj_language pj_basic pj_errors pj_guards pj_sessions
+REGRESS_PJ_ONCE = pj_states pj_discard
 REGRESS_PJ_OPT =
 
 REGRESS_OPTS = --dbname=$(PL_TESTDB)
@@ -338,16 +338,17 @@ pj_run = PJ_LANG=plpgsql_jit $(MAKE) installcheck REGRESS='$(2)' PGOPTIONS='$(1)
 
 installcheck-pj:
 	$(call pj_run,$(PLPGSQL_LOAD) -c plllvm.plpgsql_jit=off,$(PJ_FIXTURE) $(REGRESS_PJ) pj_stats)
-	$(call pj_run,$(PLPGSQL_LOAD),$(PJ_FIXTURE) $(REGRESS_PJ) pj_stats)
+	$(call pj_run,$(PLPGSQL_LOAD) -c plllvm.pj_opt_level=0,$(PJ_FIXTURE) $(REGRESS_PJ) pj_stats)
+	$(call pj_run,$(PLPGSQL_LOAD) -c plllvm.pj_opt_level=2,$(PJ_FIXTURE) $(REGRESS_PJ) pj_stats)
 	$(call pj_run,$(EXPR_JIT) -c plllvm.expr_eager=on,$(PJ_FIXTURE) $(REGRESS_PJ) pj_stats)
-	$(call pj_run,$(PLPGSQL_LOAD) -c debug_discard_caches=1,$(PJ_FIXTURE) pj_stats)
+	$(call pj_run,$(PLPGSQL_LOAD) -c debug_discard_caches=1,$(PJ_FIXTURE) pj_guards pj_stats)
 
 # expected from plllvm, so not against stock
 installcheck-pj-once:
 	@[ -z '$(REGRESS_PJ_ONCE)' ] || \
 	  $(call pj_run,$(PLPGSQL_LOAD),$(PJ_FIXTURE) $(REGRESS_PJ_ONCE))
 
-# the GUC arrives with PR-C1, the list is filled from PR-C2
+# the list is filled from PR-C2
 installcheck-pj-opt:
 	@[ -z '$(REGRESS_PJ_OPT)' ] || \
 	  $(call pj_run,$(PLPGSQL_LOAD) -c plllvm.pj_opt_level=3,$(PJ_FIXTURE) $(REGRESS_PJ_OPT))
@@ -436,7 +437,7 @@ HOST_API_INTERNAL = plllvm_rt_site_call plllvm_rt_site_null plllvm_rt_array_acce
 # docs/host-api.ll declares every other plllvm_* name of plllvm_types.bc
 check-host-api: src/plllvm_types.bc
 	$(LLVM)/bin/llvm-nm -j $< | sed 's/^_//' | grep '^plllvm_' | \
-		grep -v -x -e plllvm_attr_template -e 'plllvm_types_.*' $(addprefix -e ,$(HOST_API_INTERNAL)) | \
+		grep -v -x -e plllvm_attr_template -e 'plllvm_types_.*' -e 'plllvm_pj_.*' $(addprefix -e ,$(HOST_API_INTERNAL)) | \
 		sort -u > $@.bc
 	sed -n 's/^declare .*@\(plllvm_[a-z0-9_]*\)(.*/\1/p' docs/host-api.ll | sort -u > $@.ll
 	diff $@.bc $@.ll; rc=$$?; rm -f $@.bc $@.ll; exit $$rc

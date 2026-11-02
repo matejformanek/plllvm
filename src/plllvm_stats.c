@@ -33,6 +33,7 @@ PG_FUNCTION_INFO_V1(plllvm_call_sites);
 PG_FUNCTION_INFO_V1(plllvm_expr_stats);
 PG_FUNCTION_INFO_V1(plllvm_pj_stats);
 PG_FUNCTION_INFO_V1(plllvm_pj_status);
+PG_FUNCTION_INFO_V1(plllvm_pj_ir);
 
 static bool resident_size(int64 *bytes);
 
@@ -97,8 +98,8 @@ plllvm_code_cache(PG_FUNCTION_ARGS)
 
 	for (plllvm_jit_module *mod = plllvm_jit_modules(); mod; mod = mod->next)
 	{
-		Datum		values[19];
-		bool		nulls[19] = {0};
+		Datum		values[20];
+		bool		nulls[20] = {0};
 
 		if (OidIsValid(mod->owner_oid))
 			values[0] = ObjectIdGetDatum(mod->owner_oid);
@@ -134,6 +135,10 @@ plllvm_code_cache(PG_FUNCTION_ARGS)
 		values[18] = CStringGetTextDatum(mod->kind == PLLLVM_JIT_EXPR ? "expr" :
 										 mod->kind == PLLLVM_JIT_PJ ? "pj" :
 										 "function");
+		if (mod->kind == PLLLVM_JIT_PJ)
+			values[19] = Float8GetDatum(mod->translate_ms);
+		else
+			nulls[19] = true;
 
 		tuplestore_putvalues(rsinfo->setResult, rsinfo->setDesc, values, nulls);
 	}
@@ -386,7 +391,7 @@ plllvm_pj_stats(PG_FUNCTION_ARGS)
 	values[10] = Int64GetDatum(c->attempts);
 	values[11] = Int64GetDatum(c->failures);
 	values[12] = Int64GetDatum(c->boxed_evals);
-	values[13] = Int64GetDatum(c->resident);
+	values[13] = Int64GetDatum(plllvm_jit_pj_resident());
 	values[14] = Int64GetDatum(c->peak_tuple_bytes);
 
 	PG_RETURN_DATUM(HeapTupleGetDatum(heap_form_tuple(tupdesc, values, nulls)));
@@ -394,8 +399,7 @@ plllvm_pj_stats(PG_FUNCTION_ARGS)
 
 /*
  * The side entries of a plpgsql_jit function, one per signature and input
- * collation.  Nothing is compiled yet, so the columns about compiled code
- * are NULL.
+ * collation.  The columns about the translation are NULL until there is one.
  */
 Datum
 plllvm_pj_status(PG_FUNCTION_ARGS)
@@ -420,13 +424,31 @@ plllvm_pj_status(PG_FUNCTION_ARGS)
 		else
 			nulls[3] = true;
 		values[4] = Int64GetDatum(infos[i].calls);
-		values[5] = Int64GetDatum(0);	/* compiled_calls */
-		values[6] = Int64GetDatum(0);	/* deopts */
-		values[7] = Int64GetDatum(0);	/* guard_misses */
-		values[8] = Int64GetDatum(0);	/* translations */
-		values[9] = CStringGetTextDatum(infos[i].last_path);
-		for (int j = 10; j < 17; j++)
-			nulls[j] = true;
+		values[5] = Int64GetDatum(infos[i].compiled_calls);
+		values[6] = Int64GetDatum(infos[i].deopts);
+		values[7] = Int64GetDatum(infos[i].guard_misses);
+		values[8] = Int64GetDatum(infos[i].translations);
+		if (infos[i].last_path != NULL)
+			values[9] = CStringGetTextDatum(infos[i].last_path);
+		else
+			nulls[9] = true;
+		if (infos[i].has_harvest)
+		{
+			values[10] = Int32GetDatum(infos[i].exprs);
+			values[11] = Int32GetDatum(infos[i].unplanned);
+			values[12] = Int32GetDatum(infos[i].variants);
+		}
+		else
+			nulls[10] = nulls[11] = nulls[12] = true;
+		if (infos[i].has_variant)
+		{
+			values[13] = BoolGetDatum(infos[i].native);
+			values[14] = BoolGetDatum(infos[i].boxed);
+			values[15] = BoolGetDatum(infos[i].restartable);
+			values[16] = Float8GetDatum(infos[i].translate_ms);
+		}
+		else
+			nulls[13] = nulls[14] = nulls[15] = nulls[16] = true;
 
 		tuplestore_putvalues(rsinfo->setResult, rsinfo->setDesc, values, nulls);
 	}
@@ -456,4 +478,18 @@ resident_size(int64 *bytes)
 	return false;
 
 #endif
+}
+
+/*
+ * The IR of the code a plpgsql_jit function runs in this session, for
+ * inspection
+ */
+Datum
+plllvm_pj_ir(PG_FUNCTION_ARGS)
+{
+	char	   *ir = plllvm_pj_ir_text(PG_GETARG_OID(0));
+
+	if (ir == NULL)
+		PG_RETURN_NULL();
+	PG_RETURN_TEXT_P(cstring_to_text(ir));
 }

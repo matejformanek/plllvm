@@ -91,6 +91,11 @@ extern bool plllvm_expr_eager;
 extern int	plllvm_expr_opt_level;
 extern int	plllvm_expr_max_programs;
 extern bool plllvm_plpgsql_jit;
+extern int	plllvm_pj_opt_level;
+extern int	plllvm_pj_codegen;
+
+/* values of plllvm.pj_codegen */
+#define PLLLVM_PJ_NATIVE	0
 
 /* plllvm.c */
 extern const char *plllvm_display_path(const char *path);
@@ -106,6 +111,7 @@ extern int64 plllvm_expr_fired;
 extern int64 plllvm_expr_declined;
 extern void plllvm_plpgsql_init(void);
 extern const char *plllvm_plpgsql_state(void);
+extern bool plllvm_plpgsql_foreign_plugin(void);
 
 /* plllvm_exprjit.c */
 struct ExprState;

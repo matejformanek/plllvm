@@ -583,6 +583,7 @@ void	   *referenced_functions[] =
 	plllvm_bigint_overflow,
 	plllvm_div_zero,
 	plllvm_sqrt_negative,
+	plllvm_pj_no_return,
 	plllvm_keep,
 	plllvm_scratch_reset,
 	plllvm_array_arg,

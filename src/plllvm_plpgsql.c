@@ -52,6 +52,7 @@
 #include "plllvm.h"
 #include "plllvm_expr.h"
 #include "plllvm_ir.h"
+#include "plllvm_jit.h"
 
 /* plpgsql_param_compile chooses one of six paramfuncs */
 #define MAX_PARAMFUNCS	6
@@ -181,6 +182,18 @@ plllvm_plpgsql_state(void)
 	if (paramfunc_conflict)
 		return "declined:paramfunc";
 	return plllvm_expr_jit ? "active" : "off";
+}
+
+/*
+ * Is another plugin in the PL/pgSQL slot, or was one there before us?  Its
+ * func_beg and stmt_beg do not run for compiled calls, so plpgsql_jit steps
+ * aside: a debugger would never stop.
+ */
+bool
+plllvm_plpgsql_foreign_plugin(void)
+{
+	return plllvm_debug_inject == PLLLVM_INJECT_FOREIGN_PLUGIN ||
+		*plugin_ptr != &plugin || prev_plugin != NULL;
 }
 
 static void

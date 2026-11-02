@@ -146,7 +146,8 @@ All are superuser only and show the current backend.
 | `plllvm_function_status(regprocedure)` | `not_compiled`, `live`, `stale` or `dropped`, with resident and retired compiles |
 | `plllvm_expr_stats()` | expression JIT in PL/pgSQL (below): `state`; expressions `fired`, `installed` (given code), `compiled`, `declined`, failed (`failures`) and left interpreted at the cap (`capped`); `programs` kept; `compiled_evals`, evaluations of code compiled under `plllvm.expr_eager` |
 | `plllvm_pj_stats()` | `LANGUAGE plpgsql_jit` (below): handler entries `calls` = `compiled_calls` + `deopts` + `interpreted_calls`, and among the interpreted `declines`, `guard_misses`, `null_args`, `plugin_fallbacks`, `capped`; `translations`, `attempts`, `failures`, `boxed_evals`, `resident`, `peak_tuple_bytes` |
-| `plllvm_pj_status(regprocedure)` | one row per signature and input collation of a `plpgsql_jit` function: `state` (`new`, `seen`, `declined`), `reason`, `calls`, `last_path`; the columns about compiled code are NULL |
+| `plllvm_pj_status(regprocedure)` | one row per signature and input collation of a `plpgsql_jit` function: `state` (`new`, `seen`, `compiled`, `declined`), `reason`, the counts of its calls, `last_path` (`compiled`, `deopt`, `interpreted:<why>`, `declined:<reason>`), and what was translated: `exprs`, `unplanned`, `variants`, and of the variant the session's `plllvm.pj_opt_level` selects `native`, `boxed`, `restartable`, `translate_ms` |
+| `plllvm_pj_ir(regprocedure)` | the IR of that variant, for inspection |
 | `plllvm_jit_test(ir, opt_level, codegen)` | compiles a body without calling it: `ok`, SQLSTATE, message, detail, line and column of a parse error, instruction and helper counts, checks added; `codegen => false` only checks the IR |
 
 Retired code (replaced, no call running it) is listed until the next compile
@@ -210,9 +211,17 @@ debuggers and profilers use.
 `CREATE EXTENSION plllvm` also creates `plpgsql_jit`: PL/pgSQL's syntax,
 compiler, validator, `DO` handler and error messages, with a call handler
 of its own. A function is created as with PL/pgSQL, with `LANGUAGE
-plpgsql_jit`. For now every call runs in PL/pgSQL; the handler only keeps an
-entry per function, counted in `plllvm_pj_stats()` and shown by
-`plllvm_pj_status()` (`docs/architecture.md`).
+plpgsql_jit`. The first call of a function runs in PL/pgSQL, which plans what
+it runs. The second translates the function to LLVM IR if it is in scope,
+and later calls run the code. In scope so far: a body of blocks that ends in
+a `RETURN`, with arguments and result of a type passed by value; the value
+is a bare variable or constant, or an expression of `bool`, `int4`, `int8`
+and `float8` as in the expression JIT, converted to the result type by a
+cast of that kind. Anything else is declined, and `plllvm_pj_status()` says
+why; the function then runs in PL/pgSQL as before. The code runs only while
+the plans it was made from are valid, and not for a call with a NULL
+argument. Counters of `plllvm_pj_stats()` and `plllvm_pj_status()` show
+which way each call went (`docs/architecture.md`).
 
 The language is untrusted: only a superuser creates functions in it
 (`GRANT USAGE` on an untrusted language is refused). `SET
@@ -225,17 +234,18 @@ PL/pgSQL function and a `plpgsql_jit` one call each other freely.
 |---|---|---|---|---|
 | `plllvm.opt_level` | int 0–3 | 2 | superuser | LLVM optimization level of new compiles; at 0 only the always-inline host helpers are inlined |
 | `plllvm.auto_checks` | bool | on | superuser | add interrupt and stack depth checks to loops and recursions that lack them; turn off only for measurements |
-| `plllvm.max_resident_compiles` | int 1–1000000 | 2000 | superuser | compiles resident in a session; the next one fails with SQLSTATE 53400 |
+| `plllvm.max_resident_compiles` | int 1–1000000 | 2000 | superuser | compiles resident in a session, for PL/LLVM functions and for `plpgsql_jit` functions each; the next PL/LLVM compile fails with SQLSTATE 53400, a `plpgsql_jit` function stays in PL/pgSQL (`capped`) |
 | `plllvm.max_ir_instructions` | int, 0 = no limit | 100000 | superuser | largest body accepted (SQLSTATE 54000) |
 | `plllvm.dump_ir` | bool | off | superuser | log the optimized IR of every compile |
 | `plllvm.types_bc_path` | string | empty | superuser | the `plllvm_types.bc` to use; empty means `plllvm/plllvm_types.bc` next to the library; read once per session |
 | `plllvm.expr_jit` | bool | off | superuser | expression JIT in PL/pgSQL functions (above); turning it off stops new expressions, code already installed runs until the transaction ends |
 | `plllvm.expr_opt_level` | int 0–3 | 2 | superuser | LLVM optimization level of compiled expressions |
 | `plllvm.plpgsql_jit` | bool | on | superuser | the handler of `LANGUAGE plpgsql_jit` (above); off sends every call to PL/pgSQL |
+| `plllvm.pj_opt_level` | int 0–3 | 2 | superuser | LLVM optimization level of translated `plpgsql_jit` functions; another value builds another variant of the same translation at the next call |
 | `plllvm.expr_max_programs` | int 1–1000000 | 1000 | superuser | compiled expressions (and failed builds) kept in a session; beyond it, new expressions are interpreted |
 | `plllvm.expr_eager` | bool | off | superuser | tests only: take an expression at its first evaluation instead of the second |
 | `plllvm.regress_test_mode` | bool | off | any user | reduce volatile output (times, addresses) in regression tests |
-| `plllvm.debug_inject` | `none`, `llvm_fatal`, `bad_alloc` | none | superuser | tests only: raise that LLVM error in the next compile, which ends the session with FATAL |
+| `plllvm.debug_inject` | `none`, `llvm_fatal`, `bad_alloc`, `translate_cancel`, `foreign_plugin`, `pj_bad_signature`, `pj_bad_cast_repr` | none | superuser | tests only: raise that LLVM error in the next compile, which ends the session with FATAL (the first two); cancel every translation of a `plpgsql_jit` function; behave as if another PL/pgSQL plugin were loaded; emit a wrong entry point or cast for the translation |
 
 Code already compiled keeps its `opt_level`; an expression compiled at
 another `expr_opt_level` is compiled again. Retired code does not count
@@ -308,7 +318,8 @@ ported: it needs `UPDATE` and `INSERT` through SPI, and its checksum does
 not depend on these writes, so a port without them would skip the work it
 measures.
 
-v0.3 adds `LANGUAGE plpgsql_jit`; the compiler for whole functions follows.
+v0.3 adds `LANGUAGE plpgsql_jit`. It compiles functions whose body is a
+`RETURN`; statements, variables and the rest of the expressions follow.
 
 ## Building and testing
 
@@ -351,7 +362,7 @@ macOS 26 arm64 (`PG_PIN`). The server must be built with LLVM.
 
 ## Licence
 
-PostgreSQL Licence, see `LICENSE`; `src/plllvm_pj.c` follows PL/pgSQL's call
+PostgreSQL Licence, see `LICENSE`; `src/plllvm_pj.c` and `src/plllvm_pj_translate.c` follow PL/pgSQL's call
 handler (Portions Copyright PostgreSQL Global Development Group).
 
 The kernels derived from the Computer

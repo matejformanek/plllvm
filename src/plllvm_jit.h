@@ -32,6 +32,10 @@ extern void plllvm_reset_after_error(void);
 #define PLLLVM_INJECT_NONE			0
 #define PLLLVM_INJECT_LLVM_FATAL	1
 #define PLLLVM_INJECT_BAD_ALLOC		2
+#define PLLLVM_INJECT_TRANSLATE_CANCEL	3
+#define PLLLVM_INJECT_FOREIGN_PLUGIN	4
+#define PLLLVM_INJECT_PJ_BAD_SIGNATURE	5
+#define PLLLVM_INJECT_PJ_BAD_CAST_REPR	6
 
 extern void plllvm_inject_fault(int kind);
 
@@ -79,6 +83,7 @@ typedef struct plllvm_jit_module
 	double		resolve_ms;		/* call sites, constants and symbols */
 	double		optimize_ms;
 	double		emit_ms;
+	double		translate_ms;	/* of a plpgsql_jit function: everything */
 	void	   *addr;			/* entry point */
 	bool		needs_frame;	/* true, when the IR uses a frame helper */
 	bool		released;		/* true, when no entry points at it any more;

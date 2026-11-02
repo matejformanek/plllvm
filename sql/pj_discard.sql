@@ -1,0 +1,40 @@
+--
+-- pj_discard: cache flushes under compiled code
+--
+-- Expected from plllvm, and run in one variant only: under
+-- debug_discard_caches every plan is stale at every evaluation, so the
+-- code is left at once and the call runs in PL/pgSQL, with the same result.
+-- Nothing may fail, and the code runs again once the flushes stop.
+--
+SET plllvm.regress_test_mode = on;
+
+CREATE FUNCTION pd_inc(n int) RETURNS int LANGUAGE plpgsql_jit AS $$
+BEGIN RETURN n + 1; END $$;
+CREATE FUNCTION pd_big(n int) RETURNS bigint LANGUAGE plpgsql_jit AS $$
+BEGIN RETURN n * 2; END $$;
+SELECT pd_inc(1), pd_inc(2), pd_inc(3), pd_big(1), pd_big(2), pd_big(3);
+SELECT s.state, s.last_path FROM plllvm_pj_status('pd_inc(int)') s;
+
+SELECT compiled_calls AS before_compiled FROM plllvm_pj_stats() \gset
+SET debug_discard_caches = 1;
+SELECT pd_inc(4), pd_inc(5), pd_big(4), pd_big(5);
+SELECT pd_inc(6), pd_big(6);
+SET debug_discard_caches = 0;
+SELECT failures, capped, compiled_calls >= :before_compiled AS compiled_kept,
+       guard_misses > 0 AS guarded
+  FROM plllvm_pj_stats();
+
+SELECT pd_inc(7), pd_inc(8), pd_big(7), pd_big(8);
+SELECT pd_inc(9), pd_inc(10), pd_big(9), pd_big(10);
+SELECT s.state, s.last_path FROM plllvm_pj_status('pd_inc(int)') s;
+SELECT s.state, s.last_path FROM plllvm_pj_status('pd_big(int)') s;
+SELECT failures FROM plllvm_pj_stats();
+
+-- a flush inside the call: compiled code does not look at the plans again
+CREATE FUNCTION pd_flush(n int) RETURNS int LANGUAGE sql AS $$
+SELECT set_config('debug_discard_caches', '1', true)::int + n $$;
+SELECT pd_inc(pd_flush(1)), pd_inc(pd_flush(2));
+SET debug_discard_caches = 0;
+SELECT pd_inc(11), pd_inc(12), pd_inc(13);
+SELECT s.state, s.last_path FROM plllvm_pj_status('pd_inc(int)') s;
+SELECT failures FROM plllvm_pj_stats();

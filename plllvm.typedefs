@@ -20,6 +20,7 @@ BulkInsertStateData
 CTECycleClause
 CTEMaterialize
 CTESearchClause
+CachedExpression
 CachedFunction
 CachedFunctionDeleteCallback
 CachedFunctionHashKey
@@ -33,6 +34,7 @@ CheckState
 CmdType
 CoalesceExpr
 CoerceParamHook
+CoerceViaIO
 CoercionForm
 ColumnRef
 CommandId
@@ -210,6 +212,7 @@ PLpgSQL_resolve_option
 PLpgSQL_rwopt
 PLpgSQL_stmt
 PLpgSQL_stmt_block
+PLpgSQL_stmt_return
 PLpgSQL_stmt_type
 PLpgSQL_trigtype
 PLpgSQL_type
@@ -239,8 +242,23 @@ Pg_abi_values
 Pg_finfo_record
 Pg_magic_struct
 PhiJoin
+PjCast
+PjCastEntry
+PjCastKey
+PjCode
+PjCtx
 PjEntry
+PjEnv
+PjErrArg
+PjExpr
+PjH1
+PjHarvest
+PjMay
+PjPath
+PjPos
+PjScope
 PjState
+PjVariant
 Plan
 PlanState
 PlannedStmt
@@ -266,6 +284,7 @@ RegProcedure
 RelFileLocator
 RelFileLocatorBackend
 RelFileNumber
+RelabelType
 Relation
 RelationPtr
 ResourceOwner
@@ -419,6 +438,7 @@ plllvm_spi_stmt
 plllvm_value
 plpgsql_call_handler_t
 plpgsql_compile_t
+plpgsql_stmt_typename_t
 policy_t
 regproc
 sigjmp_buf
@@ -427,6 +447,7 @@ slist_node
 task_info_t
 text
 time_value_t
+tree_walker_callback
 tuplehash_hash
 uid_t
 uint16
