@@ -349,7 +349,7 @@ installcheck-pj-once:
 	@[ -z '$(REGRESS_PJ_ONCE)' ] || \
 	  $(call pj_run,$(PLPGSQL_LOAD),$(PJ_FIXTURE) $(REGRESS_PJ_ONCE))
 
-# the list is filled from PR-C2
+# no file needs it yet
 installcheck-pj-opt:
 	@[ -z '$(REGRESS_PJ_OPT)' ] || \
 	  $(call pj_run,$(PLPGSQL_LOAD) -c plllvm.pj_opt_level=3,$(PJ_FIXTURE) $(REGRESS_PJ_OPT))

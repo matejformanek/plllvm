@@ -41,7 +41,6 @@ typedef struct plllvm_pj_counters
 	int64		attempts;
 	int64		failures;
 	int64		boxed_evals;
-	int64		resident;
 	int64		peak_tuple_bytes;
 } plllvm_pj_counters;
 
@@ -83,7 +82,6 @@ typedef struct PjPos
 {
 	int			lineno;			/* 0: none */
 	const char *stmt;			/* statement type name, or NULL */
-	const char *text;			/* err_text, or NULL */
 } PjPos;
 
 /* positions of every function: none, the RETURN */
@@ -118,7 +116,6 @@ typedef struct PjExpr
 	Expr	   *tree;
 	Oid			type;
 	int32		typmod;
-	bool		mutable;
 	CachedPlanSource *plansource;
 	CachedPlan *plan;
 	int			generation;

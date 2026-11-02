@@ -779,15 +779,7 @@ exec_error_callback(void *arg)
 
 	set_errcontext_domain(PG_TEXTDOMAIN("plpgsql"));
 
-	if (pos->text != NULL)
-	{
-		if (pos->lineno > 0)
-			errcontext("PL/pgSQL function %s line %d %s", signature,
-					   pos->lineno, _(pos->text));
-		else
-			errcontext("PL/pgSQL function %s %s", signature, _(pos->text));
-	}
-	else if (pos->stmt != NULL && pos->lineno > 0)
+	if (pos->stmt != NULL && pos->lineno > 0)
 		errcontext("PL/pgSQL function %s line %d at %s", signature,
 				   pos->lineno, pos->stmt);
 	else

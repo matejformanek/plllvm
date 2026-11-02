@@ -188,12 +188,18 @@ Only `plllvm_jit.c` and `plllvm_error.cpp` include LLVM headers.
   variable. Before each step that can raise it stores an index of a position
   table in `ctx`, from which the handler writes the error context of
   `plpgsql_exec_error_callback`. A value is converted to the result type by
-  the cast tree PL/pgSQL would build, cached per pair of types; when the expression compiler
-  does not compile it, the function is declined (`cast`).
+  the cast tree PL/pgSQL would build, cached per pair of types, but only by
+  a cast that cannot raise: widening int4 to int8 or float8, int8 to float8,
+  or a relabeling through a pinned `pg_cast` row. Any other cast declines
+  (`cast`), so a cast error always comes from PL/pgSQL's own code.
 * A compiled call checks, in this order: no NULL argument (PL/pgSQL runs
-  it), every plan still simply valid with the generation it had, the EXECUTE
-  right on the functions in the trees (the first call of a transaction, as
-  PL/pgSQL builds an ExprState), and a variant for the session's
-  `plllvm.pj_opt_level`. A guard that misses sends the call to PL/pgSQL and
-  the next call translates again; eight misses with fewer than 1,000
-  compiled calls between decline the function (`thrash`).
+  it), every plan still simply valid with the generation it had, a variant
+  for the session's `plllvm.pj_opt_level`, and the EXECUTE right on every
+  function of the trees and the cast. The last is kept as a key of
+  (transaction, user, epoch of the catalogs it depends on), read before the
+  check; when the key differs all functions are checked again, and a denial
+  sends the call to PL/pgSQL, which raises it. After a compiled error the
+  expressions of the function are marked as an interpreted failure leaves
+  them, so PL/pgSQL checks again too. A guard that misses sends the call to
+  PL/pgSQL and the next call translates again; eight misses with fewer than
+  1,000 compiled calls between decline the function (`thrash`).

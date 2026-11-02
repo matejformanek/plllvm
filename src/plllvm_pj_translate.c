@@ -18,8 +18,8 @@
  *    which the next invalidation frees.
  *
  * 2) The value of a RETURN converts to the result type as exec_cast_value()
- *    does, by a tree over a CaseTestExpr bound to the value.  It is the tree
- *    PL/pgSQL would build, so that casts and errors are the same.
+ *    does, by a tree over a CaseTestExpr bound to the value.  Only a cast that
+ *    cannot raise compiles, so every cast error comes from PL/pgSQL.
  *
  * The rest is in docs/architecture.md.
  *
@@ -277,7 +277,6 @@ plllvm_pj_harvest(PLpgSQL_function *func, const PjScope *scope, PjHarvest *h)
 			MemoryContextSwitchTo(oldcxt);
 			copy->type = expr->expr_simple_type;
 			copy->typmod = expr->expr_simple_typmod;
-			copy->mutable = expr->expr_simple_mutable;
 			copy->plansource = expr->expr_simple_plansource;
 			copy->plan = expr->expr_simple_plan;
 			copy->generation = expr->expr_simple_plan->generation;
@@ -358,7 +357,7 @@ harvest_return(PLpgSQL_function *func, PjHarvest *h)
 		{
 			Const	   *c = (Const *) tree;
 
-			/* a cast, if there is one, is what declines it */
+			/* a cast that can fail declines it later */
 			move = true;
 			null_const = c->constisnull;
 		}
@@ -572,43 +571,25 @@ cast_get(Oid srctype, int32 srctypmod, Oid dsttype, Expr **tree)
 	if (entry->cast.cexpr == NULL || !entry->cast.cexpr->is_valid)
 	{
 		Node	   *cast_expr;
+		CachedExpression *cexpr;
 		CaseTestExpr *placeholder = makeNode(CaseTestExpr);
 
 		placeholder->typeId = srctype;
 		placeholder->typeMod = srctypmod;
 		placeholder->collation = get_typcollation(srctype);
 
-		if (srctype == UNKNOWNOID || srctype == RECORDOID)
-			cast_expr = NULL;
-		else
-			cast_expr = coerce_to_target_type(NULL, (Node *) placeholder,
-											  srctype, dsttype, -1,
-											  COERCION_PLPGSQL,
-											  COERCE_IMPLICIT_CAST, -1);
-
-		/* the interpreter's fallback, which also takes UNKNOWN literals */
+		cast_expr = coerce_to_target_type(NULL, (Node *) placeholder,
+										  srctype, dsttype, -1,
+										  COERCION_PLPGSQL,
+										  COERCE_IMPLICIT_CAST, -1);
 		if (cast_expr == NULL)
-		{
-			CoerceViaIO *iocoerce = makeNode(CoerceViaIO);
+			elog(ERROR, "no cast from type %u to %u", srctype, dsttype);
 
-			if (srctype == INTERNALOID || dsttype == INTERNALOID)
-				ereport(ERROR,
-						(errcode(ERRCODE_CANNOT_COERCE),
-						 errmsg("cannot cast type %s to %s",
-								format_type_be(srctype),
-								format_type_be(dsttype))));
-			iocoerce->arg = (Expr *) placeholder;
-			iocoerce->resulttype = dsttype;
-			iocoerce->resultcollid = InvalidOid;
-			iocoerce->coerceformat = COERCE_IMPLICIT_CAST;
-			iocoerce->location = -1;
-			cast_expr = (Node *) iocoerce;
-		}
-
-		/* only now: the old one stays if building raised an ERROR */
+		/* built first: the old one stays if building raised an ERROR */
+		cexpr = GetCachedExpression(cast_expr);
 		if (entry->cast.cexpr != NULL)
 			FreeCachedExpression(entry->cast.cexpr);
-		entry->cast.cexpr = GetCachedExpression(cast_expr);
+		entry->cast.cexpr = cexpr;
 		entry->cast.gen++;
 	}
 

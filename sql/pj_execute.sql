@@ -77,8 +77,6 @@ SET ROLE regress_pj_r1;
 SELECT n2b(2) AS n2b_stock_denied;
 ROLLBACK;
 GRANT EXECUTE ON FUNCTION int4(int8) TO PUBLIC;
-REVOKE EXECUTE ON FUNCTION int4div(int4,int4) FROM PUBLIC;
-GRANT EXECUTE ON FUNCTION int4div(int4,int4) TO PUBLIC;
 -- a membership lost in the transaction, the cast not reached
 CREATE FUNCTION m1(n int) RETURNS bigint LANGUAGE :pj_lang AS 'BEGIN RETURN CASE WHEN n > 0 THEN n END; END';
 SELECT m1(1), m1(2), m1(3);
@@ -103,10 +101,6 @@ BEGIN; SET ROLE regress_pj_r1; SELECT d1(3,4) AS d1_denied3; ROLLBACK;
 GRANT EXECUTE ON FUNCTION int4mul(int4,int4) TO regress_pj_def;
 SELECT d1(3,4), d1(3,4), d1(3,4);
 GRANT EXECUTE ON FUNCTION int4mul(int4,int4) TO PUBLIC;
-REVOKE EXECUTE ON FUNCTION int4mul(int4,int4) FROM PUBLIC;
-GRANT EXECUTE ON FUNCTION int4mul(int4,int4) TO PUBLIC;
-REVOKE EXECUTE ON FUNCTION int4mod(int4,int4) FROM PUBLIC;
-GRANT EXECUTE ON FUNCTION int4mod(int4,int4) TO PUBLIC;
 -- DISCARD PLANS inside the transaction
 CREATE FUNCTION dp(a int) RETURNS bigint LANGUAGE :pj_lang AS 'BEGIN RETURN a * 2; END';
 SELECT dp(1), dp(2), dp(3);
@@ -136,7 +130,6 @@ CREATE FUNCTION f2(n bigint) RETURNS int LANGUAGE :pj_lang AS 'BEGIN RETURN n; E
 SELECT f1(1), f1(2), f1(3), f2(1), f2(2), f2(3);
 REVOKE EXECUTE ON FUNCTION int4(int8) FROM PUBLIC;
 BEGIN; SELECT f1(1) AS su; SELECT f2(1) AS su2; SAVEPOINT s; SELECT f2(99999999999) AS f2_22003; ROLLBACK TO s; SET ROLE regress_pj_r1; SELECT f1(2) AS n2c_stock_denied; ROLLBACK;
--- a SECURITY DEFINER wrapper that builds, a caller that catches
 GRANT EXECUTE ON FUNCTION int4(int8) TO PUBLIC;
 -- a SECURITY DEFINER wrapper that builds, a caller that catches
 CREATE FUNCTION g(a int, b int) RETURNS int LANGUAGE :pj_lang AS 'BEGIN RETURN a / COALESCE(b, 0); END';

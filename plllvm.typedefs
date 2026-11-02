@@ -34,7 +34,6 @@ CheckState
 CmdType
 CoalesceExpr
 CoerceParamHook
-CoerceViaIO
 CoercionForm
 ColumnRef
 CommandId

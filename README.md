@@ -216,8 +216,9 @@ it runs. The second translates the function to LLVM IR if it is in scope,
 and later calls run the code. In scope so far: a body of blocks that ends in
 a `RETURN`, with arguments and result of a type passed by value; the value
 is a bare variable or constant, or an expression of `bool`, `int4`, `int8`
-and `float8` as in the expression JIT, converted to the result type by a
-cast of that kind. Anything else is declined, and `plllvm_pj_status()` says
+and `float8` as in the expression JIT, converted to the result type only by
+a widening (`int4` to `int8` or `float8`, `int8` to `float8`) or a pinned
+relabeling. Anything else is declined, and `plllvm_pj_status()` says
 why; the function then runs in PL/pgSQL as before. The code runs only while
 the plans it was made from are valid, and not for a call with a NULL
 argument. Counters of `plllvm_pj_stats()` and `plllvm_pj_status()` show
