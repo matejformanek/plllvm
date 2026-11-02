@@ -490,24 +490,23 @@ compile(plllvm_jit_kind kind, Oid owner_oid, Oid collation,
 
 	released_free();
 
-	if (kind == PLLLVM_JIT_FUNCTION &&
+	if (kind != PLLLVM_JIT_EXPR &&
 		n_compiles[kind] - n_retired[kind] >= plllvm_max_resident_compiles)
 	{
+		/* a plpgsql_jit function falls back to the interpreter instead */
+		if (kind == PLLLVM_JIT_PJ)
+		{
+			n_pj_capped++;
+			result->capped = true;
+			return false;
+		}
+
 		build_error(result, ERRCODE_CONFIGURATION_LIMIT_EXCEEDED,
 					pstrdup("too many compiled PL/LLVM functions in this session"),
 					psprintf("Resident compiles: %lld, the limit is %d.",
 							 (long long) (n_compiles[kind] - n_retired[kind]),
 							 plllvm_max_resident_compiles));
 		result->errhint = pstrdup("Reconnect, or raise plllvm.max_resident_compiles.");
-		return false;
-	}
-
-	/* a plpgsql_jit function falls back to the interpreter instead */
-	if (kind == PLLLVM_JIT_PJ &&
-		n_compiles[kind] - n_retired[kind] >= plllvm_max_resident_compiles)
-	{
-		n_pj_capped++;
-		result->capped = true;
 		return false;
 	}
 
@@ -992,8 +991,11 @@ build(const char *ir, bool codegen, Oid collation, const plllvm_path *path,
 		goto out;
 	mod->verify_ms = elapsed_ms(&since);
 
+	/* plllvm_jit_compile_pj() passes no owner, collation or search path */
+	Assert(mod->kind != PLLLVM_JIT_PJ || irrefs == NIL);
 	if (irrefs != NIL)
-		refs_apply(ctx, umod, irrefs, mod->kind, codegen, collation, path, refs);
+		refs_apply(ctx, umod, irrefs, mod->kind, codegen, collation, path,
+				   refs);
 
 	if (!symbols_check(umod, result))
 		goto out;
@@ -1194,7 +1196,8 @@ ir_verify(LLVMModuleRef umod, plllvm_jit_result *result)
  */
 static void
 refs_apply(LLVMContextRef ctx, LLVMModuleRef umod, List *irrefs,
-		   plllvm_jit_kind kind, bool codegen, Oid collation, const plllvm_path *path, plllvm_refs **refs)
+		   plllvm_jit_kind kind, bool codegen, Oid collation,
+		   const plllvm_path *path, plllvm_refs **refs)
 {
 	Datum	   *values = palloc(list_length(irrefs) * sizeof(Datum));
 	plllvm_refs *volatile vrefs = NULL;

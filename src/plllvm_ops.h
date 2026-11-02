@@ -8,12 +8,12 @@
  *
  * The functions behind the SQL operators, abs(), sqrt() and the casts
  * from float8 (int.c, int8.c, float.c), with the same results and errors,
- * but without fmgr.  float8 + - * / are the bodies of float8_pl() and the
- * like (utils/float.h:116-225), but raise through the noreturn
- * float_*_error(): float.h's inline functions return float_*_error_ext(NULL)
- * to the caller, which the optimizer cannot know never returns.  The
- * remaining float8 operators are those of utils/float.h.  plllvm_types.c
- * exports them as plllvm_int4_pl() and so on.  Cites are of PostgreSQL
+ * but without fmgr.  float8 + - * / are the bodies of utils/float.h:116-225
+ * (the _noret suffix avoids its names) calling the noreturn
+ * float_*_error(), which the optimizer sees never returns, where float.h
+ * returns float_*_error_ext(NULL); same errcode and text, other error
+ * location.  The remaining float8 operators are those of utils/float.h.
+ * plllvm_types.c exports them as plllvm_int4_pl() and so on.  Cites are of PostgreSQL
  * 9510a826e4a.
  *
  *-------------------------------------------------------------------------
@@ -207,7 +207,7 @@ int8_abs(int64 val)
 
 /* float8pl() and the like, see the header comment */
 static pg_always_inline float8
-float8_plus(float8 val1, float8 val2)
+float8_pl_noret(float8 val1, float8 val2)
 {
 	float8		result = val1 + val2;
 
@@ -217,7 +217,7 @@ float8_plus(float8 val1, float8 val2)
 }
 
 static pg_always_inline float8
-float8_minus(float8 val1, float8 val2)
+float8_mi_noret(float8 val1, float8 val2)
 {
 	float8		result = val1 - val2;
 
@@ -227,7 +227,7 @@ float8_minus(float8 val1, float8 val2)
 }
 
 static pg_always_inline float8
-float8_times(float8 val1, float8 val2)
+float8_mul_noret(float8 val1, float8 val2)
 {
 	float8		result = val1 * val2;
 
@@ -239,7 +239,7 @@ float8_times(float8 val1, float8 val2)
 }
 
 static pg_always_inline float8
-float8_divide(float8 val1, float8 val2)
+float8_div_noret(float8 val1, float8 val2)
 {
 	float8		result;
 

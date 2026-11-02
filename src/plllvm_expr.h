@@ -72,11 +72,17 @@ struct plllvm_expr_env
 extern bool plllvm_expr_check(const Expr *e, plllvm_expr_env *env, StringInfo hash_key,
 							  StringInfo facts, const char **why);
 extern void plllvm_expr_emit(plllvm_ir *ir, const Expr *e, plllvm_expr_env *env, plllvm_value *out);
-extern bool plllvm_expr_check_cast(const Expr *e, plllvm_expr_env *env,
-								   plllvm_repr caseval_repr, StringInfo hash_key,
-								   StringInfo facts, const char **why);
-extern void plllvm_expr_emit_cast(plllvm_ir *ir, const Expr *e, plllvm_expr_env *env,
-								  const plllvm_value *caseval, plllvm_value *out);
+extern bool plllvm_expr_check_cast(const Expr *e,
+								   plllvm_expr_env *env,
+								   plllvm_repr caseval_repr,
+								   StringInfo hash_key,
+								   StringInfo facts,
+								   const char **why);
+extern void plllvm_expr_emit_cast(plllvm_ir *ir,
+								  const Expr *e,
+								  plllvm_expr_env *env,
+								  const plllvm_value *caseval,
+								  plllvm_value *out);
 extern const char *plllvm_expr_box(plllvm_ir *ir, const plllvm_value *val);
 extern const char *plllvm_repr_type(plllvm_repr repr);
 
