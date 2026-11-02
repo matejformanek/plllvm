@@ -209,14 +209,10 @@ debuggers and profilers use.
 
 `CREATE EXTENSION plllvm` also creates `plpgsql_jit`: PL/pgSQL's syntax,
 compiler, validator, `DO` handler and error messages, with a call handler
-of its own. A function is created as with PL/pgSQL (`LANGUAGE plpgsql_jit`
-and the same body) and runs through `plpgsql_call_handler` with the same
-`fcinfo`, so its results, errors and CONTEXT lines are PL/pgSQL's. So far
-that is all it does: the handler keeps an entry per function (`new` at the
-first call, `seen` at the second, then `declined` with the reason `not
-implemented`), counted in `plllvm_pj_stats()` and shown by
-`plllvm_pj_status()`. Compiling the body to LLVM comes with the next
-steps.
+of its own. A function is created as with PL/pgSQL, with `LANGUAGE
+plpgsql_jit`. For now every call runs in PL/pgSQL; the handler only keeps an
+entry per function, counted in `plllvm_pj_stats()` and shown by
+`plllvm_pj_status()` (`docs/architecture.md`).
 
 The language is untrusted: only a superuser creates functions in it
 (`GRANT USAGE` on an untrusted language is refused). `SET
@@ -312,8 +308,7 @@ ported: it needs `UPDATE` and `INSERT` through SPI, and its checksum does
 not depend on these writes, so a port without them would skip the work it
 measures.
 
-v0.3 adds `LANGUAGE plpgsql_jit`, so far only as the language and its
-bookkeeping around PL/pgSQL; the compiler for whole functions follows.
+v0.3 adds `LANGUAGE plpgsql_jit`; the compiler for whole functions follows.
 
 ## Building and testing
 
@@ -332,10 +327,6 @@ make cluster-init                                   # once
 make stage cluster-start installcheck doctor cluster-stop
 ```
 
-The cluster looks in `./stage` before the installation (`extension_control_path`
-and `dynamic_library_path` take the first hit), as the installation may
-hold an older `plllvm.control`.
-
 `PG_CONFIG` defaults to the workspace's `code/install-jit` build.
 
 | target | does |
@@ -347,7 +338,7 @@ hold an older `plllvm.control`.
 | `installcheck-hazard PLLLVM_PORT=<port>` | tests that crash the server if their fix regresses; throwaway cluster only |
 | `installcheck-plpgsql PLLLVM_PORT=<port>` | PostgreSQL's PL/pgSQL tests without plllvm, then with it loaded and `plllvm.expr_jit` off, on, and on with `plllvm.expr_eager`; every output must match the first. `PG_SRC` and `PG_BUILD` are the server's source and build tree (the workspace's `code/` and `code/build-jit`) |
 | `installcheck-pj` | the `pj_` tests, written for stock PL/pgSQL's output and run with `LANGUAGE plpgsql_jit` (`PJ_LANG`): the handler off and on, with `plllvm.expr_jit` and `plllvm.expr_eager`, and `pj_stats` under cache flushes |
-| `installcheck-pj-once`, `installcheck-pj-opt` | the `pj_` tests whose output comes from plllvm, in one variant, and at `plllvm.pj_opt_level` 3 |
+| `installcheck-pj-once`, `installcheck-pj-opt` | the `pj_` tests whose output comes from plllvm, in one variant, and at the highest opt level |
 | `installcheck-plpgsql-pj PLLLVM_PORT=<port>` | the tests of `installcheck-plpgsql` without plllvm, then with `LANGUAGE plpgsql` changed to `plpgsql_jit` and the handler off and on; the results must match the first, but for the hunks of `tools/plpgsql_pj_allowed.diff` |
 | `verify PLLLVM_PORT=<port>` | every suite of a PR in order, with the commit and the exit code of each in `results-verify.log` |
 | `kernels`, `check-kernels` | compile `examples/kernels/src/*.c` to IR with the install-perf headers; check the committed `.ll` files are current |
@@ -361,7 +352,9 @@ macOS 26 arm64 (`PG_PIN`). The server must be built with LLVM.
 ## Licence
 
 PostgreSQL Licence, see `LICENSE`; `src/plllvm_pj.c` follows PL/pgSQL's call
-handler (Portions Copyright PostgreSQL Global Development Group). The kernels derived from the Computer
+handler (Portions Copyright PostgreSQL Global Development Group).
+
+The kernels derived from the Computer
 Language Benchmarks Game are under `LICENSES/BENCHMARKS-GAME-BSD-3.md`.
 
 ## Trademarks

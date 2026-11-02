@@ -12,26 +12,17 @@
  *
  * Notes:
  *
- * 1) The language has PL/pgSQL's syntax and PL/pgSQL's compiler: the
- *    handler calls plpgsql_compile() and keeps a side entry per compiled
- *    function, in its own hash table, because fn_extra belongs to PL/pgSQL
- *    (plpgsql_call_handler reads it back as a PLpgSQL_function).  Nothing
- *    here compiles to LLVM yet: every call goes to plpgsql_call_handler
- *    with the same fcinfo, so the results, errors and CONTEXT lines are
- *    PL/pgSQL's.  The inline handler and the validator of the language are
- *    PL/pgSQL's own (plllvm--0.3.sql).
+ * 1) The side entry of each function lives in our own hash table, because
+ *    fn_extra belongs to PL/pgSQL: plpgsql_call_handler reads it back as a
+ *    PLpgSQL_function.
  *
- * 2) plpgsql_compile() and plpgsql_call_handler() are looked up in the
- *    plpgsql library when the first call comes, as plpgsql_check does.
- *    plpgsql_compile() uses no SPI (pl_comp.c has no SPI_ call), so the
- *    handler needs no SPI connection of its own.
+ * 2) funccache reuses the PLpgSQL_function of a replaced function in place,
+ *    so the pointer alone does not identify an entry.  A reset callback on
+ *    fn_cxt, which PL/pgSQL deletes when the function goes stale and only
+ *    with no call running, marks the entry stale; the next lookup of that
+ *    pointer starts a new one.
  *
- * 3) An entry is valid while the function's memory context lives: funccache
- *    reuses the PLpgSQL_function of a replaced function in place, so the
- *    pointer alone does not tell.  A reset callback on fn_cxt (PL/pgSQL
- *    deletes it when the function goes stale, and only with no call
- *    running, funccache.c delete_function) marks the entry stale, and the
- *    next lookup of that pointer starts a new one.
+ * The rest is in docs/architecture.md.
  *
  */
 #include "postgres.h"
@@ -56,7 +47,7 @@ StaticAssertVariableIsOfType(&plpgsql_compile, plpgsql_compile_t);
 typedef enum PjState
 {
 	PJ_NEW,						/* compiled by PL/pgSQL, not called yet */
-	PJ_SEEN,					/* called once, so its expressions are planned */
+	PJ_SEEN,					/* called once, expressions planned */
 	PJ_DECLINED					/* runs in PL/pgSQL for good */
 } PjState;
 
@@ -158,13 +149,15 @@ fall_back(FunctionCallInfo fcinfo, PjEntry *e)
 static void
 load_plpgsql(void)
 {
+	const char *lib = "$libdir/plpgsql";
+
 	if (call_handler_p != NULL)
 		return;
 
 	compile_p = (plpgsql_compile_t)
-		load_external_function("$libdir/plpgsql", "plpgsql_compile", true, NULL);
+		load_external_function(lib, "plpgsql_compile", true, NULL);
 	call_handler_p = (plpgsql_call_handler_t)
-		load_external_function("$libdir/plpgsql", "plpgsql_call_handler", true, NULL);
+		load_external_function(lib, "plpgsql_call_handler", true, NULL);
 }
 
 /*
@@ -184,7 +177,7 @@ entry_get(PLpgSQL_function *func)
 		ctl.keysize = sizeof(PLpgSQL_function *);
 		ctl.entrysize = sizeof(PjEntry);
 		ctl.hcxt = AllocSetContextCreate(TopMemoryContext,
-										 "plllvm - plpgsql_jit entries context",
+										 "plllvm - pj entries context",
 										 ALLOCSET_DEFAULT_SIZES);
 		entries = hash_create("plllvm plpgsql_jit entries", 64, &ctl,
 							  HASH_ELEM | HASH_BLOBS | HASH_CONTEXT);

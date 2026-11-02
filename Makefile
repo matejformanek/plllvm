@@ -219,7 +219,7 @@ cluster-init: port-ok
 
 # stage.conf is written at each start, so the cluster serves the ./stage of
 # the checkout (or worktree) that started it.  The first hit wins in both
-# paths, and $system may hold an older plllvm.control.
+# paths, and the installation ($system) may hold an older plllvm.control.
 cluster-start: port-ok
 	printf "extension_control_path = '$(STAGE)/share:\$$system'\ndynamic_library_path = '$(STAGE)/lib:\$$libdir'\n" \
 	  > '$(PLLLVM_DATA)/stage.conf'
@@ -347,19 +347,16 @@ installcheck-pj-once:
 	@[ -z '$(REGRESS_PJ_ONCE)' ] || \
 	  $(call pj_run,$(PLPGSQL_LOAD),$(PJ_FIXTURE) $(REGRESS_PJ_ONCE))
 
+# the GUC arrives with PR-C1, the list is filled from PR-C2
 installcheck-pj-opt:
 	@[ -z '$(REGRESS_PJ_OPT)' ] || \
 	  $(call pj_run,$(PLPGSQL_LOAD) -c plllvm.pj_opt_level=3,$(PJ_FIXTURE) $(REGRESS_PJ_OPT))
 
 #
-# The same tests with every LANGUAGE plpgsql changed to plpgsql_jit, in a
-# generated copy of their inputs: the unchanged tests without plllvm (base),
-# then the copy with plllvm.plpgsql_jit off and on.  The results, with the
-# language name changed back, must be base's, except the hunks in
-# tools/plpgsql_pj_allowed.diff, each with its reason there (a role that is no
-# superuser creates no function in an untrusted language).  test_setup runs
-# unchanged: it reads data files from its inputdir.  The tests create roles
-# and a tablespace, so this is for a throwaway cluster only.
+# PG's PL/pgSQL tests with every LANGUAGE plpgsql changed to plpgsql_jit
+# (a generated copy of the inputs) against the unchanged run.  Allowed
+# differences, with their reason: tools/plpgsql_pj_allowed.diff.  Throwaway
+# cluster only: the tests create roles and a tablespace.
 #
 PJPL = results-plpgsql-pj
 PJPL_SWAP = perl -pe 's/\b(language\s+)(["\x27]?)plpgsql\2\b/$$1plpgsql_jit/gi'
@@ -412,9 +409,8 @@ installcheck-plpgsql-pj: port-ok
 	done; exit $$rc
 
 #
-# Everything a PR runs: the suites in order, the exit code of each in
-# results-verify.log with the commit, and a failure does not stop the rest.
-# A cluster that is already running is used as it is.
+# Every suite of a PR in order; the commit and each exit code go to
+# results-verify.log, and a failure does not stop the rest.
 #
 VERIFY_LOG = results-verify.log
 
