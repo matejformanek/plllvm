@@ -121,9 +121,12 @@ typedef struct NodeIndex
 static plllvm_jit_module *modules = NULL;
 
 static uint64 plllvm_jit_gen = 0;
-static int64 n_compiles = 0;
-static int64 n_failures = 0;
-static int64 n_retired = 0;
+
+/* by kind; expressions are neither counted nor released */
+static int64 n_compiles[PLLLVM_JIT_PJ + 1];
+static int64 n_failures[PLLLVM_JIT_PJ + 1];
+static int64 n_retired[PLLLVM_JIT_PJ + 1];
+static int64 n_pj_capped = 0;
 static int	n_unfreed = 0;		/* released, not yet freed */
 
 /*
@@ -163,8 +166,8 @@ static void symbols_internalize(LLVMModuleRef umod, const char *symbol,
 								LLVMAttributeRef *attrs, int nattrs);
 static bool ir_verify(LLVMModuleRef umod, plllvm_jit_result *result);
 static void refs_apply(LLVMContextRef ctx, LLVMModuleRef umod, List *irrefs,
-					   bool codegen, Oid collation, const plllvm_path *path,
-					   plllvm_refs **refs);
+					   plllvm_jit_kind kind, bool codegen, Oid collation,
+					   const plllvm_path *path, plllvm_refs **refs);
 static bool symbols_check(LLVMModuleRef umod, plllvm_jit_result *result);
 static bool ir_optimize(LLVMModuleRef umod, int opt_level, char **optimized_ir,
 						plllvm_jit_result *result);
@@ -399,9 +402,13 @@ plllvm_jit_get_session_info(plllvm_jit_session_info *info)
 		info->libllvm = NULL;
 	info->types_bc = pstrdup(session.types_bc_path);
 	info->init_ms = session.init_ms;
-	info->compiles = n_compiles;
-	info->compile_failures = n_failures;
-	info->retired = n_retired;
+	info->compiles = n_compiles[PLLLVM_JIT_FUNCTION];
+	info->compile_failures = n_failures[PLLLVM_JIT_FUNCTION];
+	info->retired = n_retired[PLLLVM_JIT_FUNCTION];
+	info->pj_compiles = n_compiles[PLLLVM_JIT_PJ];
+	info->pj_compile_failures = n_failures[PLLLVM_JIT_PJ];
+	info->pj_retired = n_retired[PLLLVM_JIT_PJ];
+	info->pj_capped = n_pj_capped;
 }
 
 /*
@@ -439,6 +446,31 @@ plllvm_jit_compile_expr(const char *ir, int opt_level,
 				   opt_level, result);
 }
 
+/*
+ * Compile the IR of a plpgsql_jit function (entry point @f, i64 (ptr
+ * fcinfo, ptr ctx)) into resident code.
+ *
+ * At plllvm.max_resident_compiles it returns false with result->capped
+ * set and no error: the caller stays on the interpreter and may retry.
+ */
+bool
+plllvm_jit_compile_pj(const char *ir, int opt_level, plllvm_jit_result *result)
+{
+	plllvm_path path;
+
+	path.search_path = "pg_catalog, pg_temp";
+	path.nspoid = InvalidOid;
+
+	return compile(PLLLVM_JIT_PJ, InvalidOid, InvalidOid, &path, -1, ir,
+				   opt_level, result);
+}
+
+int64
+plllvm_jit_pj_resident(void)
+{
+	return n_compiles[PLLLVM_JIT_PJ] - n_retired[PLLLVM_JIT_PJ];
+}
+
 static bool
 compile(plllvm_jit_kind kind, Oid owner_oid, Oid collation,
 		const plllvm_path *path, int nargs, const char *ir, int opt_level,
@@ -459,14 +491,23 @@ compile(plllvm_jit_kind kind, Oid owner_oid, Oid collation,
 	released_free();
 
 	if (kind == PLLLVM_JIT_FUNCTION &&
-		n_compiles - n_retired >= plllvm_max_resident_compiles)
+		n_compiles[kind] - n_retired[kind] >= plllvm_max_resident_compiles)
 	{
 		build_error(result, ERRCODE_CONFIGURATION_LIMIT_EXCEEDED,
 					pstrdup("too many compiled PL/LLVM functions in this session"),
 					psprintf("Resident compiles: %lld, the limit is %d.",
-							 (long long) (n_compiles - n_retired),
+							 (long long) (n_compiles[kind] - n_retired[kind]),
 							 plllvm_max_resident_compiles));
 		result->errhint = pstrdup("Reconnect, or raise plllvm.max_resident_compiles.");
+		return false;
+	}
+
+	/* a plpgsql_jit function falls back to the interpreter instead */
+	if (kind == PLLLVM_JIT_PJ &&
+		n_compiles[kind] - n_retired[kind] >= plllvm_max_resident_compiles)
+	{
+		n_pj_capped++;
+		result->capped = true;
 		return false;
 	}
 
@@ -475,6 +516,9 @@ compile(plllvm_jit_kind kind, Oid owner_oid, Oid collation,
 	mod.gen = ++plllvm_jit_gen;
 	if (kind == PLLLVM_JIT_EXPR)
 		snprintf(mod.symbol, NAMEDATALEN, "plllvm_expr_" UINT64_FORMAT,
+				 mod.gen);
+	else if (kind == PLLLVM_JIT_PJ)
+		snprintf(mod.symbol, NAMEDATALEN, "plllvm_pj_" UINT64_FORMAT,
 				 mod.gen);
 	else
 		snprintf(mod.symbol, NAMEDATALEN, "plllvm_%u_" UINT64_FORMAT,
@@ -486,8 +530,8 @@ compile(plllvm_jit_kind kind, Oid owner_oid, Oid collation,
 	{
 		if (refs != NULL)
 			plllvm_refs_end(refs, false);
-		if (kind == PLLLVM_JIT_FUNCTION)
-			n_failures++;
+		if (kind != PLLLVM_JIT_EXPR)
+			n_failures[kind]++;
 		return false;
 	}
 
@@ -500,8 +544,8 @@ compile(plllvm_jit_kind kind, Oid owner_oid, Oid collation,
 	code->rt = rt;
 	code->mod.next = modules;
 	modules = &code->mod;
-	if (kind == PLLLVM_JIT_FUNCTION)
-		n_compiles++;
+	if (kind != PLLLVM_JIT_EXPR)
+		n_compiles[kind]++;
 
 	result->mod = &code->mod;
 
@@ -561,7 +605,7 @@ plllvm_jit_release(plllvm_jit_module *mod)
 	if (mod->refs != NULL)
 		plllvm_refs_release(mod->refs);
 	mod->released = true;
-	n_retired++;
+	n_retired[mod->kind]++;
 	n_unfreed++;
 }
 
@@ -949,7 +993,7 @@ build(const char *ir, bool codegen, Oid collation, const plllvm_path *path,
 	mod->verify_ms = elapsed_ms(&since);
 
 	if (irrefs != NIL)
-		refs_apply(ctx, umod, irrefs, codegen, collation, path, refs);
+		refs_apply(ctx, umod, irrefs, mod->kind, codegen, collation, path, refs);
 
 	if (!symbols_check(umod, result))
 		goto out;
@@ -1149,8 +1193,8 @@ ir_verify(LLVMModuleRef umod, plllvm_jit_result *result)
  * their globals.  An ERROR disposes umod and ctx and is rethrown.
  */
 static void
-refs_apply(LLVMContextRef ctx, LLVMModuleRef umod, List *irrefs, bool codegen,
-		   Oid collation, const plllvm_path *path, plllvm_refs **refs)
+refs_apply(LLVMContextRef ctx, LLVMModuleRef umod, List *irrefs,
+		   plllvm_jit_kind kind, bool codegen, Oid collation, const plllvm_path *path, plllvm_refs **refs)
 {
 	Datum	   *values = palloc(list_length(irrefs) * sizeof(Datum));
 	plllvm_refs *volatile vrefs = NULL;
@@ -1180,7 +1224,7 @@ refs_apply(LLVMContextRef ctx, LLVMModuleRef umod, List *irrefs, bool codegen,
 		plllvm_leave_fatal_on_oom();
 
 		if (codegen)
-			n_failures++;
+			n_failures[kind]++;
 		PG_RE_THROW();
 	}
 	PG_END_TRY();
@@ -1389,7 +1433,8 @@ user_ir_check(LLVMContextRef ctx, LLVMModuleRef umod, plllvm_jit_kind kind,
 	}
 
 	entry_type = LLVMFunctionType(LLVMInt64TypeInContext(ctx), params,
-								  kind == PLLLVM_JIT_EXPR ? 3 : 1, false);
+								  kind == PLLLVM_JIT_EXPR ? 3 :
+								  kind == PLLLVM_JIT_PJ ? 2 : 1, false);
 	if (LLVMGlobalGetValueType(fn) != entry_type)
 	{
 		build_error(result, ERRCODE_INVALID_FUNCTION_DEFINITION,

@@ -170,6 +170,9 @@ typedef struct PhiJoin
 	StringInfoData isnull;
 } PhiJoin;
 
+static bool check_top(const Expr *e, plllvm_expr_env *env, bool has_caseval,
+					  plllvm_repr caseval_repr, StringInfo hash_key,
+					  StringInfo facts, const char **why);
 static bool check_node(const Expr *e, CheckState *cs, plllvm_repr *repr);
 static bool check_arg(const Expr *e, CheckState *cs, plllvm_repr repr);
 static bool check_args(List *args, CheckState *cs, plllvm_repr repr);
@@ -261,6 +264,44 @@ plllvm_repr_type(plllvm_repr repr)
 }
 
 /*
+ * The value as a Datum, 0 when it is NULL
+ */
+const char *
+plllvm_expr_box(plllvm_ir *ir, const plllvm_value *val)
+{
+	const char *datum;
+	const char *result = plllvm_ir_tmp(ir);
+
+	switch (val->repr)
+	{
+		case PLLLVM_I1:
+			datum = plllvm_ir_tmp(ir);
+			plllvm_ir_emit(ir, "%s = zext i1 %s to i64", datum, val->v);
+			break;
+		case PLLLVM_I32:
+			/* Int32GetDatum sign extends */
+			datum = plllvm_ir_tmp(ir);
+			plllvm_ir_emit(ir, "%s = sext i32 %s to i64", datum, val->v);
+			break;
+		case PLLLVM_I64:
+			datum = val->v;
+			break;
+		case PLLLVM_F64:
+			datum = plllvm_ir_tmp(ir);
+			plllvm_ir_emit(ir, "%s = bitcast double %s to i64", datum, val->v);
+			break;
+		default:
+			elog(ERROR, "unrecognized plllvm_repr: %d", (int) val->repr);
+			datum = NULL;		/* keep compiler quiet */
+	}
+
+	plllvm_ir_emit(ir, "%s = select i1 %s, i64 0, i64 %s", result, val->isnull,
+				   datum);
+
+	return result;
+}
+
+/*
  * Can the whole tree be compiled?
  *
  * On success, hash_key has the tree's key appended and facts what
@@ -271,6 +312,26 @@ bool
 plllvm_expr_check(const Expr *e, plllvm_expr_env *env, StringInfo hash_key,
 				  StringInfo facts, const char **why)
 {
+	return check_top(e, env, false, PLLLVM_I1, hash_key, facts, why);
+}
+
+/*
+ * As plllvm_expr_check(), for a cast tree: a CaseTestExpr at the top
+ * level reads a value of caseval_repr (exec_cast_value's caseValue)
+ */
+bool
+plllvm_expr_check_cast(const Expr *e, plllvm_expr_env *env,
+					   plllvm_repr caseval_repr, StringInfo hash_key,
+					   StringInfo facts, const char **why)
+{
+	return check_top(e, env, true, caseval_repr, hash_key, facts, why);
+}
+
+static bool
+check_top(const Expr *e, plllvm_expr_env *env, bool has_caseval,
+		  plllvm_repr caseval_repr, StringInfo hash_key, StringInfo facts,
+		  const char **why)
+{
 	CheckState	cs;
 	plllvm_repr repr;
 
@@ -280,7 +341,8 @@ plllvm_expr_check(const Expr *e, plllvm_expr_env *env, StringInfo hash_key,
 	cs.why = NULL;
 	cs.nnodes = 0;
 	cs.nops = 0;
-	cs.has_caseval = false;
+	cs.has_caseval = has_caseval;
+	cs.caseval_repr = caseval_repr;
 
 	if (!check_node(e, &cs, &repr))
 	{
@@ -591,6 +653,20 @@ plllvm_expr_emit(plllvm_ir *ir, const Expr *e, plllvm_expr_env *env,
 
 	es.env = env;
 	es.caseval = NULL;
+	emit_node(ir, e, &es, out);
+}
+
+/*
+ * Emit a tree accepted by plllvm_expr_check_cast()
+ */
+void
+plllvm_expr_emit_cast(plllvm_ir *ir, const Expr *e, plllvm_expr_env *env,
+					  const plllvm_value *caseval, plllvm_value *out)
+{
+	EmitState	es;
+
+	es.env = env;
+	es.caseval = caseval;
 	emit_node(ir, e, &es, out);
 }
 
