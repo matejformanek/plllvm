@@ -66,11 +66,22 @@ bool		plllvm_expr_eager = false;
 int			plllvm_expr_opt_level = 2;
 int			plllvm_expr_max_programs = 1000;
 bool		plllvm_plpgsql_jit = true;
+int			plllvm_pj_opt_level = 2;
+int			plllvm_pj_codegen = PLLLVM_PJ_NATIVE;
 
 static const struct config_enum_entry debug_inject_options[] = {
 	{"none", PLLLVM_INJECT_NONE, false},
 	{"llvm_fatal", PLLLVM_INJECT_LLVM_FATAL, false},
 	{"bad_alloc", PLLLVM_INJECT_BAD_ALLOC, false},
+	{"translate_cancel", PLLLVM_INJECT_TRANSLATE_CANCEL, false},
+	{"foreign_plugin", PLLLVM_INJECT_FOREIGN_PLUGIN, false},
+	{"pj_bad_signature", PLLLVM_INJECT_PJ_BAD_SIGNATURE, false},
+	{"pj_bad_cast_repr", PLLLVM_INJECT_PJ_BAD_CAST_REPR, false},
+	{NULL, 0, false}
+};
+
+static const struct config_enum_entry pj_codegen_options[] = {
+	{"native", PLLLVM_PJ_NATIVE, false},
 	{NULL, 0, false}
 };
 
@@ -128,7 +139,9 @@ _PG_init(void)
 
 	DefineCustomIntVariable("plllvm.max_resident_compiles",
 							gettext_noop("Sets the maximum number of compiles kept in a session."),
-							gettext_noop("Replaced code is freed when its function is next called with the same input collation; code of dropped functions stays until the session ends."),
+							gettext_noop("The limit is per kind: PL/LLVM functions and plpgsql_jit functions each get this many. "
+										 "Replaced code is freed when its function is next called with the same input collation; "
+										 "code of dropped functions stays until the session ends."),
 							&plllvm_max_resident_compiles,
 							2000, 1, 1000000,
 							PGC_SUSET, 0,
@@ -197,6 +210,23 @@ _PG_init(void)
 							 &plllvm_plpgsql_jit,
 							 true,
 							 PGC_SUSET, 0,
+							 NULL, NULL, NULL);
+
+	DefineCustomIntVariable("plllvm.pj_opt_level",
+							gettext_noop("Sets the LLVM optimization level of plpgsql_jit functions."),
+							NULL,
+							&plllvm_pj_opt_level,
+							2, 0, 3,
+							PGC_SUSET, 0,
+							NULL, NULL, NULL);
+
+	DefineCustomEnumVariable("plllvm.pj_codegen",
+							 gettext_noop("Sets how plpgsql_jit functions are compiled."),
+							 NULL,
+							 &plllvm_pj_codegen,
+							 PLLLVM_PJ_NATIVE,
+							 pj_codegen_options,
+							 PGC_SUSET, GUC_NO_SHOW_ALL | GUC_NOT_IN_SAMPLE,
 							 NULL, NULL, NULL);
 
 	plllvm_plpgsql_init();

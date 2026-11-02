@@ -51,7 +51,8 @@ CREATE FUNCTION plllvm_code_cache()
                 parse_bc_ms float8, parse_ms float8, link_ms float8,
                 verify_ms float8, resolve_ms float8, optimize_ms float8,
                 emit_ms float8, total_ms float8, retired bool,
-                code_addr text, frame bool, kind text)
+                code_addr text, frame bool, kind text,
+                translate_ms float8)
   LANGUAGE c AS 'MODULE_PATHNAME';
 
 REVOKE ALL ON FUNCTION plllvm_code_cache() FROM PUBLIC;
@@ -117,7 +118,11 @@ CREATE FUNCTION plllvm_pj_stats(OUT calls int8, OUT compiled_calls int8,
 REVOKE ALL ON FUNCTION plllvm_pj_stats() FROM PUBLIC;
 
 -- one row per signature and input collation of fn in this backend; state is
--- new, seen or declined
+-- new, seen, compiled or declined.  exprs, unplanned and variants describe
+-- the translation, native, boxed, restartable and translate_ms the variant
+-- the session's plllvm.pj_opt_level and plllvm.pj_codegen select; they are
+-- NULL when there is none.  translate_ms is the whole translation, in
+-- plllvm_code_cache() too (rows of kind pj)
 CREATE FUNCTION plllvm_pj_status(fn regprocedure)
   RETURNS TABLE(signature text, collation regcollation, state text,
                 reason text, calls int8, compiled_calls int8, deopts int8,
@@ -127,3 +132,9 @@ CREATE FUNCTION plllvm_pj_status(fn regprocedure)
   STRICT VOLATILE LANGUAGE c AS 'MODULE_PATHNAME';
 
 REVOKE ALL ON FUNCTION plllvm_pj_status(regprocedure) FROM PUBLIC;
+
+-- the IR of that variant, for inspection; NULL when there is none
+CREATE FUNCTION plllvm_pj_ir(fn regprocedure) RETURNS text
+  STRICT VOLATILE LANGUAGE c AS 'MODULE_PATHNAME';
+
+REVOKE ALL ON FUNCTION plllvm_pj_ir(regprocedure) FROM PUBLIC;

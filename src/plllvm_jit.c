@@ -451,7 +451,11 @@ plllvm_jit_compile_expr(const char *ir, int opt_level,
  * fcinfo, ptr ctx)) into resident code.
  *
  * At plllvm.max_resident_compiles it returns false with result->capped
- * set and no error: the caller stays on the interpreter and may retry.
+ * set and no error: the caller stays on the interpreter and may retry.  Any
+ * other failure returns false with result->sqlerrcode set, so test capped
+ * before raising it.  The IR has no call sites or constants to resolve; one
+ * that did would raise its ERROR from here, counted as a failure, and the
+ * caller would need a PG_TRY.
  */
 bool
 plllvm_jit_compile_pj(const char *ir, int opt_level, plllvm_jit_result *result)

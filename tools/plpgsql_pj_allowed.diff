@@ -1,7 +1,7 @@
 # The hunks of installcheck-plpgsql-pj that may differ from base, as it diffs them.
 # plpgsql.sql:4629: the caret under the echoed DO LANGUAGE line is 4 columns
 # further right, for the 4 characters of "_jit".
-diff -r -x regression.out -x regression.diffs -x *.diff base/core/results/plpgsql.out MODE/core/results/plpgsql.out
+diff -r -x regression.out -x regression.diffs -x compiled.txt -x *.diff base/core/results/plpgsql.out MODE/core/results/plpgsql.out
 4629c4629
 <                                            ^
 ---

@@ -20,7 +20,8 @@ plpgsql_jit` (v0.3).
 | `src/plllvm_spi.c` | read-only prepared statements: prepare into a slot, SELECT INTO, result checks (`plllvm_spi_*` host functions) |
 | `src/plllvm_sites.c` | call sites and constants: resolution, rebuild, EXECUTE checks, invalidation callbacks (`plllvm_rt_site_*` host functions) |
 | `src/plllvm_plpgsql.c` | the PL/pgSQL plugin: slot and chaining, `paramCompile` wrapper, trampolines on simple expressions, the Params of compiled code (`param_check`, `param_emit`); with `plllvm_pj.c`, the only file that includes `plpgsql.h` |
-| `src/plllvm_pj.c`, `src/plllvm_pj.h` | `LANGUAGE plpgsql_jit`: the call handler, the side entry of each PL/pgSQL function, the counters of `plllvm_pj_stats()`; includes `plpgsql.h` |
+| `src/plllvm_pj.c`, `src/plllvm_pj.h` | `LANGUAGE plpgsql_jit`: the call handler, the side entry of each PL/pgSQL function, translation in a subtransaction, guards, the error context, the counters of `plllvm_pj_stats()`; includes `plpgsql.h` |
+| `src/plllvm_pj_translate.c` | `plpgsql_jit`: scope of a function, the planned trees of its RETURN, the cast to the result type, the IR of a function; includes `plpgsql.h` |
 | `src/plllvm_ir.c` | IR text builder: temporaries, blocks, declarations |
 | `src/plllvm_expr.c` | planned expression tree to IR: the check (whole tree or nothing) and the emitter; knows neither LLVM nor PL/pgSQL |
 | `src/plllvm_exprjit.c` | compiled expressions: key, stored tree and facts, cache, cap, the `ExprStateEvalFunc` wrapper, install |
@@ -176,3 +177,29 @@ Only `plllvm_jit.c` and `plllvm_error.cpp` include LLVM headers.
   `fn_extra` without compiling again.
 * `plllvm.plpgsql_jit` off sends the call to PL/pgSQL before any entry is
   looked at.
+* The first call of a function is PL/pgSQL's, which plans what it runs. The
+  second reads the planned trees (`expr_simple_expr`) of the expressions the
+  run can reach and translates the function if it is in scope; a function
+  out of scope is declined with the reason and stays in PL/pgSQL until its
+  entry is stale. The translation runs in a subtransaction with no frame of
+  the function on the stack: an ERROR declines the function, a cancel is
+  raised again.
+* The code is `i64 (fcinfo, ctx)` with a slot (Datum and null flag) per
+  variable. Before each step that can raise it stores an index of a position
+  table in `ctx`, from which the handler writes the error context of
+  `plpgsql_exec_error_callback`. A value is converted to the result type by
+  the cast tree PL/pgSQL would build, cached per pair of types, but only by
+  a cast that cannot raise: widening int4 to int8 or float8, int8 to float8,
+  or a relabeling through a pinned `pg_cast` row. Any other cast declines
+  (`cast`), so a cast error always comes from PL/pgSQL's own code.
+* A compiled call checks, in this order: no NULL argument (PL/pgSQL runs
+  it), every plan still simply valid with the generation it had, a variant
+  for the session's `plllvm.pj_opt_level`, and the EXECUTE right on every
+  function of the trees and the cast. The last is kept as a key of
+  (transaction, user, epoch of the catalogs it depends on), read before the
+  check; when the key differs all functions are checked again, and a denial
+  sends the call to PL/pgSQL, which raises it. After a compiled error the
+  expressions of the function are marked as an interpreted failure leaves
+  them, so PL/pgSQL checks again too. A guard that misses sends the call to
+  PL/pgSQL and the next call translates again; eight misses with fewer than
+  1,000 compiled calls between decline the function (`thrash`).

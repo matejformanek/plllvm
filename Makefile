@@ -48,8 +48,8 @@ REGRESS = plllvm_setup $(REGRESS_FEATURES) $(REGRESS_KERNELS) expr_plugin \
 # LANGUAGE plpgsql_jit, with PJ_LANG=plpgsql_jit (make installcheck-pj); the
 # files run against stock PL/pgSQL's output.  REGRESS_PJ_ONCE runs in one
 # variant only, REGRESS_PJ_OPT at opt level 3.
-REGRESS_PJ = pj_language
-REGRESS_PJ_ONCE =
+REGRESS_PJ = pj_language pj_basic pj_errors pj_guards pj_execute pj_casts pj_sessions
+REGRESS_PJ_ONCE = pj_states pj_discard pj_execute_diff
 REGRESS_PJ_OPT =
 
 REGRESS_OPTS = --dbname=$(PL_TESTDB)
@@ -288,15 +288,16 @@ PLPGSQL_LOAD = -c session_preload_libraries=plllvm
 
 # $(call plpgsql_suite,name,PGOPTIONS)
 plpgsql_suite = \
+	export PGOPTIONS='$(2)' && \
 	$(MKDIR_P) results-plpgsql/$(1)/pl results-plpgsql/$(1)/core && \
-	PGOPTIONS='$(2)' $(pg_regress_installcheck) --host=/tmp --port=$(PLLLVM_PORT) \
+	$(pg_regress_installcheck) --host=/tmp --port=$(PLLLVM_PORT) \
 		--inputdir=$(PG_SRC)/src/pl/plpgsql/src --outputdir=results-plpgsql/$(1)/pl \
 		--dbname=pl_regression $(PLPGSQL_TESTS) && \
 	'$(bindir)/psql' -X -q -h /tmp -p $(PLLLVM_PORT) -d postgres \
 		-c 'DROP DATABASE IF EXISTS regression' \
 		-c 'DROP DATABASE IF EXISTS regression_utf8' \
 		-c 'DROP TABLESPACE IF EXISTS regress_tblspace' && \
-	PGOPTIONS='$(2)' $(pg_regress_installcheck) --host=/tmp --port=$(PLLLVM_PORT) \
+	$(pg_regress_installcheck) --host=/tmp --port=$(PLLLVM_PORT) \
 		--inputdir=$(PG_SRC)/src/test/regress --dlpath=$(PG_BUILD)/src/test/regress \
 		--outputdir=results-plpgsql/$(1)/core --dbname=regression test_setup plpgsql
 
@@ -338,16 +339,17 @@ pj_run = PJ_LANG=plpgsql_jit $(MAKE) installcheck REGRESS='$(2)' PGOPTIONS='$(1)
 
 installcheck-pj:
 	$(call pj_run,$(PLPGSQL_LOAD) -c plllvm.plpgsql_jit=off,$(PJ_FIXTURE) $(REGRESS_PJ) pj_stats)
-	$(call pj_run,$(PLPGSQL_LOAD),$(PJ_FIXTURE) $(REGRESS_PJ) pj_stats)
+	$(call pj_run,$(PLPGSQL_LOAD) -c plllvm.pj_opt_level=0,$(PJ_FIXTURE) $(REGRESS_PJ) pj_stats)
+	$(call pj_run,$(PLPGSQL_LOAD) -c plllvm.pj_opt_level=2,$(PJ_FIXTURE) $(REGRESS_PJ) pj_stats)
 	$(call pj_run,$(EXPR_JIT) -c plllvm.expr_eager=on,$(PJ_FIXTURE) $(REGRESS_PJ) pj_stats)
-	$(call pj_run,$(PLPGSQL_LOAD) -c debug_discard_caches=1,$(PJ_FIXTURE) pj_stats)
+	$(call pj_run,$(PLPGSQL_LOAD) -c debug_discard_caches=1,$(PJ_FIXTURE) pj_guards pj_stats)
 
 # expected from plllvm, so not against stock
 installcheck-pj-once:
 	@[ -z '$(REGRESS_PJ_ONCE)' ] || \
 	  $(call pj_run,$(PLPGSQL_LOAD),$(PJ_FIXTURE) $(REGRESS_PJ_ONCE))
 
-# the GUC arrives with PR-C1, the list is filled from PR-C2
+# no file needs it yet
 installcheck-pj-opt:
 	@[ -z '$(REGRESS_PJ_OPT)' ] || \
 	  $(call pj_run,$(PLPGSQL_LOAD) -c plllvm.pj_opt_level=3,$(PJ_FIXTURE) $(REGRESS_PJ_OPT))
@@ -360,7 +362,18 @@ installcheck-pj-opt:
 #
 PJPL = results-plpgsql-pj
 PJPL_SWAP = perl -pe 's/\b(language\s+)(["\x27]?)plpgsql\2\b/$$1plpgsql_jit/gi'
-PJPL_BACK = perl -pe 's/plpgsql_jit/plpgsql/g'
+PJPL_BACK = perl -0pe 's/plpgsql_jit/plpgsql/g; s/-- pj compiled count\n.*?\\o\n//s'
+
+# each generated file ends by appending the compiled calls of its session
+# to $PJ_COMPILED; the comparison drops these lines
+define PJPL_TAIL
+-- pj compiled count
+RESET SESSION AUTHORIZATION;
+\o | cat >> "$$PJ_COMPILED"
+SELECT compiled_calls FROM plllvm_pj_stats();
+\o
+endef
+export PJPL_TAIL
 
 # $(call pjpl_inputs,dir,source dir,tests)
 pjpl_inputs = \
@@ -368,24 +381,28 @@ pjpl_inputs = \
 	{ [ ! -d $(2)/data ] || cp -R $(2)/data $(1); } && \
 	for t in $(3); do \
 	  $(PJPL_SWAP) $(2)/sql/$$t.sql > $(1)/sql/$$t.sql && \
-	  $(PJPL_SWAP) $(2)/expected/$$t.out > $(1)/expected/$$t.out || exit 1; done
+	  $(PJPL_SWAP) $(2)/expected/$$t.out > $(1)/expected/$$t.out && \
+	  { echo; echo "$$PJPL_TAIL"; } >> $(1)/sql/$$t.sql || exit 1; done
 
 # $(call pjpl_suite,name,PGOPTIONS,regress options,pl inputdir,core inputdir):
 # the tests as installcheck-plpgsql's suites; a failed test shows in the diff
 # against base, not here
 pjpl_suite = \
+	export PGOPTIONS='$(2)' && \
 	$(MKDIR_P) $(PJPL)/$(1)/pl $(PJPL)/$(1)/core && \
-	{ PGOPTIONS='$(2)' $(pg_regress_installcheck) --host=/tmp --port=$(PLLLVM_PORT) $(3) \
+	{ export PJ_COMPILED=$(CURDIR)/$(PJPL)/$(1)/compiled.txt; \
+		$(pg_regress_installcheck) --host=/tmp --port=$(PLLLVM_PORT) $(3) \
 		--inputdir=$(4) --outputdir=$(PJPL)/$(1)/pl --dbname=pl_regression \
 		$(PLPGSQL_TESTS) || true; } && \
 	'$(bindir)/psql' -X -q -h /tmp -p $(PLLLVM_PORT) -d postgres \
 		-c 'DROP DATABASE IF EXISTS regression' \
 		-c 'DROP DATABASE IF EXISTS regression_utf8' \
 		-c 'DROP TABLESPACE IF EXISTS regress_tblspace' && \
-	PGOPTIONS='$(2)' $(pg_regress_installcheck) --host=/tmp --port=$(PLLLVM_PORT) $(3) \
+	$(pg_regress_installcheck) --host=/tmp --port=$(PLLLVM_PORT) $(3) \
 		--inputdir=$(PG_SRC)/src/test/regress --dlpath=$(PG_BUILD)/src/test/regress \
 		--outputdir=$(PJPL)/$(1)/core --dbname=regression test_setup && \
-	{ PGOPTIONS='$(2)' $(pg_regress_installcheck) --host=/tmp --port=$(PLLLVM_PORT) --use-existing \
+	{ export PJ_COMPILED=$(CURDIR)/$(PJPL)/$(1)/compiled.txt; \
+		$(pg_regress_installcheck) --host=/tmp --port=$(PLLLVM_PORT) --use-existing \
 		--inputdir=$(5) --dlpath=$(PG_BUILD)/src/test/regress \
 		--outputdir=$(PJPL)/$(1)/core --dbname=regression plpgsql || true; }
 
@@ -400,9 +417,13 @@ installcheck-plpgsql-pj: port-ok
 	$(call pjpl_suite,off,$(PLPGSQL_LOAD) -c plllvm.plpgsql_jit=off,--load-extension=plllvm,$(PJPL)/in/pl,$(PJPL)/in/core)
 	$(call pjpl_suite,on,$(PLPGSQL_LOAD),--load-extension=plllvm,$(PJPL)/in/pl,$(PJPL)/in/core)
 	rc=0; for m in off on; do \
+	  n=`perl -ne '$$s += $$1 if /^\s*(\d+)\s*$$/; END {print $$s + 0}' $(PJPL)/$$m/compiled.txt`; \
+	  echo "installcheck-plpgsql-pj: $$m ran $$n calls compiled (a lower bound: a reconnect starts a new session)"; \
+	  [ $$m != off ] || [ $$n = 0 ] || { echo "installcheck-plpgsql-pj: compiled calls with the handler off" >&2; rc=1; }; \
+	  [ $$m = off ] || [ $$n != 0 ] || { echo "installcheck-plpgsql-pj: nothing compiled with the handler on" >&2; rc=1; }; \
 	  cp -r $(PJPL)/$$m $(PJPL)/$$m-back && \
 	  for f in $(PJPL)/$$m-back/*/results/*.out; do $(PJPL_BACK) $$f > $$f.tmp && mv $$f.tmp $$f; done; \
-	  diff -r -x regression.out -x regression.diffs -x '*.diff' $(PJPL)/base $(PJPL)/$$m-back \
+	  diff -r -x regression.out -x regression.diffs -x compiled.txt -x '*.diff' $(PJPL)/base $(PJPL)/$$m-back \
 	    | sed "s#$(PJPL)/##g; s#$$m-back#MODE#g" > $(PJPL)/$$m.diff; \
 	  grep -v '^#' tools/plpgsql_pj_allowed.diff | diff - $(PJPL)/$$m.diff > /dev/null || \
 	    { echo "installcheck-plpgsql-pj: $$m differs from base, see $(PJPL)/$$m.diff" >&2; rc=1; }; \
@@ -436,7 +457,7 @@ HOST_API_INTERNAL = plllvm_rt_site_call plllvm_rt_site_null plllvm_rt_array_acce
 # docs/host-api.ll declares every other plllvm_* name of plllvm_types.bc
 check-host-api: src/plllvm_types.bc
 	$(LLVM)/bin/llvm-nm -j $< | sed 's/^_//' | grep '^plllvm_' | \
-		grep -v -x -e plllvm_attr_template -e 'plllvm_types_.*' $(addprefix -e ,$(HOST_API_INTERNAL)) | \
+		grep -v -x -e plllvm_attr_template -e 'plllvm_types_.*' -e 'plllvm_pj_.*' $(addprefix -e ,$(HOST_API_INTERNAL)) | \
 		sort -u > $@.bc
 	sed -n 's/^declare .*@\(plllvm_[a-z0-9_]*\)(.*/\1/p' docs/host-api.ll | sort -u > $@.ll
 	diff $@.bc $@.ll; rc=$$?; rm -f $@.bc $@.ll; exit $$rc

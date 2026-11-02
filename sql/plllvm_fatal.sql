@@ -42,6 +42,12 @@ CREATE FUNCTION fatal_f() RETURNS int8 LANGUAGE plllvm
 AS $$ define i64 @f(ptr %fcinfo) { ret i64 0 } $$;
 SELECT compile_injected(:'conn', 'llvm_fatal', 'SELECT fatal_f()');
 
+-- and in the translation of a plpgsql_jit function, in a subtransaction
+CREATE FUNCTION fatal_pj(n int) RETURNS int LANGUAGE plpgsql_jit
+AS $$ BEGIN RETURN n + 1; END $$;
+SELECT compile_injected(:'conn', 'llvm_fatal',
+  'SELECT fatal_pj(1), fatal_pj(2), fatal_pj(3)');
+
 -- the same with core's llvmjit loaded in the dying session, whose
 -- shutdown then runs after plllvm's FATAL
 SELECT compile_injected(:'conn', 'llvm_fatal', $$
@@ -55,5 +61,6 @@ SELECT pg_postmaster_start_time() = :'start_time' AS no_restart;
 SELECT ok FROM plllvm_jit_test('define i64 @f(ptr %p) { ret i64 0 }');
 
 DROP FUNCTION fatal_f();
+DROP FUNCTION fatal_pj(int);
 DROP FUNCTION compile_injected(text, text, text);
 DROP EXTENSION dblink;

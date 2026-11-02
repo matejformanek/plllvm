@@ -1,0 +1,128 @@
+--
+-- pj_execute_diff: where plpgsql_jit checks EXECUTE earlier than PL/pgSQL
+--
+-- Expected from plllvm, in one variant.  A compiled call builds no ExprState
+-- of PL/pgSQL's, and checks EXECUTE for itself whenever the user or the
+-- privileges changed, so a privilege lost inside a transaction takes effect at
+-- the next call, where PL/pgSQL may keep using its stale state.  Each row
+-- says what PL/pgSQL returns; the call is the last of its savepoint, and the
+-- path says why the answer came from PL/pgSQL.
+--
+\set VERBOSITY terse
+CREATE ROLE regress_pj_r1;
+CREATE ROLE regress_pj_grp;
+CREATE FUNCTION pdd_inc(n int) RETURNS int LANGUAGE plpgsql_jit AS $$
+BEGIN RETURN n + 1; END $$;
+CREATE FUNCTION pdd_div(a int, b int) RETURNS int LANGUAGE plpgsql_jit AS $$
+BEGIN RETURN a / b; END $$;
+CREATE FUNCTION pdd_a(n int) RETURNS bigint LANGUAGE plpgsql_jit AS $$
+BEGIN RETURN CASE WHEN n > 0 THEN n END; END $$;
+CREATE FUNCTION pdd_c1(n int) RETURNS bigint LANGUAGE plpgsql_jit AS $$
+BEGIN RETURN n; END $$;
+CREATE FUNCTION pdd_c2(n int) RETURNS bigint LANGUAGE plpgsql_jit AS $$
+BEGIN RETURN n; END $$;
+CREATE FUNCTION pdd_sd(n int) RETURNS int LANGUAGE plpgsql_jit AS $$
+BEGIN RETURN n * 3; END $$;
+CREATE FUNCTION pdd_sdo(n int) RETURNS int LANGUAGE plpgsql SECURITY DEFINER AS $$
+BEGIN RETURN pdd_sd(n); END $$;
+CREATE FUNCTION pdd_mod(a int, b int) RETURNS int LANGUAGE plpgsql_jit AS $$
+BEGIN RETURN a % b; END $$;
+SELECT pdd_inc(1), pdd_inc(2), pdd_inc(3), pdd_div(4, 2), pdd_div(4, 2), pdd_div(4, 2);
+SELECT pdd_a(1), pdd_a(2), pdd_a(3), pdd_sd(1), pdd_sd(2), pdd_sd(3);
+SELECT pdd_c1(1), pdd_c1(2), pdd_c1(3), pdd_c2(1), pdd_c2(2), pdd_c2(3);
+SELECT pdd_mod(4, 3), pdd_mod(4, 3), pdd_mod(4, 3);
+
+-- the privilege revoked after a call under the same role (PL/pgSQL: 12)
+BEGIN;
+SET ROLE regress_pj_r1;
+SELECT pdd_inc(10);
+RESET ROLE;
+REVOKE EXECUTE ON FUNCTION int4pl(int4, int4) FROM PUBLIC;
+SET ROLE regress_pj_r1;
+SAVEPOINT s;
+SELECT pdd_inc(11);  -- fail
+ROLLBACK TO s;
+RESET ROLE;
+SELECT pj_expect('pdd_inc(int)', 'interpreted:execute') \gset
+ROLLBACK;
+
+-- a role without the function after a call, and a NULL argument (PL/pgSQL: 4
+-- and NULL; the call that runs in PL/pgSQL builds its state then)
+REVOKE EXECUTE ON FUNCTION int4div(int4, int4) FROM PUBLIC;
+BEGIN;
+SELECT pdd_div(4, 2);
+SET ROLE regress_pj_r1;
+SAVEPOINT s;
+SELECT pdd_div(8, 2);  -- fail
+ROLLBACK TO s;
+RESET ROLE;
+SELECT pj_expect('pdd_div(int,int)', 'interpreted:execute') \gset
+SET ROLE regress_pj_r1;
+SAVEPOINT s;
+SELECT pdd_div(NULL, 2) IS NULL;  -- fail
+ROLLBACK TO s;
+RESET ROLE;
+SELECT pj_expect('pdd_div(int,int)', 'interpreted:null arg') \gset
+ROLLBACK;
+GRANT EXECUTE ON FUNCTION int4div(int4, int4) TO PUBLIC;
+
+-- the cast of two functions with one cast key (PL/pgSQL: 6)
+REVOKE EXECUTE ON FUNCTION int8(int4) FROM PUBLIC;
+BEGIN;
+SELECT pdd_c1(5);
+SET ROLE regress_pj_r1;
+SAVEPOINT s;
+SELECT pdd_c2(6);  -- fail
+ROLLBACK TO s;
+RESET ROLE;
+SELECT pj_expect('pdd_c2(int)', 'interpreted:execute') \gset
+ROLLBACK;
+
+-- a membership lost, the cast reached by the first call under the role
+-- (PL/pgSQL: 2, the state it built before the REVOKE)
+GRANT EXECUTE ON FUNCTION int8(int4) TO regress_pj_grp;
+GRANT regress_pj_grp TO regress_pj_r1;
+BEGIN;
+SET ROLE regress_pj_r1;
+SELECT pdd_a(1);
+RESET ROLE;
+REVOKE EXECUTE ON FUNCTION int8(int4) FROM regress_pj_grp;
+SET ROLE regress_pj_r1;
+SAVEPOINT s;
+SELECT pdd_a(2);  -- fail
+ROLLBACK TO s;
+RESET ROLE;
+SELECT pj_expect('pdd_a(int)', 'interpreted:execute') \gset
+ROLLBACK;
+REVOKE regress_pj_grp FROM regress_pj_r1;
+GRANT EXECUTE ON FUNCTION int8(int4) TO PUBLIC;
+
+-- a SECURITY DEFINER caller reached the function, then the invoker calls it
+-- directly (PL/pgSQL: 6)
+REVOKE EXECUTE ON FUNCTION int4mul(int4, int4) FROM PUBLIC;
+BEGIN;
+SET ROLE regress_pj_r1;
+SELECT pdd_sdo(1);
+SAVEPOINT s;
+SELECT pdd_sd(2);  -- fail
+ROLLBACK TO s;
+RESET ROLE;
+SELECT pj_expect('pdd_sd(int)', 'interpreted:execute') \gset
+ROLLBACK;
+GRANT EXECUTE ON FUNCTION int4mul(int4, int4) TO PUBLIC;
+
+-- SET SESSION AUTHORIZATION after a call (PL/pgSQL: 2)
+REVOKE EXECUTE ON FUNCTION int4mod(int4, int4) FROM PUBLIC;
+BEGIN;
+SELECT pdd_mod(4, 3);
+SET SESSION AUTHORIZATION regress_pj_r1;
+SAVEPOINT s;
+SELECT pdd_mod(5, 3);  -- fail
+ROLLBACK TO s;
+RESET SESSION AUTHORIZATION;
+SELECT pj_expect('pdd_mod(int,int)', 'interpreted:execute') \gset
+ROLLBACK;
+GRANT EXECUTE ON FUNCTION int4mod(int4, int4) TO PUBLIC;
+
+DROP OWNED BY regress_pj_r1, regress_pj_grp;
+DROP ROLE regress_pj_r1, regress_pj_grp;
