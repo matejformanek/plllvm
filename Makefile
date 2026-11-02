@@ -420,6 +420,7 @@ installcheck-plpgsql-pj: port-ok
 	  n=`perl -ne '$$s += $$1 if /^\s*(\d+)\s*$$/; END {print $$s + 0}' $(PJPL)/$$m/compiled.txt`; \
 	  echo "installcheck-plpgsql-pj: $$m ran $$n calls compiled (a lower bound: a reconnect starts a new session)"; \
 	  [ $$m != off ] || [ $$n = 0 ] || { echo "installcheck-plpgsql-pj: compiled calls with the handler off" >&2; rc=1; }; \
+	  [ $$m = off ] || [ $$n != 0 ] || { echo "installcheck-plpgsql-pj: nothing compiled with the handler on" >&2; rc=1; }; \
 	  cp -r $(PJPL)/$$m $(PJPL)/$$m-back && \
 	  for f in $(PJPL)/$$m-back/*/results/*.out; do $(PJPL_BACK) $$f > $$f.tmp && mv $$f.tmp $$f; done; \
 	  diff -r -x regression.out -x regression.diffs -x compiled.txt -x '*.diff' $(PJPL)/base $(PJPL)/$$m-back \

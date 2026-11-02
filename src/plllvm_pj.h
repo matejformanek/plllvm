@@ -123,8 +123,6 @@ typedef struct PjExpr
 	CachedPlanSource *plansource;
 	CachedPlan *plan;
 	int			generation;
-	List	   *funcids;		/* PL/pgSQL checks EXECUTE on these when it
-								 * builds the expression */
 } PjExpr;
 
 /* what the translator found in a function, once per pre-check */
@@ -151,10 +149,6 @@ typedef struct PjVariant
 	bool		restartable;
 	double		translate_ms;
 	char	   *ir;
-	LocalTransactionId key_lxid;	/* EXECUTE was checked in this transaction
-									 * ... */
-	Oid			key_user;		/* ... for this user ... */
-	uint64		key_epoch;		/* ... at this state of the catalogs */
 } PjVariant;
 
 /* one generation of a function's expressions, with the variants built on it */
@@ -169,10 +163,12 @@ typedef struct PjHarvest
 	Expr	   *cast_tree;		/* the cast of the value, or NULL */
 	PjCast	   *cast;
 	uint64		cast_gen;
-	List	   *cast_funcids;	/* likewise, for the cast */
-	LocalTransactionId done_lxid;	/* a call ended normally in this
-									 * transaction */
-	LocalTransactionId cast_lxid;	/* ... and its value went through the cast */
+	List	   *funcids;		/* of the trees and the cast: EXECUTE is
+								 * checked on them */
+	LocalTransactionId key_lxid;	/* they were checked in this transaction
+									 * ... */
+	Oid			key_user;		/* ... for this user ... */
+	uint64		key_epoch;		/* ... at this state of the catalogs */
 	PjPos		pos[3];
 	PjVariant  *variants;
 } PjHarvest;

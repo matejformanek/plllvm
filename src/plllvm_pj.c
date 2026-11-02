@@ -89,8 +89,6 @@ typedef struct PjEntry
 	int64		since_translation;	/* compiled calls since the last
 									 * translation */
 	int			deopt_expr;		/* expression of the last deopt, or -1 */
-	LocalTransactionId abort_lxid;	/* a compiled call failed in this
-									 * transaction */
 	TransactionId fn_xmin;		/* only for an Assert */
 	ItemPointerData fn_tid;
 } PjEntry;
@@ -139,8 +137,8 @@ static void activation_end(PLpgSQL_function *func, PjEntry *e,
 						   MemoryContext entry_cxt);
 static void exec_error_callback(void *arg);
 static bool guards_ok(PjHarvest *h);
-static bool execute_allowed(PLpgSQL_function *func, PjEntry *e,
-							PjVariant *v);
+static bool execute_allowed(PjEntry *e);
+static void pj_mark_busy(PjEntry *e);
 static PjVariant *variant_find(PjHarvest *h);
 static void decline(PjEntry *e, const char *reason);
 static void decline_idle(PjEntry *e, const char *reason);
@@ -676,7 +674,7 @@ run_compiled(PLpgSQL_function *func, FunctionCallInfo fcinfo, PjEntry *e)
 	if (v->failed)
 		return fall_back(fcinfo, e, "interpreted:failed");
 
-	if (!execute_allowed(func, e, v))
+	if (!execute_allowed(e))
 		return fall_back(fcinfo, e, "interpreted:execute");
 
 	return run(func, fcinfo, e, v);
@@ -718,11 +716,13 @@ run(PLpgSQL_function *func, FunctionCallInfo fcinfo, PjEntry *e, PjVariant *v)
 		e->last_path = "compiled";
 
 		/*
-		 * PL/pgSQL does not trust an ExprState after an error in it, and
-		 * checks EXECUTE again at every evaluation in the transaction
+		 * Leave PL/pgSQL's expressions as an interpreted failure would: the
+		 * next evaluation takes the path that checks EXECUTE.  A failed cast
+		 * is PL/pgSQL's own cache, which only a plan reset reaches.
 		 */
-		e->abort_lxid = MyProc->vxid.lxid;
-		v->key_lxid = InvalidLocalTransactionId;
+		pj_mark_busy(e);
+		if (ctx.pos == PJ_POS_CAST)
+			ResetPlanCache();
 		activation_end(func, e, entry_cxt);
 		PG_RE_THROW();
 	}
@@ -742,9 +742,6 @@ run(PLpgSQL_function *func, FunctionCallInfo fcinfo, PjEntry *e, PjVariant *v)
 		return call_handler_p(fcinfo);
 	}
 
-	e->harvest->done_lxid = MyProc->vxid.lxid;
-	if (!fcinfo->isnull)
-		e->harvest->cast_lxid = MyProc->vxid.lxid;
 	plllvm_pj_count.compiled_calls++;
 	e->compiled_calls++;
 	e->since_translation++;
@@ -826,59 +823,52 @@ guards_ok(PjHarvest *h)
 
 /*
  * May the user execute the functions in the code?  PL/pgSQL checks them when
- * it builds the ExprState of an expression, the first time it is reached in
- * a transaction, and does not look again, whatever happens to the role or
- * the privileges, except after an error in it or in a recursion.  A failure
- * here sends the call to PL/pgSQL, which raises it at the right expression,
- * or not at all.
- *
- * The result holds for this transaction, user and state of the catalogs.
- * Without it the lists are walked, skipping what PL/pgSQL would not check
- * again: an expression its ExprState exists for, or that every compiled call
- * reaches, and the cast after a call that sent a value through it.
+ * it builds the ExprState of an expression, and again at every evaluation of
+ * one that failed.  We check all of them whenever the transaction, the user
+ * or the privileges changed since the last check, so we are never more
+ * permissive.  A failure here sends the call to PL/pgSQL, which raises it
+ * at the right expression, or not at all.
  */
 static bool
-execute_allowed(PLpgSQL_function *func, PjEntry *e, PjVariant *v)
+execute_allowed(PjEntry *e)
 {
 	PjHarvest  *h = e->harvest;
 	Oid			user = GetUserId();
 	LocalTransactionId lxid = MyProc->vxid.lxid;
-	bool		idle = func->cfunc.use_count == 0 && e->abort_lxid != lxid;
-	List	   *checked = NIL;
 
-	if (v->key_lxid == lxid && v->key_user == user && v->key_epoch == exec_epoch)
+	if (h->key_lxid == lxid && h->key_user == user && h->key_epoch == exec_epoch)
 		return true;
 
-	foreach_ptr(PjExpr, pe, h->exprs)
-	{
-		PLpgSQL_expr *expr = pe->expr;
-		bool		reached = expr->expr_simple_lxid == lxid ||
-			h->done_lxid == lxid;
-		bool		failed = expr->expr_simple_in_use &&
-			expr->expr_simple_lxid == lxid;
-
-		if (pe->h1 != PJ_H1_READY)
-			continue;
-		if (idle && reached && !failed)
-			continue;
-		checked = list_concat(checked, list_copy(pe->funcids));
-	}
-	if (!(idle && h->cast_lxid == lxid))
-		checked = list_concat(checked, list_copy(h->cast_funcids));
-
-	foreach_oid(funcid, checked)
+	foreach_oid(funcid, h->funcids)
 	{
 		if (object_aclcheck(ProcedureRelationId, funcid, user,
 							ACL_EXECUTE) != ACLCHECK_OK)
 			return false;
 	}
-	foreach_oid(funcid, checked)
+	foreach_oid(funcid, h->funcids)
 		InvokeFunctionExecuteHook(funcid);
 
-	v->key_lxid = lxid;
-	v->key_user = user;
-	v->key_epoch = exec_epoch;
+	h->key_lxid = lxid;
+	h->key_user = user;
+	h->key_epoch = exec_epoch;
 	return true;
+}
+
+/*
+ * The state PL/pgSQL leaves an expression when it fails in it: built in this
+ * transaction, and busy, so that its next evaluation takes the path that
+ * checks EXECUTE again.  Compiled code fails without touching either.
+ */
+static void
+pj_mark_busy(PjEntry *e)
+{
+	foreach_ptr(PjExpr, pe, e->harvest->exprs)
+	{
+		if (pe->h1 != PJ_H1_READY)
+			continue;
+		pe->expr->expr_simple_lxid = MyProc->vxid.lxid;
+		pe->expr->expr_simple_in_use = true;
+	}
 }
 
 static PjVariant *

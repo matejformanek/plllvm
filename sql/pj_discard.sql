@@ -53,7 +53,7 @@ DROP CAST (bool AS float8);
 SELECT pd_bf(true);  -- fail
 SET debug_discard_caches = 0;
 
--- a flush inside the call: compiled code does not look at the plans again
+-- a flush while the arguments are evaluated, before the compiled call
 CREATE FUNCTION pd_flush(n int) RETURNS int LANGUAGE sql AS $$
 SELECT set_config('debug_discard_caches', '1', true)::int + n $$;
 SELECT pd_inc(pd_flush(1)), pd_inc(pd_flush(2));

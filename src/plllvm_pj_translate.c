@@ -27,6 +27,8 @@
 #include "postgres.h"
 
 #include "access/htup_details.h"
+#include "access/transam.h"
+#include "catalog/pg_cast.h"
 #include "catalog/pg_proc.h"
 #include "catalog/pg_type.h"
 #include "lib/stringinfo.h"
@@ -40,6 +42,7 @@
 #include "utils/lsyscache.h"
 #include "utils/memutils.h"
 #include "utils/plancache.h"
+#include "utils/syscache.h"
 
 #include "plllvm.h"
 #include "plllvm_expr.h"
@@ -76,6 +79,7 @@ static void param_emit(plllvm_expr_env *env, plllvm_ir *ir, const Param *p,
 					   plllvm_value *out);
 static PjCast *cast_get(Oid srctype, int32 srctypmod, Oid dsttype,
 						Expr **tree);
+static bool cast_pinned(Oid srctype, Oid dsttype);
 static bool funcs_walker(Node *node, List **funcs);
 static bool funcs_callback(Oid funcid, void *context);
 static const char *harvest_return(PLpgSQL_function *func, PjHarvest *h);
@@ -289,21 +293,15 @@ plllvm_pj_harvest(PLpgSQL_function *func, const PjScope *scope, PjHarvest *h)
 
 	reason = harvest_return(func, h);
 
-	/* a bare variable or constant has no function, so no list */
 	foreach_ptr(PjExpr, pe, h->exprs)
 	{
-		funcs = NIL;
 		if (pe->h1 == PJ_H1_READY)
 			funcs_walker((Node *) pe->tree, &funcs);
-		oldcxt = MemoryContextSwitchTo(h->cxt);
-		pe->funcids = list_copy(funcs);
-		MemoryContextSwitchTo(oldcxt);
 	}
-	funcs = NIL;
 	if (h->cast_tree != NULL)
 		funcs_walker((Node *) h->cast_tree, &funcs);
 	oldcxt = MemoryContextSwitchTo(h->cxt);
-	h->cast_funcids = list_copy(funcs);
+	h->funcids = list_copy(funcs);
 	MemoryContextSwitchTo(oldcxt);
 	return reason;
 }
@@ -394,7 +392,8 @@ harvest_return(PLpgSQL_function *func, PjHarvest *h)
 	if (func->fn_retisdomain)
 		return "cast";
 
-	if (!plllvm_expr_type_repr(h->srctype, &repr))
+	if (!plllvm_expr_type_repr(h->srctype, &repr) ||
+		!cast_pinned(h->srctype, func->fn_rettype))
 		return "cast";
 	/* for the tests: a value of another representation than the placeholder's */
 	if (plllvm_debug_inject == PLLLVM_INJECT_PJ_BAD_CAST_REPR)
@@ -513,6 +512,27 @@ param_emit(plllvm_expr_env *base, plllvm_ir *ir, const Param *p,
 	out->v = v;
 	out->isnull = isnull;
 	out->type = p->paramtype;
+}
+
+/*
+ * Is there a pg_cast row for the pair that cannot be created or dropped?  A
+ * cast made later than PL/pgSQL cached its own could differ from it, and
+ * that cache cannot be read.
+ */
+static bool
+cast_pinned(Oid srctype, Oid dsttype)
+{
+	HeapTuple	tup = SearchSysCache2(CASTSOURCETARGET,
+									  ObjectIdGetDatum(srctype),
+									  ObjectIdGetDatum(dsttype));
+	bool		pinned = false;
+
+	if (HeapTupleIsValid(tup))
+	{
+		pinned = ((Form_pg_cast) GETSTRUCT(tup))->oid < FirstUnpinnedObjectId;
+		ReleaseSysCache(tup);
+	}
+	return pinned;
 }
 
 /*

@@ -117,6 +117,25 @@ CONTEXT:  PL/pgSQL function pe_narrow(bigint) while casting return value to func
 SELECT pe_narrow(100000);  -- fail
 ERROR:  integer out of range
 CONTEXT:  PL/pgSQL function pe_narrow(bigint) while casting return value to function's return type
+-- a failed cast resets the plans, as PL/pgSQL rebuilds its cast: one call to plan again
+SELECT pe_narrow(3);
+ pe_narrow 
+-----------
+    300000
+(1 row)
+
+SELECT pe_narrow(4);
+ pe_narrow 
+-----------
+    400000
+(1 row)
+
+SELECT pe_narrow(5);
+ pe_narrow 
+-----------
+    500000
+(1 row)
+
 SELECT pj_expect('pe_narrow(bigint)', 'compiled') \gset
 -- errors that PL/pgSQL raises: the function is not compiled
 CREATE FUNCTION pe_i2(n int2) RETURNS int2 LANGUAGE :pj_lang AS $$

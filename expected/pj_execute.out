@@ -2,156 +2,540 @@
 -- pj_execute: the EXECUTE right on what compiled code calls
 --
 -- PL/pgSQL checks it when it builds the ExprState, the first time in a
--- transaction, and again after an error in that expression.  Not run under
--- debug_discard_caches, where every evaluation builds one.
+-- transaction, and again after an error in that expression.  Compiled code
+-- must never be more permissive; where it is stricter the sequence is in
+-- pj_execute_diff.  Not run under debug_discard_caches, where every
+-- evaluation builds an ExprState.
 --
 \getenv pj_lang PJ_LANG
 \if :{?pj_lang}
 \else
   \set pj_lang plpgsql
 \endif
-CREATE ROLE regress_pj_guard;
-CREATE FUNCTION pjx_inc(n int) RETURNS int LANGUAGE :pj_lang AS $$
-BEGIN RETURN n + 1; END $$;
-CREATE FUNCTION pjx_div(a int, b int) RETURNS int LANGUAGE :pj_lang AS $$
-BEGIN RETURN a / b; END $$;
-SELECT pjx_inc(1), pjx_inc(2), pjx_inc(3), pjx_div(4, 2), pjx_div(4, 2), pjx_div(4, 2);
- pjx_inc | pjx_inc | pjx_inc | pjx_div | pjx_div | pjx_div 
----------+---------+---------+---------+---------+---------
-       2 |       3 |       4 |       2 |       2 |       2
-(1 row)
-
-SELECT pj_expect('pjx_inc(int)', 'compiled') \gset
--- inside a transaction: once the ExprState exists, the revoke is not seen
-SELECT pjx_inc(1);
- pjx_inc 
----------
-       2
-(1 row)
-
-BEGIN;
-SET ROLE regress_pj_guard;
-SELECT pjx_inc(10);
- pjx_inc 
----------
-      11
-(1 row)
-
-RESET ROLE;
-REVOKE EXECUTE ON FUNCTION int4pl(int4, int4) FROM PUBLIC;
-SET ROLE regress_pj_guard;
-SELECT pjx_inc(11);
- pjx_inc 
----------
-      12
-(1 row)
-
-RESET ROLE;
-COMMIT;
-SET ROLE regress_pj_guard;
-SELECT pjx_inc(12);  -- fail
-ERROR:  permission denied for function int4pl
-CONTEXT:  PL/pgSQL function pjx_inc(integer) line 2 at RETURN
-RESET ROLE;
-GRANT EXECUTE ON FUNCTION int4pl(int4, int4) TO PUBLIC;
-BEGIN;
-REVOKE EXECUTE ON FUNCTION int4pl(int4, int4) FROM PUBLIC;
-SET ROLE regress_pj_guard;
-SELECT pjx_inc(13);  -- fail
-ERROR:  permission denied for function int4pl
-CONTEXT:  PL/pgSQL function pjx_inc(integer) line 2 at RETURN
-ROLLBACK;
-SELECT pjx_inc(14);
- pjx_inc 
----------
-      15
-(1 row)
-
-SET ROLE regress_pj_guard;
-SELECT pjx_inc(15);
- pjx_inc 
----------
-      16
-(1 row)
-
-RESET ROLE;
-SELECT pj_expect('pjx_inc(int)', 'compiled') \gset
--- an error in the expression: PL/pgSQL builds the ExprState again
-REVOKE EXECUTE ON FUNCTION int4div(int4, int4) FROM PUBLIC;
-BEGIN;
-SELECT pjx_div(4, 2);
- pjx_div 
----------
-       2
-(1 row)
-
-SAVEPOINT s;
-SELECT pjx_div(1, 0);  -- fail
-ERROR:  division by zero
-CONTEXT:  PL/pgSQL function pjx_div(integer,integer) line 2 at RETURN
-ROLLBACK TO s;
-SET ROLE regress_pj_guard;
--- PL/pgSQL adds a context line for the expression it evaluated in an
--- ExprState that failed, until the transaction ends
 \set VERBOSITY terse
-SELECT pjx_div(6, 2);  -- fail
-ERROR:  permission denied for function int4div
-\set VERBOSITY default
-ROLLBACK;
-GRANT EXECUTE ON FUNCTION int4div(int4, int4) TO PUBLIC;
-SELECT pj_expect('pjx_div(int,int)', 'interpreted:execute') \gset
--- a cast the first call did not reach, a role without it, a call that does
-CREATE FUNCTION pjx_a(n int) RETURNS bigint LANGUAGE :pj_lang AS $$
-BEGIN RETURN CASE WHEN n > 0 THEN n END; END $$;
-SELECT pjx_a(1), pjx_a(2), pjx_a(3);
- pjx_a | pjx_a | pjx_a 
--------+-------+-------
-     1 |     2 |     3
+CREATE ROLE regress_pj_r1;
+CREATE ROLE regress_pj_r2;
+CREATE ROLE regress_pj_def;
+CREATE ROLE regress_pj_grp;
+-- a cast the first call did not reach, then a role without it
+CREATE FUNCTION xa(n int) RETURNS bigint LANGUAGE :pj_lang AS 'BEGIN RETURN CASE WHEN n > 0 THEN n END; END';
+SELECT xa(1), xa(2), xa(3);
+ xa | xa | xa 
+----+----+----
+  1 |  2 |  3
 (1 row)
 
-SELECT pj_expect('pjx_a(int)', 'compiled') \gset
 REVOKE EXECUTE ON FUNCTION int8(int4) FROM PUBLIC;
-BEGIN;
-SELECT pjx_a(-1) IS NULL;
+BEGIN; SELECT xa(-1) IS NULL; SET ROLE regress_pj_r1; SELECT xa(1) AS xa_expect_denied; ROLLBACK;
  ?column? 
 ----------
  t
 (1 row)
 
-SET ROLE regress_pj_guard;
-SELECT pjx_a(1);  -- fail
 ERROR:  permission denied for function int8
-CONTEXT:  PL/pgSQL function pjx_a(integer) while casting return value to function's return type
-ROLLBACK;
 GRANT EXECUTE ON FUNCTION int8(int4) TO PUBLIC;
--- an expression aborted by the interpreter: it is checked at every evaluation
-CREATE FUNCTION pjx_b(a int, b int) RETURNS int LANGUAGE :pj_lang AS $$
-BEGIN RETURN a / COALESCE(b, 0); END $$;
-SELECT pjx_b(4, 2), pjx_b(4, 2), pjx_b(4, 2);
- pjx_b | pjx_b | pjx_b 
--------+-------+-------
-     2 |     2 |     2
+-- an expression the interpreter aborted, then a role without the function
+CREATE FUNCTION xb(a int, b int) RETURNS int LANGUAGE :pj_lang AS 'BEGIN RETURN a / COALESCE(b, 0); END';
+SELECT xb(4,2), xb(4,2), xb(4,2);
+ xb | xb | xb 
+----+----+----
+  2 |  2 |  2
 (1 row)
 
-SELECT pj_expect('pjx_b(int,int)', 'compiled') \gset
-REVOKE EXECUTE ON FUNCTION int4div(int4, int4) FROM PUBLIC;
+REVOKE EXECUTE ON FUNCTION int4div(int4,int4) FROM PUBLIC;
+BEGIN; SELECT xb(4,2); SAVEPOINT s; SELECT xb(4,NULL); ROLLBACK TO s; SET ROLE regress_pj_r1; SELECT xb(6,2) AS xb_expect_denied; ROLLBACK;
+ xb 
+----
+  2
+(1 row)
+
+ERROR:  division by zero
+ERROR:  permission denied for function int4div
+-- the interpreter built the state as another user; an abort; a role without the function
+CREATE FUNCTION n1(a int, b int) RETURNS int LANGUAGE :pj_lang AS 'BEGIN RETURN a / COALESCE(b, 0); END';
+GRANT EXECUTE ON FUNCTION int4div(int4,int4) TO PUBLIC;
+SELECT n1(4,2), n1(4,2), n1(4,2);
+ n1 | n1 | n1 
+----+----+----
+  2 |  2 |  2
+(1 row)
+
+REVOKE EXECUTE ON FUNCTION int4div(int4,int4) FROM PUBLIC;
 BEGIN;
-SELECT pjx_b(4, 2);
- pjx_b 
+SELECT n1(NULL,NULL) IS NULL AS built_by_su;
+ built_by_su 
+-------------
+ t
+(1 row)
+
+SET ROLE regress_pj_r1;
+SELECT n1(6,2) AS n1_sticky_ok;
+ n1_sticky_ok 
+--------------
+            3
+(1 row)
+
+SAVEPOINT s; SELECT n1(4,NULL) AS n1_22012; ROLLBACK TO s;
+ERROR:  division by zero
+SELECT n1(6,2) AS n1_stock_denied;
+ERROR:  permission denied for function int4div
+ROLLBACK;
+-- the same, with the privilege lost in the transaction
+GRANT EXECUTE ON FUNCTION int4div(int4,int4) TO PUBLIC;
+BEGIN;
+SET ROLE regress_pj_r1;
+SELECT n1(NULL,NULL) IS NULL AS built_by_rr;
+ built_by_rr 
+-------------
+ t
+(1 row)
+
+RESET ROLE;
+REVOKE EXECUTE ON FUNCTION int4div(int4,int4) FROM PUBLIC;
+SET ROLE regress_pj_r1;
+SELECT n1(6,2) AS n1d_sticky_ok;
+ n1d_sticky_ok 
+---------------
+             3
+(1 row)
+
+SAVEPOINT s; SELECT n1(4,NULL) AS n1d_22012; ROLLBACK TO s;
+ERROR:  division by zero
+SELECT n1(6,2) AS n1d_stock_denied;
+ERROR:  permission denied for function int4div
+ROLLBACK;
+GRANT EXECUTE ON FUNCTION int4div(int4,int4) TO PUBLIC;
+-- a cast that failed in another function with its cast key
+CREATE FUNCTION n2f(n bigint) RETURNS int LANGUAGE :pj_lang AS 'BEGIN RETURN n; END';
+CREATE FUNCTION n2g(n bigint) RETURNS int LANGUAGE plpgsql AS 'BEGIN RETURN n; END';
+SELECT n2f(1), n2f(2), n2f(3);
+ n2f | n2f | n2f 
+-----+-----+-----
+   1 |   2 |   3
+(1 row)
+
+REVOKE EXECUTE ON FUNCTION int4(int8) FROM PUBLIC;
+BEGIN;
+SELECT n2f(1) AS su_ok;
+ su_ok 
+-------
+     1
+(1 row)
+
+SAVEPOINT s; SELECT n2g(99999999999) AS n2g_22003; ROLLBACK TO s;
+ERROR:  integer out of range
+SET ROLE regress_pj_r1;
+SELECT n2f(2) AS n2_stock_denied;
+ERROR:  permission denied for function int4
+ROLLBACK;
+GRANT EXECUTE ON FUNCTION int4(int8) TO PUBLIC;
+-- a cast that failed in an interpreted call of the function itself
+CREATE FUNCTION n2b(n bigint) RETURNS int LANGUAGE :pj_lang AS 'BEGIN RETURN COALESCE(n, 99999999999); END';
+SELECT n2b(1), n2b(2), n2b(3);
+ n2b | n2b | n2b 
+-----+-----+-----
+   1 |   2 |   3
+(1 row)
+
+REVOKE EXECUTE ON FUNCTION int4(int8) FROM PUBLIC;
+BEGIN;
+SELECT n2b(1) AS su_ok;
+ su_ok 
+-------
+     1
+(1 row)
+
+SAVEPOINT s; SELECT n2b(NULL) AS n2b_22003; ROLLBACK TO s;
+ERROR:  integer out of range
+SET ROLE regress_pj_r1;
+SELECT n2b(2) AS n2b_stock_denied;
+ERROR:  permission denied for function int4
+ROLLBACK;
+GRANT EXECUTE ON FUNCTION int4(int8) TO PUBLIC;
+REVOKE EXECUTE ON FUNCTION int4div(int4,int4) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION int4div(int4,int4) TO PUBLIC;
+-- a membership lost in the transaction, the cast not reached
+CREATE FUNCTION m1(n int) RETURNS bigint LANGUAGE :pj_lang AS 'BEGIN RETURN CASE WHEN n > 0 THEN n END; END';
+SELECT m1(1), m1(2), m1(3);
+ m1 | m1 | m1 
+----+----+----
+  1 |  2 |  3
+(1 row)
+
+REVOKE EXECUTE ON FUNCTION int8(int4) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION int8(int4) TO regress_pj_grp;
+GRANT regress_pj_grp TO regress_pj_r1;
+BEGIN; SET ROLE regress_pj_r1; SELECT m1(-1) IS NULL AS m1a; RESET ROLE; REVOKE regress_pj_grp FROM regress_pj_r1; SET ROLE regress_pj_r1; SELECT m1(1) AS m1_denied; ROLLBACK;
+ m1a 
+-----
+ t
+(1 row)
+
+ERROR:  permission denied for function int8
+-- a privilege revoked from the group in the transaction, the cast not reached
+BEGIN; SET ROLE regress_pj_r1; SELECT m1(-1) IS NULL AS m2a; RESET ROLE; REVOKE EXECUTE ON FUNCTION int8(int4) FROM regress_pj_grp; SET ROLE regress_pj_r1; SELECT m1(1) AS m2_denied; ROLLBACK;
+ m2a 
+-----
+ t
+(1 row)
+
+ERROR:  permission denied for function int8
+-- a savepoint that undoes the REVOKE, and the role
+BEGIN; SAVEPOINT a; REVOKE EXECUTE ON FUNCTION int8(int4) FROM regress_pj_grp; SET ROLE regress_pj_r1; SAVEPOINT b; SELECT m1(1) AS m4_denied; ROLLBACK TO a; SET ROLE regress_pj_r1; SELECT m1(2) AS m4_ok; ROLLBACK;
+ERROR:  permission denied for function int8
+ m4_ok 
 -------
      2
 (1 row)
 
+REVOKE regress_pj_grp FROM regress_pj_r1; GRANT EXECUTE ON FUNCTION int8(int4) TO PUBLIC; REVOKE EXECUTE ON FUNCTION int8(int4) FROM regress_pj_grp;
+-- SECURITY DEFINER whose owner lost the right
+CREATE FUNCTION d1(a int, b int) RETURNS int LANGUAGE :pj_lang SECURITY DEFINER AS 'BEGIN RETURN a * b; END';
+SELECT d1(1,2), d1(1,2), d1(1,2);
+ d1 | d1 | d1 
+----+----+----
+  2 |  2 |  2
+(1 row)
+
+REVOKE EXECUTE ON FUNCTION int4mul(int4,int4) FROM PUBLIC;
+SET ROLE regress_pj_r1; SELECT d1(3,4) AS d1_su_definer; RESET ROLE;
+ d1_su_definer 
+---------------
+            12
+(1 row)
+
+ALTER FUNCTION d1(int,int) OWNER TO regress_pj_def;
+SELECT d1(3,4) AS d1_denied;
+ERROR:  permission denied for function int4mul
+SELECT d1(3,4) AS d1_denied2;
+ERROR:  permission denied for function int4mul
+BEGIN; SET ROLE regress_pj_r1; SELECT d1(3,4) AS d1_denied3; ROLLBACK;
+ERROR:  permission denied for function int4mul
+GRANT EXECUTE ON FUNCTION int4mul(int4,int4) TO regress_pj_def;
+SELECT d1(3,4), d1(3,4), d1(3,4);
+ d1 | d1 | d1 
+----+----+----
+ 12 | 12 | 12
+(1 row)
+
+GRANT EXECUTE ON FUNCTION int4mul(int4,int4) TO PUBLIC;
+REVOKE EXECUTE ON FUNCTION int4mul(int4,int4) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION int4mul(int4,int4) TO PUBLIC;
+REVOKE EXECUTE ON FUNCTION int4mod(int4,int4) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION int4mod(int4,int4) TO PUBLIC;
+-- DISCARD PLANS inside the transaction
+CREATE FUNCTION dp(a int) RETURNS bigint LANGUAGE :pj_lang AS 'BEGIN RETURN a * 2; END';
+SELECT dp(1), dp(2), dp(3);
+ dp | dp | dp 
+----+----+----
+  2 |  4 |  6
+(1 row)
+
+GRANT EXECUTE ON FUNCTION int8(int4) TO PUBLIC;
+REVOKE EXECUTE ON FUNCTION int4mul(int4,int4) FROM PUBLIC;
+BEGIN; SELECT dp(1) AS dp_su; DISCARD PLANS; SET ROLE regress_pj_r1; SELECT dp(2) AS dp_denied; ROLLBACK;
+ dp_su 
+-------
+     2
+(1 row)
+
+ERROR:  permission denied for function int4mul
+BEGIN; SELECT dp(1) AS dp_su; DISCARD PLANS; SELECT dp(2) AS dp_su2; SET ROLE regress_pj_r1; SELECT dp(3) AS dp_sticky; ROLLBACK;
+ dp_su 
+-------
+     2
+(1 row)
+
+ dp_su2 
+--------
+      4
+(1 row)
+
+ dp_sticky 
+-----------
+         6
+(1 row)
+
+GRANT EXECUTE ON FUNCTION int4mul(int4,int4) TO PUBLIC;
+-- a caller with an exception block around a failing call
+CREATE FUNCTION ne(a int, b int) RETURNS int LANGUAGE :pj_lang AS 'BEGIN RETURN a / COALESCE(b,0); END';
+SELECT ne(4,2), ne(4,2), ne(4,2);
+ ne | ne | ne 
+----+----+----
+  2 |  2 |  2
+(1 row)
+
+CREATE FUNCTION nec(a int, b int) RETURNS text LANGUAGE plpgsql AS $$ BEGIN RETURN ne(a,b)::text; EXCEPTION WHEN others THEN RETURN SQLSTATE; END $$;
+REVOKE EXECUTE ON FUNCTION int4div(int4,int4) FROM PUBLIC;
+SELECT nec(4,2) AS nec_su_none;
+ nec_su_none 
+-------------
+ 2
+(1 row)
+
+BEGIN; SELECT ne(NULL,NULL) IS NULL AS built; SET ROLE regress_pj_r1; SELECT nec(6,2) AS nec_val; SELECT nec(6,NULL) AS nec_22012; SELECT nec(6,2) AS nec_stock_42501; ROLLBACK;
+ built 
+-------
+ t
+(1 row)
+
+ nec_val 
+---------
+ 3
+(1 row)
+
+ nec_22012 
+-----------
+ 22012
+(1 row)
+
+ nec_stock_42501 
+-----------------
+ 42501
+(1 row)
+
+GRANT EXECUTE ON FUNCTION int4div(int4,int4) TO PUBLIC;
+-- the first call after translation, then a role without the function
+CREATE FUNCTION fc(a int) RETURNS bigint LANGUAGE :pj_lang AS 'BEGIN RETURN a + 7; END';
+REVOKE EXECUTE ON FUNCTION int4pl(int4,int4) FROM PUBLIC;
+REVOKE EXECUTE ON FUNCTION int8(int4) FROM PUBLIC;
+BEGIN; SELECT fc(1) AS fc1; SET ROLE regress_pj_r1; SELECT fc(2) AS fc2_sticky; SELECT fc(3) AS fc3_sticky; ROLLBACK;
+ fc1 
+-----
+   8
+(1 row)
+
+ fc2_sticky 
+------------
+          9
+(1 row)
+
+ fc3_sticky 
+------------
+         10
+(1 row)
+
+GRANT EXECUTE ON FUNCTION int4pl(int4,int4) TO PUBLIC;
+GRANT EXECUTE ON FUNCTION int8(int4) TO PUBLIC;
+-- a cast that failed in a compiled call of another function with its cast key
+CREATE FUNCTION f1(n bigint) RETURNS int LANGUAGE :pj_lang AS 'BEGIN RETURN n; END';
+CREATE FUNCTION f2(n bigint) RETURNS int LANGUAGE :pj_lang AS 'BEGIN RETURN n; END';
+SELECT f1(1), f1(2), f1(3), f2(1), f2(2), f2(3);
+ f1 | f1 | f1 | f2 | f2 | f2 
+----+----+----+----+----+----
+  1 |  2 |  3 |  1 |  2 |  3
+(1 row)
+
+REVOKE EXECUTE ON FUNCTION int4(int8) FROM PUBLIC;
+BEGIN; SELECT f1(1) AS su; SELECT f2(1) AS su2; SAVEPOINT s; SELECT f2(99999999999) AS f2_22003; ROLLBACK TO s; SET ROLE regress_pj_r1; SELECT f1(2) AS n2c_stock_denied; ROLLBACK;
+ su 
+----
+  1
+(1 row)
+
+ su2 
+-----
+   1
+(1 row)
+
+ERROR:  integer out of range
+ERROR:  permission denied for function int4
+-- a SECURITY DEFINER wrapper that builds, a caller that catches
+GRANT EXECUTE ON FUNCTION int4(int8) TO PUBLIC;
+-- a SECURITY DEFINER wrapper that builds, a caller that catches
+CREATE FUNCTION g(a int, b int) RETURNS int LANGUAGE :pj_lang AS 'BEGIN RETURN a / COALESCE(b, 0); END';
+SELECT g(4,2), g(4,2), g(4,2);
+ g | g | g 
+---+---+---
+ 2 | 2 | 2
+(1 row)
+
+CREATE FUNCTION g_def() RETURNS bool LANGUAGE plpgsql SECURITY DEFINER AS 'BEGIN RETURN g(NULL, NULL) IS NULL; END';
+CREATE FUNCTION g_c(a int, b int) RETURNS text LANGUAGE plpgsql AS $$ BEGIN RETURN g(a,b)::text; EXCEPTION WHEN others THEN RETURN SQLSTATE; END $$;
+REVOKE EXECUTE ON FUNCTION int4div(int4,int4) FROM PUBLIC;
+SET ROLE regress_pj_r1;
+SELECT g_c(6,2) AS rr_alone_denied;
+ rr_alone_denied 
+-----------------
+ 42501
+(1 row)
+
+BEGIN; SELECT g_def() AS definer_built; SELECT g_c(6,2) AS v1; SELECT g_c(6,NULL) AS e1; SELECT g_c(6,2) AS n1e_stock_42501; ROLLBACK;
+ definer_built 
+---------------
+ t
+(1 row)
+
+ v1 
+----
+ 3
+(1 row)
+
+  e1   
+-------
+ 22012
+(1 row)
+
+ n1e_stock_42501 
+-----------------
+ 42501
+(1 row)
+
+RESET ROLE;
+GRANT EXECUTE ON FUNCTION int4div(int4,int4) TO PUBLIC;
+REVOKE EXECUTE ON FUNCTION int4(int8) FROM PUBLIC;
+-- a cast that failed in a compiled call of another function
+BEGIN; SELECT f1(1) AS c1; SAVEPOINT s; SELECT f2(99999999999) AS c2; ROLLBACK TO s; SET ROLE regress_pj_r1; SELECT f1(2) AS c3_stock_denied; ROLLBACK;
+ c1 
+----
+  1
+(1 row)
+
+ERROR:  integer out of range
+ERROR:  permission denied for function int4
+-- a cast that failed in a compiled call of the function itself
+BEGIN; SELECT f1(1) AS d1; SAVEPOINT s; SELECT f1(99999999999) AS d2; ROLLBACK TO s; SET ROLE regress_pj_r1; SELECT f1(2) AS d3_stock_denied; ROLLBACK;
+ d1 
+----
+  1
+(1 row)
+
+ERROR:  integer out of range
+ERROR:  permission denied for function int4
+-- a plain plpgsql function with the same cast key failed
+CREATE FUNCTION g(n bigint) RETURNS int LANGUAGE plpgsql AS 'BEGIN RETURN n; END';
+BEGIN; SELECT f1(1) AS e1; SAVEPOINT s; SELECT g(99999999999) AS e2; ROLLBACK TO s; SET ROLE regress_pj_r1; SELECT f1(2) AS e3_stock_denied; ROLLBACK;
+ e1 
+----
+  1
+(1 row)
+
+ERROR:  integer out of range
+ERROR:  permission denied for function int4
+-- a failed cast, a rolled-back savepoint, the other function
+BEGIN; SELECT f1(1) AS f1; SAVEPOINT s; SELECT f2(99999999999) AS f2; ROLLBACK TO s; SET ROLE regress_pj_r1; SELECT f1(2) AS f3_stock_denied; ROLLBACK;
+ f1 
+----
+  1
+(1 row)
+
+ERROR:  integer out of range
+ERROR:  permission denied for function int4
+-- the state of the failed expression and of the failed cast, kept by compiled code
+CREATE FUNCTION pc_div(a int, b int) RETURNS int LANGUAGE :pj_lang AS $$
+BEGIN RETURN a / COALESCE(b, 0); END $$;
+CREATE FUNCTION pf_div(a int, b int) RETURNS int LANGUAGE :pj_lang AS $$
+BEGIN RETURN COALESCE(a, 1) / COALESCE(b, 1); END $$;
+CREATE FUNCTION pe_cast(a bigint, b bigint) RETURNS int LANGUAGE :pj_lang AS $$
+BEGIN RETURN COALESCE(a, b); END $$;
+CREATE FUNCTION pe_plain(x bigint) RETURNS int LANGUAGE plpgsql AS $$
+BEGIN RETURN x; END $$;
+GRANT EXECUTE ON FUNCTION int4div(int4, int4) TO PUBLIC;
+SELECT pc_div(4, 2), pc_div(4, 2), pc_div(4, 2), pf_div(4, 2), pf_div(4, 2), pf_div(4, 2);
+ pc_div | pc_div | pc_div | pf_div | pf_div | pf_div 
+--------+--------+--------+--------+--------+--------
+      2 |      2 |      2 |      2 |      2 |      2
+(1 row)
+
+SELECT pe_cast(1, 1), pe_cast(2, 2), pe_cast(3, 3);
+ pe_cast | pe_cast | pe_cast 
+---------+---------+---------
+       1 |       2 |       3
+(1 row)
+
+SELECT pj_expect('pc_div(int,int)', 'compiled') \gset
+SELECT pj_expect('pf_div(int,int)', 'compiled') \gset
+SELECT pj_expect('pe_cast(bigint,bigint)', 'compiled') \gset
+REVOKE EXECUTE ON FUNCTION int4div(int4, int4) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION int4div(int4, int4) TO regress_pj_r2;
+-- interpreted build, a failure in compiled code, a role without the function
+BEGIN;
+SELECT pc_div(NULL, NULL) IS NULL;
+ ?column? 
+----------
+ t
+(1 row)
+
 SAVEPOINT s;
-SELECT pjx_b(4, NULL);  -- fail
+SELECT pc_div(1, 0);  -- fail
 ERROR:  division by zero
-CONTEXT:  PL/pgSQL function pjx_b(integer,integer) line 2 at RETURN
 ROLLBACK TO s;
-SET ROLE regress_pj_guard;
-\set VERBOSITY terse
-SELECT pjx_b(6, 2);  -- fail
+SET ROLE regress_pj_r1;
+SELECT pc_div(6, 2);  -- fail
 ERROR:  permission denied for function int4div
-\set VERBOSITY default
+ROLLBACK;
+-- the same, with a role that may execute it in between
+BEGIN;
+SAVEPOINT s;
+SELECT pc_div(1, 0);  -- fail
+ERROR:  division by zero
+ROLLBACK TO s;
+SET ROLE regress_pj_r2;
+SELECT pc_div(NULL, NULL) IS NULL;
+ ?column? 
+----------
+ t
+(1 row)
+
+SET ROLE regress_pj_r1;
+SELECT pc_div(6, 2);  -- fail
+ERROR:  permission denied for function int4div
+ROLLBACK;
+-- both operands defaulted
+BEGIN;
+SELECT pf_div(NULL, NULL);
+ pf_div 
+--------
+      1
+(1 row)
+
+SAVEPOINT s;
+SELECT pf_div(1, 0);  -- fail
+ERROR:  division by zero
+ROLLBACK TO s;
+SET ROLE regress_pj_r1;
+SELECT pf_div(NULL, 2);  -- fail
+ERROR:  permission denied for function int4div
 ROLLBACK;
 GRANT EXECUTE ON FUNCTION int4div(int4, int4) TO PUBLIC;
-DROP ROLE regress_pj_guard;
+-- a cast that failed in compiled code, and a plain function with its cast key
+REVOKE EXECUTE ON FUNCTION int4(int8) FROM PUBLIC;
+BEGIN;
+SELECT pe_plain(1);
+ pe_plain 
+----------
+        1
+(1 row)
+
+SELECT pe_cast(NULL, 1);
+ pe_cast 
+---------
+       1
+(1 row)
+
+SAVEPOINT s;
+SELECT pe_cast(99999999999, 0);  -- fail
+ERROR:  integer out of range
+ROLLBACK TO s;
+SET ROLE regress_pj_r1;
+SELECT pe_cast(5, 0);  -- fail
+ERROR:  permission denied for function int4
+ROLLBACK;
+BEGIN;
+SELECT pe_cast(NULL, 1);
+ pe_cast 
+---------
+       1
+(1 row)
+
+SAVEPOINT s;
+SELECT pe_cast(99999999999, 0);  -- fail
+ERROR:  integer out of range
+ROLLBACK TO s;
+SET ROLE regress_pj_r1;
+SELECT pe_plain(2);  -- fail
+ERROR:  permission denied for function int4
+ROLLBACK;
+GRANT EXECUTE ON FUNCTION int4(int8) TO PUBLIC;
+DROP OWNED BY regress_pj_r1, regress_pj_r2, regress_pj_def, regress_pj_grp;
+DROP ROLE regress_pj_r1, regress_pj_r2, regress_pj_def, regress_pj_grp;

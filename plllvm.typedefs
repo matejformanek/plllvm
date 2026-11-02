@@ -77,10 +77,12 @@ FmgrInfo
 ForEachState
 ForkNumber
 FormData_pg_attribute
+FormData_pg_cast
 FormData_pg_class
 FormData_pg_index
 FormData_pg_proc
 Form_pg_attribute
+Form_pg_cast
 Form_pg_class
 Form_pg_index
 Form_pg_proc

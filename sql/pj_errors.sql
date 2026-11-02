@@ -58,6 +58,10 @@ SELECT pe_narrow(1);
 SELECT pe_narrow(2);
 SELECT pe_narrow(100000);  -- fail
 SELECT pe_narrow(100000);  -- fail
+-- a failed cast resets the plans, as PL/pgSQL rebuilds its cast: one call to plan again
+SELECT pe_narrow(3);
+SELECT pe_narrow(4);
+SELECT pe_narrow(5);
 SELECT pj_expect('pe_narrow(bigint)', 'compiled') \gset
 
 -- errors that PL/pgSQL raises: the function is not compiled

@@ -25,3 +25,24 @@ DROP CAST (bool AS float8);
 SELECT pjg_bf(true);  -- fail
 SELECT pjg_bf(true);  -- fail
 DROP FUNCTION pjg_castf(bool);
+
+-- a cast made between calls, which PL/pgSQL keeps out of its cache: an
+-- I/O conversion first (stock: $5.00), the cast made later is not used
+CREATE FUNCTION hb2(x float8) RETURNS money LANGUAGE :pj_lang AS $$
+BEGIN RETURN x; END $$;
+SELECT hb2(5) AS first_io;
+CREATE CAST (float8 AS money) WITHOUT FUNCTION AS ASSIGNMENT;
+SELECT hb2(5) AS second;
+SELECT hb2(5) AS third;
+SELECT pj_expect('hb2(float8)', 'declined:cast') \gset
+DROP CAST (float8 AS money);
+SELECT hb2(5) AS after_drop;
+
+CREATE FUNCTION hb1(x bool) RETURNS "char" LANGUAGE :pj_lang AS $$
+BEGIN RETURN x; END $$;
+SELECT hb1(true) AS hb1_io;
+CREATE CAST (bool AS "char") WITHOUT FUNCTION AS ASSIGNMENT;
+SELECT hb1(true)::int AS hb1_2;
+SELECT hb1(true)::int AS hb1_3;
+SELECT pj_expect('hb1(bool)', 'declined:cast') \gset
+DROP CAST (bool AS "char");

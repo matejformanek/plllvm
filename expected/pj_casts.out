@@ -38,3 +38,57 @@ SELECT pjg_bf(true);  -- fail
 ERROR:  invalid input syntax for type double precision: "t"
 CONTEXT:  PL/pgSQL function pjg_bf(boolean) while casting return value to function's return type
 DROP FUNCTION pjg_castf(bool);
+-- a cast made between calls, which PL/pgSQL keeps out of its cache: an
+-- I/O conversion first (stock: $5.00), the cast made later is not used
+CREATE FUNCTION hb2(x float8) RETURNS money LANGUAGE :pj_lang AS $$
+BEGIN RETURN x; END $$;
+SELECT hb2(5) AS first_io;
+ first_io 
+----------
+    $5.00
+(1 row)
+
+CREATE CAST (float8 AS money) WITHOUT FUNCTION AS ASSIGNMENT;
+SELECT hb2(5) AS second;
+ second 
+--------
+  $5.00
+(1 row)
+
+SELECT hb2(5) AS third;
+ third 
+-------
+ $5.00
+(1 row)
+
+SELECT pj_expect('hb2(float8)', 'declined:cast') \gset
+DROP CAST (float8 AS money);
+SELECT hb2(5) AS after_drop;
+ after_drop 
+------------
+      $5.00
+(1 row)
+
+CREATE FUNCTION hb1(x bool) RETURNS "char" LANGUAGE :pj_lang AS $$
+BEGIN RETURN x; END $$;
+SELECT hb1(true) AS hb1_io;
+ hb1_io 
+--------
+ t
+(1 row)
+
+CREATE CAST (bool AS "char") WITHOUT FUNCTION AS ASSIGNMENT;
+SELECT hb1(true)::int AS hb1_2;
+ hb1_2 
+-------
+   116
+(1 row)
+
+SELECT hb1(true)::int AS hb1_3;
+ hb1_3 
+-------
+   116
+(1 row)
+
+SELECT pj_expect('hb1(bool)', 'declined:cast') \gset
+DROP CAST (bool AS "char");
