@@ -40,6 +40,19 @@ CREATE OR REPLACE FUNCTION pd_f2(n int) RETURNS int LANGUAGE sql AS 'SELECT $1 +
 SELECT pd_h06(1), pd_h06(2), pd_h06(3);
 SET debug_discard_caches = 0;
 
+-- a cast created between calls is seen at once under flushes
+CREATE FUNCTION pd_bf(b bool) RETURNS float8 LANGUAGE plpgsql_jit AS $$
+BEGIN RETURN b; END $$;
+SET debug_discard_caches = 1;
+SELECT pd_bf(true);  -- fail
+SELECT pd_bf(true);  -- fail
+CREATE FUNCTION pd_castf(bool) RETURNS float8 LANGUAGE sql AS 'SELECT 42.5::float8';
+CREATE CAST (bool AS float8) WITH FUNCTION pd_castf(bool) AS ASSIGNMENT;
+SELECT pd_bf(true), pd_bf(false);
+DROP CAST (bool AS float8);
+SELECT pd_bf(true);  -- fail
+SET debug_discard_caches = 0;
+
 -- a flush inside the call: compiled code does not look at the plans again
 CREATE FUNCTION pd_flush(n int) RETURNS int LANGUAGE sql AS $$
 SELECT set_config('debug_discard_caches', '1', true)::int + n $$;

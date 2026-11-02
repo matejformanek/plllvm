@@ -1,8 +1,6 @@
 --
--- pj_errors: errors raised by compiled code, and their CONTEXT
---
--- A function is called twice before the call that is compiled.  An error
--- call counts as compiled: pj_expect reads the path the call took.
+-- pj_errors: errors raised by compiled code, and their CONTEXT; an error
+-- call counts as compiled
 --
 \getenv pj_lang PJ_LANG
 \if :{?pj_lang}

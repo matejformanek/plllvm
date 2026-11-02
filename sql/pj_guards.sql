@@ -216,22 +216,5 @@ RESET search_path;
 SELECT pjg_h07(10);  -- fail
 DROP SCHEMA pjg_s1, pjg_s2 CASCADE;
 
--- a cast created or dropped between calls: the function is not compiled,
--- since the cast it first had is an I/O conversion, and PL/pgSQL sees the new
-CREATE FUNCTION pjg_bf(b bool) RETURNS float8 LANGUAGE :pj_lang AS $$
-BEGIN RETURN b; END $$;
-SELECT pjg_bf(true);  -- fail
-SELECT pjg_bf(true);  -- fail
-SELECT pjg_bf(true);  -- fail
-SELECT pj_expect('pjg_bf(bool)', 'declined:cast') \gset
-CREATE FUNCTION pjg_castf(bool) RETURNS float8 LANGUAGE sql AS 'SELECT 42.5::float8';
-CREATE CAST (bool AS float8) WITH FUNCTION pjg_castf(bool) AS ASSIGNMENT;
-SELECT pjg_bf(true), pjg_bf(false);
-SELECT pjg_bf(true), pjg_bf(false);
-DROP CAST (bool AS float8);
-SELECT pjg_bf(true);  -- fail
-SELECT pjg_bf(true);  -- fail
-DROP FUNCTION pjg_castf(bool);
-
 DROP SCHEMA pjg_ta, pjg_tb CASCADE;
 DROP ROLE regress_pj_guard;

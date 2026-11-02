@@ -139,7 +139,9 @@ _PG_init(void)
 
 	DefineCustomIntVariable("plllvm.max_resident_compiles",
 							gettext_noop("Sets the maximum number of compiles kept in a session."),
-							gettext_noop("The limit is per kind: PL/LLVM functions and plpgsql_jit functions each get this many. Replaced code is freed when its function is next called with the same input collation; code of dropped functions stays until the session ends."),
+							gettext_noop("The limit is per kind: PL/LLVM functions and plpgsql_jit functions each get this many. "
+										 "Replaced code is freed when its function is next called with the same input collation; "
+										 "code of dropped functions stays until the session ends."),
 							&plllvm_max_resident_compiles,
 							2000, 1, 1000000,
 							PGC_SUSET, 0,

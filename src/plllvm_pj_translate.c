@@ -13,24 +13,15 @@
  *
  * Notes:
  *
- * 1) The function is read after PL/pgSQL has run it once: its expressions
- *    are then planned, and expr_simple_expr is the tree the interpreter
- *    evaluates.  We copy that tree, never point into the plan.  An
- *    expression that is not planned yet (a branch not run) compiles to a
- *    deopt, which re-runs the call in PL/pgSQL.
+ * 1) The trees are those PL/pgSQL left in expr_simple_expr after its first
+ *    run of the function.  We copy them and never point into the plan,
+ *    which the next invalidation frees.
  *
- * 2) A function is a block of blocks that ends in the first RETURN reached;
- *    the statements after it are dead and are not looked at.  Variables are
- *    allocas of a Datum and a null flag, one pair per datum of the function.
+ * 2) The value of a RETURN converts to the result type as exec_cast_value()
+ *    does, by a tree over a CaseTestExpr bound to the value.  It is the tree
+ *    PL/pgSQL would build, so that casts and errors are the same.
  *
- * 3) The value of a RETURN converts to the result type as exec_cast_value()
- *    does: not at all when the types are equal, else by a separate tree
- *    over a CaseTestExpr bound to the value (K1).  The tree is the one
- *    PL/pgSQL would build and is cached per (source, target) type (K3).
- *    When it is not one Stage 1 compiles, the function is declined.
- *
- * 4) The position table is what plpgsql_exec_error_callback() reads from the
- *    estate; the code stores an index before each step that can raise.
+ * The rest is in docs/architecture.md.
  *
  */
 #include "postgres.h"
@@ -79,7 +70,8 @@ static HTAB *casts = NULL;
 static const char *walk_stmts(List *stmts, PjScope *scope, bool *returned);
 static bool signature_polymorphic(PLpgSQL_function *func);
 static void env_init(PjEnv *env, PLpgSQL_function *func);
-static bool param_check(plllvm_expr_env *env, const Param *p, StringInfo facts);
+static bool param_check(plllvm_expr_env *env, const Param *p,
+						StringInfo facts);
 static void param_emit(plllvm_expr_env *env, plllvm_ir *ir, const Param *p,
 					   plllvm_value *out);
 static PjCast *cast_get(Oid srctype, int32 srctypmod, Oid dsttype,
@@ -143,9 +135,6 @@ plllvm_pj_scope(PLpgSQL_function *func, PjScope *scope)
 	scope->reason = walk_stmts(list_make1(func->action), scope, &returned);
 }
 
-/*
- * The scope of the statements up to the first RETURN
- */
 static const char *
 walk_stmts(List *stmts, PjScope *scope, bool *returned)
 {
@@ -215,10 +204,8 @@ signature_polymorphic(PLpgSQL_function *func)
 }
 
 /*
- * H1: what the planner and the interpreter have made of each expression
- *
  * An expression whose cached plan is stale counts as not planned: no tree is
- * read, the interpreter replans it at its next evaluation.
+ * read, and the interpreter replans it at its next evaluation.
  */
 void
 plllvm_pj_classify(PjScope *scope)
@@ -266,21 +253,13 @@ plllvm_pj_harvest(PLpgSQL_function *func, const PjScope *scope, PjHarvest *h)
 	List	   *funcs = NIL;
 
 	h->ret = scope->ret;
-	h->pos[PJ_POS_NONE] = (PjPos)
-	{
-		0, NULL, NULL
-	};
 	if (scope->ret != NULL)
-		h->pos[PJ_POS_RETURN] = (PjPos)
 	{
-		scope->ret->lineno,
-			plllvm_pj_stmt_typename(scope->ret), NULL
-	};
-	h->pos[PJ_POS_CAST] = (PjPos)
-	{
-		0, NULL,
-			gettext_noop("while casting return value to function's return type")
-	};
+		h->pos[PJ_POS_RETURN].lineno = scope->ret->lineno;
+		h->pos[PJ_POS_RETURN].stmt = plllvm_pj_stmt_typename(scope->ret);
+	}
+	h->pos[PJ_POS_CAST].text =
+		gettext_noop("while casting return value to function's return type");
 
 	foreach_ptr(PjExpr, pe, scope->exprs)
 	{
@@ -310,22 +289,25 @@ plllvm_pj_harvest(PLpgSQL_function *func, const PjScope *scope, PjHarvest *h)
 
 	reason = harvest_return(func, h);
 
+	/* a bare variable or constant has no function, so no list */
 	foreach_ptr(PjExpr, pe, h->exprs)
 	{
+		funcs = NIL;
 		if (pe->h1 == PJ_H1_READY)
 			funcs_walker((Node *) pe->tree, &funcs);
+		oldcxt = MemoryContextSwitchTo(h->cxt);
+		pe->funcids = list_copy(funcs);
+		MemoryContextSwitchTo(oldcxt);
 	}
+	funcs = NIL;
 	if (h->cast_tree != NULL)
 		funcs_walker((Node *) h->cast_tree, &funcs);
 	oldcxt = MemoryContextSwitchTo(h->cxt);
-	h->funcids = list_copy(funcs);
+	h->cast_funcids = list_copy(funcs);
 	MemoryContextSwitchTo(oldcxt);
 	return reason;
 }
 
-/*
- * How the value of the RETURN is computed and cast (h->path, h->cast_tree)
- */
 static const char *
 harvest_return(PLpgSQL_function *func, PjHarvest *h)
 {
@@ -408,10 +390,7 @@ harvest_return(PLpgSQL_function *func, PjHarvest *h)
 		(null_const && !func->fn_retisdomain))
 		return NULL;
 
-	/*
-	 * A domain checks its constraints on a cast, and they change with ALTER
-	 * DOMAIN, which a plan of a mere relabeling does not show
-	 */
+	/* domain targets are out of scope */
 	if (func->fn_retisdomain)
 		return "cast";
 
@@ -537,7 +516,7 @@ param_emit(plllvm_expr_env *base, plllvm_ir *ir, const Param *p,
 }
 
 /*
- * K3: the cast tree for (srctype, srctypmod) -> dsttype, built as
+ * The cast tree for (srctype, srctypmod) -> dsttype, built as
  * get_cast_hashentry() does (pl_exec.c) and rebuilt only when invalidated.
  * *tree is NULL for a relabeling.  May raise an ERROR, as the interpreter
  * would at the cast.
@@ -748,9 +727,6 @@ plllvm_pj_emit(PLpgSQL_function *func, PjHarvest *h, PjVariant *v)
 	return true;
 }
 
-/*
- * The RETURN, or the deopt in its place
- */
 static void
 emit_return(plllvm_ir *ir, PLpgSQL_function *func, PjHarvest *h, PjEnv *env)
 {
@@ -765,10 +741,11 @@ emit_return(plllvm_ir *ir, PLpgSQL_function *func, PjHarvest *h, PjEnv *env)
 	if (ret->retvarno >= 0)
 	{
 		Param	   *p = makeNode(Param);
+		PLpgSQL_var *var = (PLpgSQL_var *) func->datums[ret->retvarno];
 
 		p->paramkind = PARAM_EXTERN;
 		p->paramid = ret->retvarno + 1;
-		p->paramtype = ((PLpgSQL_var *) func->datums[ret->retvarno])->datatype->typoid;
+		p->paramtype = var->datatype->typoid;
 		p->paramtypmod = -1;
 		tree = (Expr *) p;
 	}
@@ -837,9 +814,6 @@ emit_return(plllvm_ir *ir, PLpgSQL_function *func, PjHarvest *h, PjEnv *env)
 	plllvm_ir_emit(ir, "ret i64 %s", datum);
 }
 
-/*
- * The value of the RETURN as a typed value, cast when K1 says so
- */
 static void
 emit_source(plllvm_ir *ir, PjEnv *env, PjHarvest *h, const Expr *tree,
 			plllvm_value *val)

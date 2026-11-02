@@ -242,6 +242,7 @@ Pg_abi_values
 Pg_finfo_record
 Pg_magic_struct
 PhiJoin
+PjBuild
 PjCast
 PjCastEntry
 PjCastKey

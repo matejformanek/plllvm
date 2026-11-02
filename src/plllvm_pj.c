@@ -22,15 +22,6 @@
  *    with no call running, marks the entry stale; the next lookup of that
  *    pointer starts a new one.
  *
- * 3) A call is interpreted once, so that PL/pgSQL plans what it runs; the
- *    second call translates the function, and later calls run the code.
- *    The translation happens only with no frame of the function on the
- *    stack, which keeps code and trees alive for every running frame, and
- *    in a subtransaction, so that any ERROR in it declines the function and
- *    never reaches the caller.  The code runs only while the plans it was
- *    made from are valid, and it gives up (a deopt) at an expression that
- *    was not planned, which PL/pgSQL then runs from the start.
- *
  * The rest is in docs/architecture.md.
  *
  */
@@ -46,13 +37,17 @@
 #include "storage/proc.h"
 #include "utils/acl.h"
 #include "utils/hsearch.h"
+#include "utils/inval.h"
 #include "utils/memutils.h"
 #include "utils/syscache.h"
 
 #include "plllvm.h"
 #include "plllvm_pj.h"
 
-/* guard misses before a function is declined as thrashing (B1) */
+/* invalidations of what EXECUTE depends on; see execute_allowed() */
+static uint64 exec_epoch = 0;
+
+/* guard misses before a function is declined as thrashing */
 #define PJ_MAX_MISSES		8
 /* compiled calls after which the misses are forgotten */
 #define PJ_MISS_FORGET		1000
@@ -90,10 +85,12 @@ typedef struct PjEntry
 	int64		guard_misses;
 	int64		translations;
 	PjHarvest  *harvest;
-	int			misses;			/* guard misses, B1 */
-	int64		since_translation;	/* compiled calls, B1 */
+	int			misses;			/* guard misses since the last reset */
+	int64		since_translation;	/* compiled calls since the last
+									 * translation */
 	int			deopt_expr;		/* expression of the last deopt, or -1 */
-	LocalTransactionId exec_lxid;	/* EXECUTE was checked in this transaction */
+	LocalTransactionId abort_lxid;	/* a compiled call failed in this
+									 * transaction */
 	TransactionId fn_xmin;		/* only for an Assert */
 	ItemPointerData fn_tid;
 } PjEntry;
@@ -142,12 +139,14 @@ static void activation_end(PLpgSQL_function *func, PjEntry *e,
 						   MemoryContext entry_cxt);
 static void exec_error_callback(void *arg);
 static bool guards_ok(PjHarvest *h);
-static bool execute_allowed(PjEntry *e);
+static bool execute_allowed(PLpgSQL_function *func, PjEntry *e,
+							PjVariant *v);
 static PjVariant *variant_find(PjHarvest *h);
 static void decline(PjEntry *e, const char *reason);
 static void decline_idle(PjEntry *e, const char *reason);
 static void release_harvest(PjEntry *e);
 static void pj_init(void);
+static void exec_inval_callback(Datum arg, int cacheid, uint32 hashvalue);
 
 Datum
 plllvm_pj_call_handler(PG_FUNCTION_ARGS)
@@ -261,6 +260,18 @@ pj_init(void)
 	ctl.hcxt = pj_cxt;
 	entries = hash_create("plllvm plpgsql_jit entries", 64, &ctl,
 						  HASH_ELEM | HASH_BLOBS | HASH_CONTEXT);
+
+	CacheRegisterSyscacheCallback(PROCOID, exec_inval_callback, (Datum) 0);
+	CacheRegisterSyscacheCallback(AUTHMEMROLEMEM, exec_inval_callback,
+								  (Datum) 0);
+	CacheRegisterSyscacheCallback(AUTHOID, exec_inval_callback, (Datum) 0);
+	CacheRegisterSyscacheCallback(DATABASEOID, exec_inval_callback, (Datum) 0);
+}
+
+static void
+exec_inval_callback(Datum arg, int cacheid, uint32 hashvalue)
+{
+	exec_epoch++;
 }
 
 /*
@@ -387,7 +398,10 @@ seen_step(PLpgSQL_function *func, PjEntry *e)
 		return false;
 	}
 
-	/* B2: after a deopt, only once the expression has been planned */
+	/*
+	 * After a deopt, only once the expression is planned: a plan that fails
+	 * would loop through LLVM.
+	 */
 	if (e->deopt_expr >= 0)
 	{
 		PjExpr	   *pe = list_nth(scope.exprs, e->deopt_expr);
@@ -403,26 +417,108 @@ seen_step(PLpgSQL_function *func, PjEntry *e)
 	return translate_guarded(func, e, &scope);
 }
 
+/* what a translation builds, for build_in_subxact() */
+typedef struct PjBuild
+{
+	PLpgSQL_function *func;
+	const PjScope *scope;		/* NULL: add the variant to the harvest */
+	PjHarvest  *harvest;
+	PjVariant  *variant;
+	MemoryContext tmp;			/* holds the harvest until it is published */
+	const char *reason;			/* why the function is declined, or NULL */
+	bool		capped;
+} PjBuild;
+
+static void
+build_run(PjBuild *b)
+{
+	if (plllvm_debug_inject == PLLLVM_INJECT_TRANSLATE_CANCEL)
+		ereport(ERROR,
+				(errcode(ERRCODE_QUERY_CANCELED),
+				 errmsg("canceling statement due to user request")));
+
+	if (b->scope != NULL)
+	{
+		MemoryContext cxt = AllocSetContextCreate(b->tmp,
+												  "plllvm - pj harvest context",
+												  ALLOCSET_DEFAULT_SIZES);
+
+		b->harvest = MemoryContextAllocZero(cxt, sizeof(PjHarvest));
+		b->harvest->cxt = cxt;
+		b->reason = plllvm_pj_harvest(b->func, b->scope, b->harvest);
+		if (b->reason != NULL)
+			return;
+
+		b->variant = MemoryContextAllocZero(cxt, sizeof(PjVariant));
+		b->variant->opt_level = plllvm_pj_opt_level;
+		b->variant->codegen = plllvm_pj_codegen;
+	}
+
+	b->capped = !plllvm_pj_emit(b->func, b->harvest, b->variant);
+}
+
 /*
- * Harvest and translate in a subtransaction: whatever goes wrong there is
- * rolled back, and declines the function, except a cancel.  Everything that
- * stays is built in a temporary context and published last.
+ * Run build_run() in a subtransaction: whatever goes wrong there is rolled
+ * back, and returned as an ErrorData (a cancel is raised again).  b->tmp
+ * is for the caller to delete, once it has taken what it keeps.
+ */
+static ErrorData *
+build_in_subxact(PjBuild *b)
+{
+	MemoryContext oldcxt = CurrentMemoryContext;
+	ResourceOwner oldowner = CurrentResourceOwner;
+	ErrorData  *volatile edata = NULL;
+
+	b->tmp = AllocSetContextCreate(oldcxt, "plllvm - pj translate",
+								   ALLOCSET_DEFAULT_SIZES);
+
+	PG_TRY();
+	{
+		BeginInternalSubTransaction(NULL);
+		MemoryContextSwitchTo(b->tmp);
+		build_run(b);
+		ReleaseCurrentSubTransaction();
+		MemoryContextSwitchTo(oldcxt);
+		CurrentResourceOwner = oldowner;
+	}
+	PG_CATCH();
+	{
+		MemoryContextSwitchTo(oldcxt);
+		edata = CopyErrorData();
+		FlushErrorState();
+
+		RollbackAndReleaseCurrentSubTransaction();
+		MemoryContextSwitchTo(oldcxt);
+		CurrentResourceOwner = oldowner;
+
+		if (b->variant != NULL && b->variant->mod != NULL)
+		{
+			plllvm_jit_release(b->variant->mod);
+			b->variant->mod = NULL;
+		}
+		MemoryContextDelete(b->tmp);
+		b->tmp = NULL;
+
+		if (edata->sqlerrcode == ERRCODE_QUERY_CANCELED)
+			ReThrowError(edata);
+	}
+	PG_END_TRY();
+
+	return edata;
+}
+
+/*
+ * Translate a function whose expressions are planned.  Everything that stays
+ * is built in a temporary context and published last.
  */
 static bool
 translate_guarded(PLpgSQL_function *func, PjEntry *e, PjScope *scope)
 {
-	MemoryContext oldcxt = CurrentMemoryContext;
-	ResourceOwner oldowner = CurrentResourceOwner;
-	MemoryContext tmp;
-	PjHarvest  *volatile h = NULL;
-	PjVariant  *volatile v = NULL;
-	const char *volatile reason = NULL;
-	volatile bool capped = false;
+	PjBuild		b = {func, scope};
+	ErrorData  *edata;
 	instr_time	start;
 	instr_time	elapsed;
 
-	tmp = AllocSetContextCreate(oldcxt, "plllvm - pj translate",
-								ALLOCSET_DEFAULT_SIZES);
 	plllvm_pj_count.attempts++;
 	INSTR_TIME_SET_CURRENT(start);
 
@@ -432,159 +528,68 @@ translate_guarded(PLpgSQL_function *func, PjEntry *e, PjScope *scope)
 	 */
 	release_harvest(e);
 
-	PG_TRY();
+	edata = build_in_subxact(&b);
+	if (edata != NULL)
 	{
-		MemoryContext cxt;
-
-		BeginInternalSubTransaction(NULL);
-		MemoryContextSwitchTo(tmp);
-
-		if (plllvm_debug_inject == PLLLVM_INJECT_TRANSLATE_CANCEL)
-			ereport(ERROR,
-					(errcode(ERRCODE_QUERY_CANCELED),
-					 errmsg("canceling statement due to user request")));
-
-		cxt = AllocSetContextCreate(tmp, "plllvm - pj harvest context",
-									ALLOCSET_DEFAULT_SIZES);
-		h = MemoryContextAllocZero(cxt, sizeof(PjHarvest));
-		h->cxt = cxt;
-
-		reason = plllvm_pj_harvest(func, scope, h);
-		if (reason == NULL)
-		{
-			v = MemoryContextAllocZero(cxt, sizeof(PjVariant));
-			v->opt_level = plllvm_pj_opt_level;
-			v->codegen = plllvm_pj_codegen;
-			capped = !plllvm_pj_emit(func, h, v);
-		}
-
-		ReleaseCurrentSubTransaction();
-		MemoryContextSwitchTo(oldcxt);
-		CurrentResourceOwner = oldowner;
-	}
-	PG_CATCH();
-	{
-		ErrorData  *edata;
-
-		MemoryContextSwitchTo(oldcxt);
-		edata = CopyErrorData();
-		FlushErrorState();
-
-		RollbackAndReleaseCurrentSubTransaction();
-		MemoryContextSwitchTo(oldcxt);
-		CurrentResourceOwner = oldowner;
-
-		if (v != NULL && v->mod != NULL)
-			plllvm_jit_release(v->mod);
-		MemoryContextDelete(tmp);
-
-		if (edata->sqlerrcode == ERRCODE_QUERY_CANCELED)
-			ReThrowError(edata);
-
 		plllvm_pj_count.failures++;
 		decline_idle(e, psprintf("%s: %s", unpack_sql_state(edata->sqlerrcode),
 								 edata->message));
 		FreeErrorData(edata);
 		return false;
 	}
-	PG_END_TRY();
 
-	if (reason != NULL)
-	{
-		decline_idle(e, reason);
-		MemoryContextDelete(tmp);
-		return false;
-	}
-
-	if (capped)
+	if (b.reason != NULL)
+		decline_idle(e, b.reason);
+	else if (b.capped)
 	{
 		plllvm_pj_count.capped++;
 		e->last_path = "interpreted:capped";
-		MemoryContextDelete(tmp);
-		return false;
+	}
+	else
+	{
+		INSTR_TIME_SET_CURRENT(elapsed);
+		INSTR_TIME_SUBTRACT(elapsed, start);
+		b.variant->translate_ms = INSTR_TIME_GET_MILLISEC(elapsed);
+		b.variant->mod->translate_ms = b.variant->translate_ms;
+
+		/* nothing below raises an ERROR */
+		b.variant->next = b.harvest->variants;
+		b.harvest->variants = b.variant;
+		MemoryContextSetParent(b.harvest->cxt, pj_cxt);
+		e->harvest = b.harvest;
+		e->state = PJ_COMPILED;
+		e->translations++;
+		e->since_translation = 0;
+		plllvm_pj_count.translations++;
 	}
 
-	INSTR_TIME_SET_CURRENT(elapsed);
-	INSTR_TIME_SUBTRACT(elapsed, start);
-	v->translate_ms = INSTR_TIME_GET_MILLISEC(elapsed);
-	v->mod->translate_ms = v->translate_ms;
-
-	/* nothing below raises an ERROR */
-	v->next = h->variants;
-	h->variants = v;
-	MemoryContextSetParent(h->cxt, pj_cxt);
-	e->harvest = h;
-	e->state = PJ_COMPILED;
-	e->translations++;
-	e->since_translation = 0;
-	e->exec_lxid = InvalidLocalTransactionId;
-	plllvm_pj_count.translations++;
-	MemoryContextDelete(tmp);
-
-	return true;
+	MemoryContextDelete(b.tmp);
+	return e->state == PJ_COMPILED;
 }
 
 /*
- * A harvest without the variant the session's GUCs ask for: build it, in
- * the same way.  A failure marks the variant, the others keep running.
+ * A harvest without the variant the session's options ask for.  A failure
+ * marks the variant, the others keep running.
  */
 static bool
 variant_guarded(PLpgSQL_function *func, PjEntry *e)
 {
 	PjHarvest  *h = e->harvest;
-	MemoryContext oldcxt = CurrentMemoryContext;
-	ResourceOwner oldowner = CurrentResourceOwner;
-	MemoryContext tmp;
-	PjVariant  *volatile v;
-	volatile bool capped = false;
+	PjVariant  *v = MemoryContextAllocZero(h->cxt, sizeof(PjVariant));
+	PjBuild		b = {func, NULL, h, v};
+	ErrorData  *edata;
 	instr_time	start;
 	instr_time	elapsed;
 
-	tmp = AllocSetContextCreate(oldcxt, "plllvm - pj translate",
-								ALLOCSET_DEFAULT_SIZES);
-	v = MemoryContextAllocZero(h->cxt, sizeof(PjVariant));
 	v->opt_level = plllvm_pj_opt_level;
 	v->codegen = plllvm_pj_codegen;
 	plllvm_pj_count.attempts++;
 	INSTR_TIME_SET_CURRENT(start);
 
-	PG_TRY();
+	edata = build_in_subxact(&b);
+	if (edata != NULL)
 	{
-		BeginInternalSubTransaction(NULL);
-		MemoryContextSwitchTo(tmp);
-
-		if (plllvm_debug_inject == PLLLVM_INJECT_TRANSLATE_CANCEL)
-			ereport(ERROR,
-					(errcode(ERRCODE_QUERY_CANCELED),
-					 errmsg("canceling statement due to user request")));
-
-		capped = !plllvm_pj_emit(func, h, v);
-
-		ReleaseCurrentSubTransaction();
-		MemoryContextSwitchTo(oldcxt);
-		CurrentResourceOwner = oldowner;
-	}
-	PG_CATCH();
-	{
-		ErrorData  *edata;
-
-		MemoryContextSwitchTo(oldcxt);
-		edata = CopyErrorData();
-		FlushErrorState();
-
-		RollbackAndReleaseCurrentSubTransaction();
-		MemoryContextSwitchTo(oldcxt);
-		CurrentResourceOwner = oldowner;
-
-		if (v->mod != NULL)
-			plllvm_jit_release(v->mod);
-		MemoryContextDelete(tmp);
-
-		if (edata->sqlerrcode == ERRCODE_QUERY_CANCELED)
-			ReThrowError(edata);
-
 		plllvm_pj_count.failures++;
-		v->mod = NULL;
 		v->failed = true;
 		v->next = h->variants;
 		h->variants = v;
@@ -592,11 +597,10 @@ variant_guarded(PLpgSQL_function *func, PjEntry *e)
 		FreeErrorData(edata);
 		return false;
 	}
-	PG_END_TRY();
 
-	MemoryContextDelete(tmp);
+	MemoryContextDelete(b.tmp);
 
-	if (capped)
+	if (b.capped)
 	{
 		/* not kept: retried at the next call */
 		plllvm_pj_count.capped++;
@@ -617,9 +621,6 @@ variant_guarded(PLpgSQL_function *func, PjEntry *e)
 	return true;
 }
 
-/*
- * A COMPILED entry: the checks that cost a call, then the code
- */
 static Datum
 run_compiled(PLpgSQL_function *func, FunctionCallInfo fcinfo, PjEntry *e)
 {
@@ -655,9 +656,6 @@ run_compiled(PLpgSQL_function *func, FunctionCallInfo fcinfo, PjEntry *e)
 						 e->declined_path : "interpreted:guard miss");
 	}
 
-	if (!execute_allowed(e))
-		return fall_back(fcinfo, e, "interpreted:execute");
-
 	v = variant_find(h);
 	if (v == NULL)
 	{
@@ -677,6 +675,9 @@ run_compiled(PLpgSQL_function *func, FunctionCallInfo fcinfo, PjEntry *e)
 
 	if (v->failed)
 		return fall_back(fcinfo, e, "interpreted:failed");
+
+	if (!execute_allowed(func, e, v))
+		return fall_back(fcinfo, e, "interpreted:execute");
 
 	return run(func, fcinfo, e, v);
 }
@@ -718,9 +719,10 @@ run(PLpgSQL_function *func, FunctionCallInfo fcinfo, PjEntry *e, PjVariant *v)
 
 		/*
 		 * PL/pgSQL does not trust an ExprState after an error in it, and
-		 * checks EXECUTE again
+		 * checks EXECUTE again at every evaluation in the transaction
 		 */
-		e->exec_lxid = InvalidLocalTransactionId;
+		e->abort_lxid = MyProc->vxid.lxid;
+		v->key_lxid = InvalidLocalTransactionId;
 		activation_end(func, e, entry_cxt);
 		PG_RE_THROW();
 	}
@@ -740,6 +742,9 @@ run(PLpgSQL_function *func, FunctionCallInfo fcinfo, PjEntry *e, PjVariant *v)
 		return call_handler_p(fcinfo);
 	}
 
+	e->harvest->done_lxid = MyProc->vxid.lxid;
+	if (!fcinfo->isnull)
+		e->harvest->cast_lxid = MyProc->vxid.lxid;
 	plllvm_pj_count.compiled_calls++;
 	e->compiled_calls++;
 	e->since_translation++;
@@ -820,31 +825,59 @@ guards_ok(PjHarvest *h)
 }
 
 /*
- * May the user execute the functions in the code?  PL/pgSQL checks this when
- * it builds the ExprState, the first time in a transaction, and not again
- * whatever happens to the role or the privileges in that transaction.  We
- * check at the first call and then leave it, so a failure is for PL/pgSQL to
- * raise at the right expression.
+ * May the user execute the functions in the code?  PL/pgSQL checks them when
+ * it builds the ExprState of an expression, the first time it is reached in
+ * a transaction, and does not look again, whatever happens to the role or
+ * the privileges, except after an error in it or in a recursion.  A failure
+ * here sends the call to PL/pgSQL, which raises it at the right expression,
+ * or not at all.
+ *
+ * The result holds for this transaction, user and state of the catalogs.
+ * Without it the lists are walked, skipping what PL/pgSQL would not check
+ * again: an expression its ExprState exists for, or that every compiled call
+ * reaches, and the cast after a call that sent a value through it.
  */
 static bool
-execute_allowed(PjEntry *e)
+execute_allowed(PLpgSQL_function *func, PjEntry *e, PjVariant *v)
 {
+	PjHarvest  *h = e->harvest;
 	Oid			user = GetUserId();
 	LocalTransactionId lxid = MyProc->vxid.lxid;
+	bool		idle = func->cfunc.use_count == 0 && e->abort_lxid != lxid;
+	List	   *checked = NIL;
 
-	if (e->exec_lxid == lxid)
+	if (v->key_lxid == lxid && v->key_user == user && v->key_epoch == exec_epoch)
 		return true;
 
-	foreach_oid(funcid, e->harvest->funcids)
+	foreach_ptr(PjExpr, pe, h->exprs)
+	{
+		PLpgSQL_expr *expr = pe->expr;
+		bool		reached = expr->expr_simple_lxid == lxid ||
+			h->done_lxid == lxid;
+		bool		failed = expr->expr_simple_in_use &&
+			expr->expr_simple_lxid == lxid;
+
+		if (pe->h1 != PJ_H1_READY)
+			continue;
+		if (idle && reached && !failed)
+			continue;
+		checked = list_concat(checked, list_copy(pe->funcids));
+	}
+	if (!(idle && h->cast_lxid == lxid))
+		checked = list_concat(checked, list_copy(h->cast_funcids));
+
+	foreach_oid(funcid, checked)
 	{
 		if (object_aclcheck(ProcedureRelationId, funcid, user,
 							ACL_EXECUTE) != ACLCHECK_OK)
 			return false;
 	}
-	foreach_oid(funcid, e->harvest->funcids)
+	foreach_oid(funcid, checked)
 		InvokeFunctionExecuteHook(funcid);
 
-	e->exec_lxid = lxid;
+	v->key_lxid = lxid;
+	v->key_user = user;
+	v->key_epoch = exec_epoch;
 	return true;
 }
 
@@ -963,10 +996,6 @@ plllvm_pj_infos(Oid fn, plllvm_pj_info **infos)
 	return n;
 }
 
-/*
- * The IR of the variant the session's GUCs select, of the first live entry
- * of fn that has one; NULL if there is none
- */
 char *
 plllvm_pj_ir_text(Oid fn)
 {

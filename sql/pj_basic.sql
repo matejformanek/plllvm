@@ -1,11 +1,6 @@
 --
--- pj_basic: functions whose body is a RETURN
---
--- The output must be PL/pgSQL's, with or without compiled code.  pj_expect
--- says which way each function runs on plpgsql_jit; it is silent, and does
--- nothing on stock PL/pgSQL.  A function is called twice before the call
--- that is compiled: the first call plans what it runs, the second one
--- translates and runs the code.
+-- pj_basic: functions whose body is a RETURN; pj_expect says which way each
+-- runs on plpgsql_jit, and the output is PL/pgSQL's either way
 --
 \getenv pj_lang PJ_LANG
 \if :{?pj_lang}
@@ -13,7 +8,7 @@
   \set pj_lang plpgsql
 \endif
 
--- an expression of the Stage 1 compiler
+-- an expression of the expression compiler
 CREATE FUNCTION pb_inc(n int) RETURNS int LANGUAGE :pj_lang AS $$
 BEGIN
   RETURN n + 1;
@@ -31,7 +26,7 @@ SELECT pj_expect('pb_inc(int)', 'interpreted:null arg') \gset
 SELECT pb_inc(41);
 SELECT pj_expect('pb_inc(int)', 'compiled') \gset
 
--- the other types of Stage 1, and the casts between them to the result
+-- the other types of the expression compiler, and the casts to the result
 CREATE FUNCTION pb_big(n int) RETURNS bigint LANGUAGE :pj_lang AS $$
 BEGIN
   RETURN n * 1000000;

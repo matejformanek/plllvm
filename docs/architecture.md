@@ -188,7 +188,7 @@ Only `plllvm_jit.c` and `plllvm_error.cpp` include LLVM headers.
   variable. Before each step that can raise it stores an index of a position
   table in `ctx`, from which the handler writes the error context of
   `plpgsql_exec_error_callback`. A value is converted to the result type by
-  the cast tree PL/pgSQL would build, cached per pair of types; when Stage 1
+  the cast tree PL/pgSQL would build, cached per pair of types; when the expression compiler
   does not compile it, the function is declined (`cast`).
 * A compiled call checks, in this order: no NULL argument (PL/pgSQL runs
   it), every plan still simply valid with the generation it had, the EXECUTE

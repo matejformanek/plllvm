@@ -1,0 +1,27 @@
+--
+-- pj_casts: a cast created or dropped between calls
+--
+-- PL/pgSQL keeps the cast it first built in the session, so the new one is
+-- seen later than a flush would show it; not run under debug_discard_caches.
+-- The function is declined, as the cast it first had is an I/O conversion.
+--
+\getenv pj_lang PJ_LANG
+\if :{?pj_lang}
+\else
+  \set pj_lang plpgsql
+\endif
+
+CREATE FUNCTION pjg_bf(b bool) RETURNS float8 LANGUAGE :pj_lang AS $$
+BEGIN RETURN b; END $$;
+SELECT pjg_bf(true);  -- fail
+SELECT pjg_bf(true);  -- fail
+SELECT pjg_bf(true);  -- fail
+SELECT pj_expect('pjg_bf(bool)', 'declined:cast') \gset
+CREATE FUNCTION pjg_castf(bool) RETURNS float8 LANGUAGE sql AS 'SELECT 42.5::float8';
+CREATE CAST (bool AS float8) WITH FUNCTION pjg_castf(bool) AS ASSIGNMENT;
+SELECT pjg_bf(true), pjg_bf(false);
+SELECT pjg_bf(true), pjg_bf(false);
+DROP CAST (bool AS float8);
+SELECT pjg_bf(true);  -- fail
+SELECT pjg_bf(true);  -- fail
+DROP FUNCTION pjg_castf(bool);

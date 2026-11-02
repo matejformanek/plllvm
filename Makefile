@@ -48,7 +48,7 @@ REGRESS = plllvm_setup $(REGRESS_FEATURES) $(REGRESS_KERNELS) expr_plugin \
 # LANGUAGE plpgsql_jit, with PJ_LANG=plpgsql_jit (make installcheck-pj); the
 # files run against stock PL/pgSQL's output.  REGRESS_PJ_ONCE runs in one
 # variant only, REGRESS_PJ_OPT at opt level 3.
-REGRESS_PJ = pj_language pj_basic pj_errors pj_guards pj_execute pj_sessions
+REGRESS_PJ = pj_language pj_basic pj_errors pj_guards pj_execute pj_casts pj_sessions
 REGRESS_PJ_ONCE = pj_states pj_discard pj_execute_diff
 REGRESS_PJ_OPT =
 

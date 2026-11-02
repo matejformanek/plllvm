@@ -98,7 +98,7 @@ typedef enum PjH1
 	PJ_H1_READY
 } PjH1;
 
-/* K3: how to cast one type to another, as PL/pgSQL's cast_expr_hash */
+/* how to cast one type to another, as PL/pgSQL's cast_expr_hash */
 typedef struct PjCast
 {
 	CachedExpression *cexpr;
@@ -108,7 +108,7 @@ typedef struct PjCast
 typedef enum PjPath
 {
 	PJ_PATH_MOVE,				/* copy the Datum of a variable or constant */
-	PJ_PATH_NATIVE				/* the Stage 1 compiler */
+	PJ_PATH_NATIVE				/* the expression compiler */
 } PjPath;
 
 typedef struct PjExpr
@@ -123,6 +123,8 @@ typedef struct PjExpr
 	CachedPlanSource *plansource;
 	CachedPlan *plan;
 	int			generation;
+	List	   *funcids;		/* PL/pgSQL checks EXECUTE on these when it
+								 * builds the expression */
 } PjExpr;
 
 /* what the translator found in a function, once per pre-check */
@@ -149,6 +151,10 @@ typedef struct PjVariant
 	bool		restartable;
 	double		translate_ms;
 	char	   *ir;
+	LocalTransactionId key_lxid;	/* EXECUTE was checked in this transaction
+									 * ... */
+	Oid			key_user;		/* ... for this user ... */
+	uint64		key_epoch;		/* ... at this state of the catalogs */
 } PjVariant;
 
 /* one generation of a function's expressions, with the variants built on it */
@@ -160,10 +166,13 @@ typedef struct PjHarvest
 	int			nunplanned;
 	PjPath		path;			/* of the RETURN's value */
 	Oid			srctype;		/* of that value; InvalidOid: no value */
-	Expr	   *cast_tree;		/* K1, or NULL */
+	Expr	   *cast_tree;		/* the cast of the value, or NULL */
 	PjCast	   *cast;
 	uint64		cast_gen;
-	List	   *funcids;		/* to check EXECUTE on */
+	List	   *cast_funcids;	/* likewise, for the cast */
+	LocalTransactionId done_lxid;	/* a call ended normally in this
+									 * transaction */
+	LocalTransactionId cast_lxid;	/* ... and its value went through the cast */
 	PjPos		pos[3];
 	PjVariant  *variants;
 } PjHarvest;
