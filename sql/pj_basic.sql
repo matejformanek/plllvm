@@ -290,3 +290,24 @@ SELECT pb_nofn(1);
 SELECT pb_nofn(1);
 SELECT pb_nofn(1);
 SELECT pj_expect('pb_nofn(int)', 'declined:volatile callee') \gset
+
+-- a domain checks its constraints at every cast, and they change under ALTER
+-- DOMAIN: not compiled, whatever the plan of the cast looks like
+CREATE DOMAIN pb_dx AS int;
+CREATE FUNCTION pb_dm1(a int) RETURNS pb_dx LANGUAGE :pj_lang AS $$
+BEGIN RETURN a + 1; END $$;
+CREATE FUNCTION pb_dm2(a int) RETURNS pb_dx LANGUAGE :pj_lang AS $$
+BEGIN RETURN a; END $$;
+CREATE FUNCTION pb_dm3(a int) RETURNS pb_dx LANGUAGE :pj_lang AS $$
+BEGIN RETURN CASE WHEN a > 0 THEN a END; END $$;
+SELECT pb_dm1(1), pb_dm1(2), pb_dm1(3), pb_dm2(1), pb_dm2(2), pb_dm2(3),
+       pb_dm3(1), pb_dm3(2), pb_dm3(3);
+SELECT pj_expect('pb_dm1(int)', 'declined:cast') \gset
+SELECT pj_expect('pb_dm2(int)', 'declined:cast') \gset
+SELECT pj_expect('pb_dm3(int)', 'declined:cast') \gset
+ALTER DOMAIN pb_dx ADD CONSTRAINT pb_dx_pos CHECK (VALUE > 0);
+SELECT pb_dm1(-5);  -- fail
+SELECT pb_dm2(-5);  -- fail
+SELECT pb_dm3(5);
+ALTER DOMAIN pb_dx SET NOT NULL;
+SELECT pb_dm3(-5);  -- fail

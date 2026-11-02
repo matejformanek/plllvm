@@ -105,13 +105,14 @@ SELECT pe_catch(2147483647);
 SELECT pe_catch(5);
 SELECT pj_expect('pe_inc(int)', 'compiled') \gset
 
--- a statement that is cancelled: the code polls at its entry
+-- a cancel in a long run of calls: where it lands is not told, its code is
+\set VERBOSITY sqlstate
 SET statement_timeout = '100ms';
-CREATE FUNCTION pe_sleep() RETURNS int LANGUAGE sql AS 'SELECT pg_sleep(1)::text::int';
 CREATE FUNCTION pe_wait(n int) RETURNS int LANGUAGE :pj_lang AS $$
 BEGIN RETURN n + 1; END $$;
 SELECT pe_wait(1);
 SELECT pe_wait(2);
-SELECT pe_wait(3), pe_sleep();  -- fail
+SELECT sum(pe_wait(i)) FROM generate_series(1, 1000000000) i;  -- fail
 RESET statement_timeout;
+\set VERBOSITY default
 SELECT pj_expect('pe_wait(int)', 'compiled') \gset

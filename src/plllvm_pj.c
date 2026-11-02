@@ -128,7 +128,8 @@ static void load_plpgsql(void);
 static PjEntry *entry_get(PLpgSQL_function *func);
 static void entry_reset_callback(void *arg);
 static Datum fall_back(FunctionCallInfo fcinfo, PjEntry *e, const char *path);
-static PjMay may_translate(PLpgSQL_function *func);
+static PjMay may_translate(PLpgSQL_function *func, PjEntry *e,
+						   bool replacing);
 static bool seen_step(PLpgSQL_function *func, PjEntry *e);
 static bool translate_guarded(PLpgSQL_function *func, PjEntry *e,
 							  PjScope *scope);
@@ -316,16 +317,25 @@ entry_reset_callback(void *arg)
  * the stack, so that no code or tree is replaced under a running call.  Not
  * in parallel mode (the subtransaction's commit raises there), and not while
  * interrupts are held, as under a btree page lock, which a subtransaction
- * abort would release.
+ * abort would release.  A translation that replaces the harvest of the entry
+ * gives its code back, so that code does not count against the cap.
  */
 static PjMay
-may_translate(PLpgSQL_function *func)
+may_translate(PLpgSQL_function *func, PjEntry *e, bool replacing)
 {
+	int64		own = 0;
+
 	if (func->cfunc.use_count != 0 || IsInParallelMode() ||
 		InterruptHoldoffCount != 0)
 		return PJ_MAY_NOT;
 
-	if (plllvm_jit_pj_resident() >= plllvm_max_resident_compiles)
+	if (replacing && e->harvest != NULL)
+	{
+		for (PjVariant *v = e->harvest->variants; v != NULL; v = v->next)
+			own += (v->mod != NULL);
+	}
+
+	if (plllvm_jit_pj_resident() - own >= plllvm_max_resident_compiles)
 	{
 		plllvm_pj_count.capped++;
 		return PJ_MAY_CAPPED;
@@ -344,7 +354,7 @@ seen_step(PLpgSQL_function *func, PjEntry *e)
 {
 	PjScope		scope;
 
-	switch (may_translate(func))
+	switch (may_translate(func, e, true))
 	{
 		case PJ_MAY_NOT:
 			e->last_path = "interpreted:busy";
@@ -415,6 +425,12 @@ translate_guarded(PLpgSQL_function *func, PjEntry *e, PjScope *scope)
 								ALLOCSET_DEFAULT_SIZES);
 	plllvm_pj_count.attempts++;
 	INSTR_TIME_SET_CURRENT(start);
+
+	/*
+	 * The old code goes first: it counts against the cap until released, and
+	 * nothing runs it, as no frame of the function is on the stack.
+	 */
+	release_harvest(e);
 
 	PG_TRY();
 	{
@@ -494,7 +510,6 @@ translate_guarded(PLpgSQL_function *func, PjEntry *e, PjScope *scope)
 	v->mod->translate_ms = v->translate_ms;
 
 	/* nothing below raises an ERROR */
-	release_harvest(e);
 	v->next = h->variants;
 	h->variants = v;
 	MemoryContextSetParent(h->cxt, pj_cxt);
@@ -628,7 +643,12 @@ run_compiled(PLpgSQL_function *func, FunctionCallInfo fcinfo, PjEntry *e)
 		if (e->since_translation >= PJ_MISS_FORGET)
 			e->misses = 0;
 		if (++e->misses >= PJ_MAX_MISSES)
-			decline(e, "thrash");
+		{
+			if (func->cfunc.use_count == 0)
+				decline_idle(e, "thrash");
+			else
+				decline(e, "thrash");
+		}
 		else
 			e->state = PJ_SEEN;
 		return fall_back(fcinfo, e, e->state == PJ_DECLINED ?
@@ -641,7 +661,7 @@ run_compiled(PLpgSQL_function *func, FunctionCallInfo fcinfo, PjEntry *e)
 	v = variant_find(h);
 	if (v == NULL)
 	{
-		switch (may_translate(func))
+		switch (may_translate(func, e, false))
 		{
 			case PJ_MAY_NOT:
 				return fall_back(fcinfo, e, "interpreted:busy");
@@ -693,7 +713,14 @@ run(PLpgSQL_function *func, FunctionCallInfo fcinfo, PjEntry *e, PjVariant *v)
 	{
 		plllvm_pj_count.compiled_calls++;
 		e->compiled_calls++;
+		e->calls++;
 		e->last_path = "compiled";
+
+		/*
+		 * PL/pgSQL does not trust an ExprState after an error in it, and
+		 * checks EXECUTE again
+		 */
+		e->exec_lxid = InvalidLocalTransactionId;
 		activation_end(func, e, entry_cxt);
 		PG_RE_THROW();
 	}

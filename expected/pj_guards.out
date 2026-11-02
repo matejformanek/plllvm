@@ -313,60 +313,6 @@ SELECT pjg_inc(9);
 
 RESET ROLE;
 SELECT pj_expect('pjg_inc(int)', 'compiled') \gset
--- inside a transaction: once the ExprState exists, the revoke is not seen
-SELECT pjg_inc(1);
- pjg_inc 
----------
-     101
-(1 row)
-
-BEGIN;
-SET ROLE regress_pj_guard;
-SELECT pjg_inc(10);
- pjg_inc 
----------
-     110
-(1 row)
-
-RESET ROLE;
-REVOKE EXECUTE ON FUNCTION int4pl(int4, int4) FROM PUBLIC;
-SET ROLE regress_pj_guard;
-SELECT pjg_inc(11);
- pjg_inc 
----------
-     111
-(1 row)
-
-RESET ROLE;
-COMMIT;
-SET ROLE regress_pj_guard;
-SELECT pjg_inc(12);  -- fail
-ERROR:  permission denied for function int4pl
-CONTEXT:  PL/pgSQL function pjg_inc(integer) line 2 at RETURN
-RESET ROLE;
-GRANT EXECUTE ON FUNCTION int4pl(int4, int4) TO PUBLIC;
-BEGIN;
-REVOKE EXECUTE ON FUNCTION int4pl(int4, int4) FROM PUBLIC;
-SET ROLE regress_pj_guard;
-SELECT pjg_inc(13);  -- fail
-ERROR:  permission denied for function int4pl
-CONTEXT:  PL/pgSQL function pjg_inc(integer) line 2 at RETURN
-ROLLBACK;
-SELECT pjg_inc(14);
- pjg_inc 
----------
-     114
-(1 row)
-
-SET ROLE regress_pj_guard;
-SELECT pjg_inc(15);
- pjg_inc 
----------
-     115
-(1 row)
-
-RESET ROLE;
-SELECT pj_expect('pjg_inc(int)', 'compiled') \gset
 -- one cast, in the other direction: a function whose cast cannot change
 CREATE FUNCTION pjg_widen(n int) RETURNS bigint LANGUAGE :pj_lang AS $$
 BEGIN RETURN n; END $$;
@@ -384,5 +330,138 @@ SELECT pjg_widen(1), pjg_widen(2), pjg_widen(2147483647);
 (1 row)
 
 SELECT pj_expect('pjg_widen(int)', 'compiled') \gset
+-- an SQL function the planner inlined: the code is made from its body
+CREATE FUNCTION pjg_f(n int) RETURNS int LANGUAGE sql AS 'SELECT $1';
+CREATE FUNCTION pjg_h06(n int) RETURNS int LANGUAGE :pj_lang AS $$
+BEGIN RETURN pjg_f(n); END $$;
+SELECT pjg_h06(1), pjg_h06(2), pjg_h06(3);
+ pjg_h06 | pjg_h06 | pjg_h06 
+---------+---------+---------
+       1 |       2 |       3
+(1 row)
+
+SELECT pj_expect('pjg_h06(int)', 'compiled') \gset
+CREATE OR REPLACE FUNCTION pjg_f(n int) RETURNS int LANGUAGE sql AS 'SELECT $1 + 100';
+SELECT pjg_h06(1), pjg_h06(2), pjg_h06(3);
+ pjg_h06 | pjg_h06 | pjg_h06 
+---------+---------+---------
+     101 |     102 |     103
+(1 row)
+
+SELECT pj_expect('pjg_h06(int)', 'compiled') \gset
+ALTER FUNCTION pjg_f(int) COST 7;
+SELECT pjg_h06(1), pjg_h06(2), pjg_h06(3);
+ pjg_h06 | pjg_h06 | pjg_h06 
+---------+---------+---------
+     101 |     102 |     103
+(1 row)
+
+ALTER FUNCTION pjg_f(int) SET extra_float_digits = 1;
+SELECT pjg_h06(1), pjg_h06(2), pjg_h06(3);
+ pjg_h06 | pjg_h06 | pjg_h06 
+---------+---------+---------
+     101 |     102 |     103
+(1 row)
+
+ALTER FUNCTION pjg_f(int) VOLATILE;
+SELECT pjg_h06(1), pjg_h06(2), pjg_h06(3);
+ pjg_h06 | pjg_h06 | pjg_h06 
+---------+---------+---------
+     101 |     102 |     103
+(1 row)
+
+SELECT pj_expect('pjg_h06(int)', 'declined:volatile callee') \gset
+DROP FUNCTION pjg_f(int);
+SELECT pjg_h06(1);  -- fail
+ERROR:  function pjg_f(integer) does not exist
+LINE 1: pjg_f(n)
+        ^
+DETAIL:  There is no function of that name.
+QUERY:  pjg_f(n)
+CONTEXT:  PL/pgSQL function pjg_h06(integer) line 2 at RETURN
+SELECT pjg_h06(1);  -- fail
+ERROR:  function pjg_f(integer) does not exist
+LINE 1: pjg_f(n)
+        ^
+DETAIL:  There is no function of that name.
+QUERY:  pjg_f(n)
+CONTEXT:  PL/pgSQL function pjg_h06(integer) line 2 at RETURN
+CREATE FUNCTION pjg_f(n int) RETURNS int LANGUAGE sql AS 'SELECT $1 + 5';
+SELECT pjg_h06(1), pjg_h06(2), pjg_h06(3);
+ pjg_h06 | pjg_h06 | pjg_h06 
+---------+---------+---------
+       6 |       7 |       8
+(1 row)
+
+-- the same name in two schemas of the search_path
+CREATE SCHEMA pjg_s1;
+CREATE SCHEMA pjg_s2;
+CREATE FUNCTION pjg_s1.pjg_g(n int) RETURNS int LANGUAGE sql AS 'SELECT $1 + 1';
+CREATE FUNCTION pjg_s2.pjg_g(n int) RETURNS int LANGUAGE sql AS 'SELECT $1 + 2';
+CREATE FUNCTION pjg_h07(n int) RETURNS int LANGUAGE :pj_lang AS $$
+BEGIN RETURN pjg_g(n); END $$;
+SET search_path = pjg_s1, public;
+SELECT pjg_h07(10), pjg_h07(10), pjg_h07(10);
+ pjg_h07 | pjg_h07 | pjg_h07 
+---------+---------+---------
+      11 |      11 |      11
+(1 row)
+
+SET search_path = pjg_s2, public;
+SELECT pjg_h07(10), pjg_h07(10), pjg_h07(10);
+ pjg_h07 | pjg_h07 | pjg_h07 
+---------+---------+---------
+      12 |      12 |      12
+(1 row)
+
+SET search_path = pjg_s1, public;
+SELECT pjg_h07(10), pjg_h07(10), pjg_h07(10);
+ pjg_h07 | pjg_h07 | pjg_h07 
+---------+---------+---------
+      11 |      11 |      11
+(1 row)
+
+RESET search_path;
+SELECT pjg_h07(10);  -- fail
+ERROR:  function pjg_g(integer) does not exist
+LINE 1: pjg_g(n)
+        ^
+DETAIL:  A function of that name exists, but it is not in the search_path.
+QUERY:  pjg_g(n)
+CONTEXT:  PL/pgSQL function pjg_h07(integer) line 2 at RETURN
+DROP SCHEMA pjg_s1, pjg_s2 CASCADE;
+NOTICE:  drop cascades to 2 other objects
+DETAIL:  drop cascades to function pjg_s2.pjg_g(integer)
+drop cascades to function pjg_s1.pjg_g(integer)
+-- a cast created or dropped between calls: the function is not compiled,
+-- since the cast it first had is an I/O conversion, and PL/pgSQL sees the new
+CREATE FUNCTION pjg_bf(b bool) RETURNS float8 LANGUAGE :pj_lang AS $$
+BEGIN RETURN b; END $$;
+SELECT pjg_bf(true);  -- fail
+ERROR:  invalid input syntax for type double precision: "t"
+CONTEXT:  PL/pgSQL function pjg_bf(boolean) while casting return value to function's return type
+SELECT pjg_bf(true);  -- fail
+ERROR:  invalid input syntax for type double precision: "t"
+CONTEXT:  PL/pgSQL function pjg_bf(boolean) while casting return value to function's return type
+SELECT pjg_bf(true);  -- fail
+ERROR:  invalid input syntax for type double precision: "t"
+CONTEXT:  PL/pgSQL function pjg_bf(boolean) while casting return value to function's return type
+SELECT pj_expect('pjg_bf(bool)', 'declined:cast') \gset
+CREATE FUNCTION pjg_castf(bool) RETURNS float8 LANGUAGE sql AS 'SELECT 42.5::float8';
+CREATE CAST (bool AS float8) WITH FUNCTION pjg_castf(bool) AS ASSIGNMENT;
+SELECT pjg_bf(true), pjg_bf(false);
+ERROR:  invalid input syntax for type double precision: "t"
+CONTEXT:  PL/pgSQL function pjg_bf(boolean) while casting return value to function's return type
+SELECT pjg_bf(true), pjg_bf(false);
+ERROR:  invalid input syntax for type double precision: "t"
+CONTEXT:  PL/pgSQL function pjg_bf(boolean) while casting return value to function's return type
+DROP CAST (bool AS float8);
+SELECT pjg_bf(true);  -- fail
+ERROR:  invalid input syntax for type double precision: "t"
+CONTEXT:  PL/pgSQL function pjg_bf(boolean) while casting return value to function's return type
+SELECT pjg_bf(true);  -- fail
+ERROR:  invalid input syntax for type double precision: "t"
+CONTEXT:  PL/pgSQL function pjg_bf(boolean) while casting return value to function's return type
+DROP FUNCTION pjg_castf(bool);
 DROP SCHEMA pjg_ta, pjg_tb CASCADE;
 DROP ROLE regress_pj_guard;

@@ -102,6 +102,13 @@ SELECT kind, translate_ms > 0 AS translate_ms, ir_instructions > 0 AS ir
  pj   | t            | t
 (1 row)
 
+-- the entry polls for interrupts
+SELECT plllvm_pj_ir('ps_inc(int)') LIKE '%call void @plllvm_cfi()%' AS polls;
+ polls 
+-------
+ t
+(1 row)
+
 SELECT count(*) AS expr_modules FROM plllvm_code_cache() WHERE kind <> 'pj' AND translate_ms IS NOT NULL;
  expr_modules 
 --------------
@@ -487,7 +494,7 @@ $$;
 SELECT resident - :resident_before AS resident_growth FROM plllvm_pj_stats();
  resident_growth 
 -----------------
-               0
+              -1
 (1 row)
 
 SELECT s.state, s.last_path FROM plllvm_pj_status('ps_flush(int)') s;
@@ -578,6 +585,39 @@ SELECT capped, resident, translations, failures FROM plllvm_pj_stats();
  capped | resident | translations | failures 
 --------+----------+--------------+----------
       2 |        2 |            2 |        0
+(1 row)
+
+-- the code a function gives back does not count against the cap
+SET plllvm.max_resident_compiles = 2;
+DISCARD PLANS;
+SELECT ps_c1(5);
+ ps_c1 
+-------
+     6
+(1 row)
+
+SELECT ps_c1(6);
+ ps_c1 
+-------
+     7
+(1 row)
+
+SELECT ps_c1(7);
+ ps_c1 
+-------
+     8
+(1 row)
+
+SELECT s.state, s.last_path FROM plllvm_pj_status('ps_c1(int)') s;
+  state   | last_path 
+----------+-----------
+ compiled | compiled
+(1 row)
+
+SELECT capped FROM plllvm_pj_stats();
+ capped 
+--------
+      2
 (1 row)
 
 -- a session that cannot start LLVM: the translation fails, the function is

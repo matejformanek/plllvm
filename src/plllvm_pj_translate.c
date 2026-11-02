@@ -82,7 +82,6 @@ static void env_init(PjEnv *env, PLpgSQL_function *func);
 static bool param_check(plllvm_expr_env *env, const Param *p, StringInfo facts);
 static void param_emit(plllvm_expr_env *env, plllvm_ir *ir, const Param *p,
 					   plllvm_value *out);
-static bool native_repr(Oid type, plllvm_repr *repr);
 static PjCast *cast_get(Oid srctype, int32 srctypmod, Oid dsttype,
 						Expr **tree);
 static bool funcs_walker(Node *node, List **funcs);
@@ -262,7 +261,7 @@ plllvm_pj_classify(PjScope *scope)
 const char *
 plllvm_pj_harvest(PLpgSQL_function *func, const PjScope *scope, PjHarvest *h)
 {
-	MemoryContext oldcxt = MemoryContextSwitchTo(h->cxt);
+	MemoryContext oldcxt;
 	const char *reason;
 	List	   *funcs = NIL;
 
@@ -285,14 +284,16 @@ plllvm_pj_harvest(PLpgSQL_function *func, const PjScope *scope, PjHarvest *h)
 
 	foreach_ptr(PjExpr, pe, scope->exprs)
 	{
-		PjExpr	   *copy = palloc_object(PjExpr);
+		PjExpr	   *copy = MemoryContextAlloc(h->cxt, sizeof(PjExpr));
 
 		*copy = *pe;
 		if (pe->h1 == PJ_H1_READY)
 		{
 			PLpgSQL_expr *expr = pe->expr;
 
+			oldcxt = MemoryContextSwitchTo(h->cxt);
 			copy->tree = copyObject(expr->expr_simple_expr);
+			MemoryContextSwitchTo(oldcxt);
 			copy->type = expr->expr_simple_type;
 			copy->typmod = expr->expr_simple_typmod;
 			copy->mutable = expr->expr_simple_mutable;
@@ -302,7 +303,9 @@ plllvm_pj_harvest(PLpgSQL_function *func, const PjScope *scope, PjHarvest *h)
 		}
 		else
 			h->nunplanned++;
+		oldcxt = MemoryContextSwitchTo(h->cxt);
 		h->exprs = lappend(h->exprs, copy);
+		MemoryContextSwitchTo(oldcxt);
 	}
 
 	reason = harvest_return(func, h);
@@ -314,8 +317,8 @@ plllvm_pj_harvest(PLpgSQL_function *func, const PjScope *scope, PjHarvest *h)
 	}
 	if (h->cast_tree != NULL)
 		funcs_walker((Node *) h->cast_tree, &funcs);
-	h->funcids = funcs;
-
+	oldcxt = MemoryContextSwitchTo(h->cxt);
+	h->funcids = list_copy(funcs);
 	MemoryContextSwitchTo(oldcxt);
 	return reason;
 }
@@ -331,6 +334,7 @@ harvest_return(PLpgSQL_function *func, PjHarvest *h)
 	Expr	   *tree = NULL;
 	bool		null_const = false;
 	bool		move = false;
+	MemoryContext oldcxt;
 	PjEnv		env;
 	plllvm_repr repr;
 	int32		srctypmod = -1;
@@ -399,12 +403,19 @@ harvest_return(PLpgSQL_function *func, PjHarvest *h)
 	else
 		return NULL;
 
-	/* K1, decided against the type of the value as exec_cast_value() is */
+	/* decided against the type of the value as exec_cast_value() is */
 	if (h->srctype == func->fn_rettype ||
 		(null_const && !func->fn_retisdomain))
 		return NULL;
 
-	if (!native_repr(h->srctype, &repr))
+	/*
+	 * A domain checks its constraints on a cast, and they change with ALTER
+	 * DOMAIN, which a plan of a mere relabeling does not show
+	 */
+	if (func->fn_retisdomain)
+		return "cast";
+
+	if (!plllvm_expr_type_repr(h->srctype, &repr))
 		return "cast";
 	/* for the tests: a value of another representation than the placeholder's */
 	if (plllvm_debug_inject == PLLLVM_INJECT_PJ_BAD_CAST_REPR)
@@ -418,6 +429,10 @@ harvest_return(PLpgSQL_function *func, PjHarvest *h)
 		StringInfoData facts;
 		const char *why = NULL;
 
+		/* the guard must see the cast even if the code does not */
+		h->cast = cast;
+		h->cast_gen = cast->gen;
+
 		/* a mere relabeling needs no code: the value is the same Datum */
 		if (cast_tree == NULL)
 			return NULL;
@@ -428,9 +443,9 @@ harvest_return(PLpgSQL_function *func, PjHarvest *h)
 									&why))
 			return "cast";
 
+		oldcxt = MemoryContextSwitchTo(h->cxt);
 		h->cast_tree = copyObject(cast_tree);
-		h->cast = cast;
-		h->cast_gen = cast->gen;
+		MemoryContextSwitchTo(oldcxt);
 	}
 
 	return NULL;
@@ -519,28 +534,6 @@ param_emit(plllvm_expr_env *base, plllvm_ir *ir, const Param *p,
 	out->v = v;
 	out->isnull = isnull;
 	out->type = p->paramtype;
-}
-
-static bool
-native_repr(Oid type, plllvm_repr *repr)
-{
-	switch (type)
-	{
-		case BOOLOID:
-			*repr = PLLLVM_I1;
-			return true;
-		case INT4OID:
-			*repr = PLLLVM_I32;
-			return true;
-		case INT8OID:
-			*repr = PLLLVM_I64;
-			return true;
-		case FLOAT8OID:
-			*repr = PLLLVM_F64;
-			return true;
-		default:
-			return false;
-	}
 }
 
 /*

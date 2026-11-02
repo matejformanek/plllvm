@@ -163,6 +163,109 @@ SELECT pjs_f(1), pjs_f(2), pjs_f(3);
 (1 row)
 
 SELECT pj_expect('pjs_f(int)', 'compiled') \gset
+-- an inlined callee replaced or altered there
+CREATE FUNCTION pjs_g(n int) RETURNS int LANGUAGE sql AS 'SELECT $1 + 1';
+CREATE FUNCTION pjs_h(n int) RETURNS int LANGUAGE :pj_lang AS $$
+BEGIN RETURN pjs_g(n); END $$;
+SELECT pjs_h(1), pjs_h(2), pjs_h(3);
+ pjs_h | pjs_h | pjs_h 
+-------+-------+-------
+     2 |     3 |     4
+(1 row)
+
+SELECT pj_expect('pjs_h(int)', 'compiled') \gset
+SELECT dblink_exec('other', 'CREATE OR REPLACE FUNCTION pjs_g(n int) RETURNS int LANGUAGE sql AS ''SELECT $1 + 20''');
+   dblink_exec   
+-----------------
+ CREATE FUNCTION
+(1 row)
+
+SELECT pjs_h(1), pjs_h(2), pjs_h(3);
+ pjs_h | pjs_h | pjs_h 
+-------+-------+-------
+    21 |    22 |    23
+(1 row)
+
+SELECT dblink_exec('other', 'ALTER FUNCTION pjs_g(int) COST 9');
+  dblink_exec   
+----------------
+ ALTER FUNCTION
+(1 row)
+
+SELECT pjs_h(1), pjs_h(2), pjs_h(3);
+ pjs_h | pjs_h | pjs_h 
+-------+-------+-------
+    21 |    22 |    23
+(1 row)
+
+SELECT dblink_exec('other', 'DROP FUNCTION pjs_g(int)');
+  dblink_exec  
+---------------
+ DROP FUNCTION
+(1 row)
+
+SELECT pjs_h(1);  -- fail
+ERROR:  function pjs_g(integer) does not exist
+LINE 1: pjs_g(n)
+        ^
+DETAIL:  There is no function of that name.
+QUERY:  pjs_g(n)
+CONTEXT:  PL/pgSQL function pjs_h(integer) line 2 at RETURN
+SELECT dblink_exec('other', 'CREATE FUNCTION pjs_g(n int) RETURNS int LANGUAGE sql AS ''SELECT $1 + 30''');
+   dblink_exec   
+-----------------
+ CREATE FUNCTION
+(1 row)
+
+SELECT pjs_h(1), pjs_h(2), pjs_h(3);
+ pjs_h | pjs_h | pjs_h 
+-------+-------+-------
+    31 |    32 |    33
+(1 row)
+
+-- PL/pgSQL gave up the simple path when it failed to replan: so do we
+SELECT pj_expect('pjs_h(int)', 'declined:not simple') \gset
+-- a transaction open here, the function warmed before it began, and the
+-- other session committing in the middle of it
+SELECT pjs_f(1), pjs_f(2), pjs_f(3);
+ pjs_f | pjs_f | pjs_f 
+-------+-------+-------
+  1001 |  1002 |  1003
+(1 row)
+
+BEGIN;
+SELECT pjs_f(1);
+ pjs_f 
+-------
+  1001
+(1 row)
+
+SELECT dblink_exec('other', $$CREATE OR REPLACE FUNCTION pjs_f(n int) RETURNS int
+  LANGUAGE $$ || current_setting('pj.lang') || $$ AS 'BEGIN RETURN n + 2000; END'$$);
+   dblink_exec   
+-----------------
+ CREATE FUNCTION
+(1 row)
+
+SELECT pjs_f(2);
+ pjs_f 
+-------
+  1002
+(1 row)
+
+SELECT pjs_f(3);
+ pjs_f 
+-------
+  1003
+(1 row)
+
+COMMIT;
+SELECT pjs_f(4);
+ pjs_f 
+-------
+  2004
+(1 row)
+
 SELECT dblink_disconnect('other');
  dblink_disconnect 
 -------------------

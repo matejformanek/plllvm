@@ -214,8 +214,8 @@ find_op(Oid funcid)
 	return NULL;
 }
 
-static bool
-type_repr(Oid type, plllvm_repr *repr)
+bool
+plllvm_expr_type_repr(Oid type, plllvm_repr *repr)
 {
 	switch (type)
 	{
@@ -380,7 +380,7 @@ check_node(const Expr *e, CheckState *cs, plllvm_repr *repr)
 			{
 				const Const *c = (const Const *) e;
 
-				if (!type_repr(c->consttype, repr))
+				if (!plllvm_expr_type_repr(c->consttype, repr))
 				{
 					cs->why = "type";
 					return false;
@@ -402,7 +402,7 @@ check_node(const Expr *e, CheckState *cs, plllvm_repr *repr)
 					cs->why = "Param kind";
 					return false;
 				}
-				if (!type_repr(p->paramtype, repr))
+				if (!plllvm_expr_type_repr(p->paramtype, repr))
 				{
 					cs->why = "type";
 					return false;
@@ -482,7 +482,7 @@ check_node(const Expr *e, CheckState *cs, plllvm_repr *repr)
 
 				/* transformCaseExpr always adds a default */
 				Assert(c->defresult != NULL);
-				if (!type_repr(c->casetype, repr))
+				if (!plllvm_expr_type_repr(c->casetype, repr))
 				{
 					cs->why = "type";
 					return false;
@@ -518,7 +518,7 @@ check_node(const Expr *e, CheckState *cs, plllvm_repr *repr)
 					cs->why = "node";
 					return false;
 				}
-				if (!type_repr(t->typeId, repr) || *repr != cs->caseval_repr)
+				if (!plllvm_expr_type_repr(t->typeId, repr) || *repr != cs->caseval_repr)
 				{
 					cs->why = "type";
 					return false;
@@ -530,7 +530,7 @@ check_node(const Expr *e, CheckState *cs, plllvm_repr *repr)
 			{
 				const CoalesceExpr *c = (const CoalesceExpr *) e;
 
-				if (!type_repr(c->coalescetype, repr))
+				if (!plllvm_expr_type_repr(c->coalescetype, repr))
 				{
 					cs->why = "type";
 					return false;
@@ -552,7 +552,7 @@ check_node(const Expr *e, CheckState *cs, plllvm_repr *repr)
 					return false;
 				if (op->kind == OP_CALL || op->result != PLLLVM_I1 ||
 					op->nargs != 2 || list_length(n->args) != 2 ||
-					!type_repr(n->opresulttype, repr) || *repr != op->args[0])
+					!plllvm_expr_type_repr(n->opresulttype, repr) || *repr != op->args[0])
 				{
 					cs->why = "function";
 					return false;
@@ -679,7 +679,7 @@ emit_node(plllvm_ir *ir, const Expr *e, EmitState *es, plllvm_value *out)
 			{
 				const Const *c = (const Const *) e;
 
-				if (!type_repr(c->consttype, &out->repr))
+				if (!plllvm_expr_type_repr(c->consttype, &out->repr))
 					elog(ERROR, "unsupported type %u", c->consttype);
 				out->type = c->consttype;
 				if (c->constisnull)
@@ -1056,7 +1056,7 @@ emit_case(plllvm_ir *ir, const CaseExpr *c, EmitState *es, plllvm_value *out)
 	join_edge(&j, r.v, r.isnull, plllvm_ir_current(ir));
 	plllvm_ir_emit(ir, "br label %%%s", ldone);
 
-	if (!type_repr(c->casetype, &repr))
+	if (!plllvm_expr_type_repr(c->casetype, &repr))
 		elog(ERROR, "unsupported type %u", c->casetype);
 	join_end(ir, &j, ldone, repr, out);
 	out->type = c->casetype;
@@ -1095,7 +1095,7 @@ emit_coalesce(plllvm_ir *ir, const CoalesceExpr *c, EmitState *es,
 		}
 	}
 
-	if (!type_repr(c->coalescetype, &repr))
+	if (!plllvm_expr_type_repr(c->coalescetype, &repr))
 		elog(ERROR, "unsupported type %u", c->coalescetype);
 	join_end(ir, &j, ldone, repr, out);
 	out->type = c->coalescetype;

@@ -30,6 +30,16 @@ SELECT s.state, s.last_path FROM plllvm_pj_status('pd_inc(int)') s;
 SELECT s.state, s.last_path FROM plllvm_pj_status('pd_big(int)') s;
 SELECT failures FROM plllvm_pj_stats();
 
+-- an inlined callee replaced: as stock, with and without flushes
+CREATE FUNCTION pd_f2(n int) RETURNS int LANGUAGE sql AS 'SELECT $1';
+CREATE FUNCTION pd_h06(n int) RETURNS int LANGUAGE plpgsql_jit AS $$
+BEGIN RETURN pd_f2(n); END $$;
+SET debug_discard_caches = 1;
+SELECT pd_h06(1), pd_h06(2), pd_h06(3);
+CREATE OR REPLACE FUNCTION pd_f2(n int) RETURNS int LANGUAGE sql AS 'SELECT $1 + 100';
+SELECT pd_h06(1), pd_h06(2), pd_h06(3);
+SET debug_discard_caches = 0;
+
 -- a flush inside the call: compiled code does not look at the plans again
 CREATE FUNCTION pd_flush(n int) RETURNS int LANGUAGE sql AS $$
 SELECT set_config('debug_discard_caches', '1', true)::int + n $$;

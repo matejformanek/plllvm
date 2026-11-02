@@ -68,5 +68,34 @@ SELECT dblink_exec('other', 'COMMIT');
 SELECT pjs_f(1), pjs_f(2), pjs_f(3);
 SELECT pj_expect('pjs_f(int)', 'compiled') \gset
 
+-- an inlined callee replaced or altered there
+CREATE FUNCTION pjs_g(n int) RETURNS int LANGUAGE sql AS 'SELECT $1 + 1';
+CREATE FUNCTION pjs_h(n int) RETURNS int LANGUAGE :pj_lang AS $$
+BEGIN RETURN pjs_g(n); END $$;
+SELECT pjs_h(1), pjs_h(2), pjs_h(3);
+SELECT pj_expect('pjs_h(int)', 'compiled') \gset
+SELECT dblink_exec('other', 'CREATE OR REPLACE FUNCTION pjs_g(n int) RETURNS int LANGUAGE sql AS ''SELECT $1 + 20''');
+SELECT pjs_h(1), pjs_h(2), pjs_h(3);
+SELECT dblink_exec('other', 'ALTER FUNCTION pjs_g(int) COST 9');
+SELECT pjs_h(1), pjs_h(2), pjs_h(3);
+SELECT dblink_exec('other', 'DROP FUNCTION pjs_g(int)');
+SELECT pjs_h(1);  -- fail
+SELECT dblink_exec('other', 'CREATE FUNCTION pjs_g(n int) RETURNS int LANGUAGE sql AS ''SELECT $1 + 30''');
+SELECT pjs_h(1), pjs_h(2), pjs_h(3);
+-- PL/pgSQL gave up the simple path when it failed to replan: so do we
+SELECT pj_expect('pjs_h(int)', 'declined:not simple') \gset
+
+-- a transaction open here, the function warmed before it began, and the
+-- other session committing in the middle of it
+SELECT pjs_f(1), pjs_f(2), pjs_f(3);
+BEGIN;
+SELECT pjs_f(1);
+SELECT dblink_exec('other', $$CREATE OR REPLACE FUNCTION pjs_f(n int) RETURNS int
+  LANGUAGE $$ || current_setting('pj.lang') || $$ AS 'BEGIN RETURN n + 2000; END'$$);
+SELECT pjs_f(2);
+SELECT pjs_f(3);
+COMMIT;
+SELECT pjs_f(4);
+
 SELECT dblink_disconnect('other');
 DROP ROLE regress_pj_sess;

@@ -51,6 +51,8 @@ SELECT s.exprs, s.unplanned, s.variants, s.native, s.boxed, s.restartable,
   FROM plllvm_pj_status('ps_inc(int)') s;
 SELECT kind, translate_ms > 0 AS translate_ms, ir_instructions > 0 AS ir
   FROM plllvm_code_cache() WHERE kind = 'pj';
+-- the entry polls for interrupts
+SELECT plllvm_pj_ir('ps_inc(int)') LIKE '%call void @plllvm_cfi()%' AS polls;
 SELECT count(*) AS expr_modules FROM plllvm_code_cache() WHERE kind <> 'pj' AND translate_ms IS NOT NULL;
 
 -- the IR is there for the variant of the session, and NULL otherwise
@@ -214,6 +216,15 @@ SET plllvm.max_resident_compiles = 2;
 SELECT ps_c2(4);
 SELECT s.state, s.last_path FROM plllvm_pj_status('ps_c2(int)') s;
 SELECT capped, resident, translations, failures FROM plllvm_pj_stats();
+
+-- the code a function gives back does not count against the cap
+SET plllvm.max_resident_compiles = 2;
+DISCARD PLANS;
+SELECT ps_c1(5);
+SELECT ps_c1(6);
+SELECT ps_c1(7);
+SELECT s.state, s.last_path FROM plllvm_pj_status('ps_c1(int)') s;
+SELECT capped FROM plllvm_pj_stats();
 
 -- a session that cannot start LLVM: the translation fails, the function is
 -- declined, and the results are PL/pgSQL's

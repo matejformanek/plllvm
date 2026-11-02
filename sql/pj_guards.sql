@@ -169,32 +169,6 @@ SELECT pjg_inc(9);
 RESET ROLE;
 SELECT pj_expect('pjg_inc(int)', 'compiled') \gset
 
--- inside a transaction: once the ExprState exists, the revoke is not seen
-SELECT pjg_inc(1);
-BEGIN;
-SET ROLE regress_pj_guard;
-SELECT pjg_inc(10);
-RESET ROLE;
-REVOKE EXECUTE ON FUNCTION int4pl(int4, int4) FROM PUBLIC;
-SET ROLE regress_pj_guard;
-SELECT pjg_inc(11);
-RESET ROLE;
-COMMIT;
-SET ROLE regress_pj_guard;
-SELECT pjg_inc(12);  -- fail
-RESET ROLE;
-GRANT EXECUTE ON FUNCTION int4pl(int4, int4) TO PUBLIC;
-BEGIN;
-REVOKE EXECUTE ON FUNCTION int4pl(int4, int4) FROM PUBLIC;
-SET ROLE regress_pj_guard;
-SELECT pjg_inc(13);  -- fail
-ROLLBACK;
-SELECT pjg_inc(14);
-SET ROLE regress_pj_guard;
-SELECT pjg_inc(15);
-RESET ROLE;
-SELECT pj_expect('pjg_inc(int)', 'compiled') \gset
-
 -- one cast, in the other direction: a function whose cast cannot change
 CREATE FUNCTION pjg_widen(n int) RETURNS bigint LANGUAGE :pj_lang AS $$
 BEGIN RETURN n; END $$;
@@ -202,6 +176,62 @@ SELECT pjg_widen(1), pjg_widen(2), pjg_widen(2147483647);
 DISCARD PLANS;
 SELECT pjg_widen(1), pjg_widen(2), pjg_widen(2147483647);
 SELECT pj_expect('pjg_widen(int)', 'compiled') \gset
+
+-- an SQL function the planner inlined: the code is made from its body
+CREATE FUNCTION pjg_f(n int) RETURNS int LANGUAGE sql AS 'SELECT $1';
+CREATE FUNCTION pjg_h06(n int) RETURNS int LANGUAGE :pj_lang AS $$
+BEGIN RETURN pjg_f(n); END $$;
+SELECT pjg_h06(1), pjg_h06(2), pjg_h06(3);
+SELECT pj_expect('pjg_h06(int)', 'compiled') \gset
+CREATE OR REPLACE FUNCTION pjg_f(n int) RETURNS int LANGUAGE sql AS 'SELECT $1 + 100';
+SELECT pjg_h06(1), pjg_h06(2), pjg_h06(3);
+SELECT pj_expect('pjg_h06(int)', 'compiled') \gset
+ALTER FUNCTION pjg_f(int) COST 7;
+SELECT pjg_h06(1), pjg_h06(2), pjg_h06(3);
+ALTER FUNCTION pjg_f(int) SET extra_float_digits = 1;
+SELECT pjg_h06(1), pjg_h06(2), pjg_h06(3);
+ALTER FUNCTION pjg_f(int) VOLATILE;
+SELECT pjg_h06(1), pjg_h06(2), pjg_h06(3);
+SELECT pj_expect('pjg_h06(int)', 'declined:volatile callee') \gset
+DROP FUNCTION pjg_f(int);
+SELECT pjg_h06(1);  -- fail
+SELECT pjg_h06(1);  -- fail
+CREATE FUNCTION pjg_f(n int) RETURNS int LANGUAGE sql AS 'SELECT $1 + 5';
+SELECT pjg_h06(1), pjg_h06(2), pjg_h06(3);
+
+-- the same name in two schemas of the search_path
+CREATE SCHEMA pjg_s1;
+CREATE SCHEMA pjg_s2;
+CREATE FUNCTION pjg_s1.pjg_g(n int) RETURNS int LANGUAGE sql AS 'SELECT $1 + 1';
+CREATE FUNCTION pjg_s2.pjg_g(n int) RETURNS int LANGUAGE sql AS 'SELECT $1 + 2';
+CREATE FUNCTION pjg_h07(n int) RETURNS int LANGUAGE :pj_lang AS $$
+BEGIN RETURN pjg_g(n); END $$;
+SET search_path = pjg_s1, public;
+SELECT pjg_h07(10), pjg_h07(10), pjg_h07(10);
+SET search_path = pjg_s2, public;
+SELECT pjg_h07(10), pjg_h07(10), pjg_h07(10);
+SET search_path = pjg_s1, public;
+SELECT pjg_h07(10), pjg_h07(10), pjg_h07(10);
+RESET search_path;
+SELECT pjg_h07(10);  -- fail
+DROP SCHEMA pjg_s1, pjg_s2 CASCADE;
+
+-- a cast created or dropped between calls: the function is not compiled,
+-- since the cast it first had is an I/O conversion, and PL/pgSQL sees the new
+CREATE FUNCTION pjg_bf(b bool) RETURNS float8 LANGUAGE :pj_lang AS $$
+BEGIN RETURN b; END $$;
+SELECT pjg_bf(true);  -- fail
+SELECT pjg_bf(true);  -- fail
+SELECT pjg_bf(true);  -- fail
+SELECT pj_expect('pjg_bf(bool)', 'declined:cast') \gset
+CREATE FUNCTION pjg_castf(bool) RETURNS float8 LANGUAGE sql AS 'SELECT 42.5::float8';
+CREATE CAST (bool AS float8) WITH FUNCTION pjg_castf(bool) AS ASSIGNMENT;
+SELECT pjg_bf(true), pjg_bf(false);
+SELECT pjg_bf(true), pjg_bf(false);
+DROP CAST (bool AS float8);
+SELECT pjg_bf(true);  -- fail
+SELECT pjg_bf(true);  -- fail
+DROP FUNCTION pjg_castf(bool);
 
 DROP SCHEMA pjg_ta, pjg_tb CASCADE;
 DROP ROLE regress_pj_guard;

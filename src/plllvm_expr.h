@@ -85,5 +85,6 @@ extern void plllvm_expr_emit_cast(plllvm_ir *ir,
 								  plllvm_value *out);
 extern const char *plllvm_expr_box(plllvm_ir *ir, const plllvm_value *val);
 extern const char *plllvm_repr_type(plllvm_repr repr);
+extern bool plllvm_expr_type_repr(Oid type, plllvm_repr *repr);
 
 #endif							/* PLLLVM_EXPR_H */
