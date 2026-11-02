@@ -1,8 +1,7 @@
 --
 -- pj_language: functions in LANGUAGE plpgsql_jit
 --
--- plpgsql_jit has PL/pgSQL's syntax, so everything here must give
--- PL/pgSQL's output.  PJ_LANG=plpgsql_jit makes make installcheck-pj run it
+-- The output must be PL/pgSQL's.  PJ_LANG=plpgsql_jit makes make installcheck-pj run it
 -- in that language; without it the functions are plpgsql, and that run made
 -- the expected file.  pj_language_1.out is for plpgsql_jit being untrusted
 -- (a role without USAGE cannot create a function).  A function is called
