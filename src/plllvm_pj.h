@@ -86,10 +86,9 @@ typedef struct PjPos
 	const char *text;			/* err_text, or NULL */
 } PjPos;
 
-/* positions of every function: none, the RETURN, the cast of its value */
+/* positions of every function: none, the RETURN */
 #define PJ_POS_NONE		0
 #define PJ_POS_RETURN	1
-#define PJ_POS_CAST		2
 
 typedef enum PjH1
 {
@@ -169,7 +168,7 @@ typedef struct PjHarvest
 									 * ... */
 	Oid			key_user;		/* ... for this user ... */
 	uint64		key_epoch;		/* ... at this state of the catalogs */
-	PjPos		pos[3];
+	PjPos		pos[2];
 	PjVariant  *variants;
 } PjHarvest;
 

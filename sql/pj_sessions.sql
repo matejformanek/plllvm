@@ -97,5 +97,46 @@ SELECT pjs_f(3);
 COMMIT;
 SELECT pjs_f(4);
 
+-- another session's REVOKE, delivered by a lock in the open transaction,
+-- the cast of the function not reached before
+CREATE ROLE regress_pj_rm;
+CREATE ROLE regress_pj_rg;
+CREATE TABLE pjs_lk(a int);
+GRANT SELECT ON pjs_lk TO regress_pj_rm;
+CREATE FUNCTION pjs_xe(n int) RETURNS bigint LANGUAGE :pj_lang AS $$
+BEGIN RETURN CASE WHEN n > 0 THEN n END; END $$;
+SELECT pjs_xe(1), pjs_xe(2), pjs_xe(3);
+BEGIN;
+SET ROLE regress_pj_rm;
+SELECT pjs_xe(-1) IS NULL;
+RESET ROLE;
+SELECT dblink_exec('other', 'REVOKE EXECUTE ON FUNCTION int8(int4) FROM PUBLIC');
+LOCK TABLE pjs_lk IN ACCESS SHARE MODE;
+SET ROLE regress_pj_rm;
+SELECT pjs_xe(1);  -- fail
+ROLLBACK;
+SELECT dblink_exec('other', 'GRANT EXECUTE ON FUNCTION int8(int4) TO PUBLIC');
+
+-- the same through a group, in a new session whose caches are empty: the
+-- REVOKE is delivered while the check reads the membership, after the check
+-- has begun, and the key must not take that epoch
+REVOKE EXECUTE ON FUNCTION int8(int4) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION int8(int4) TO regress_pj_rg;
+GRANT regress_pj_rg TO regress_pj_rm;
+\c
+SELECT dblink_connect('other', :'conn');
+SELECT pjs_xe(1), pjs_xe(2), pjs_xe(3);
+BEGIN;
+SET ROLE regress_pj_rm;
+SELECT dblink_exec('other', 'REVOKE EXECUTE ON FUNCTION int8(int4) FROM regress_pj_rg');
+SELECT pjs_xe(-1) IS NULL;
+LOCK TABLE pjs_lk IN ACCESS SHARE MODE;
+SELECT pjs_xe(1);  -- fail
+ROLLBACK;
+RESET ROLE;
+SELECT dblink_exec('other', 'GRANT EXECUTE ON FUNCTION int8(int4) TO PUBLIC');
+DROP OWNED BY regress_pj_rm, regress_pj_rg;
+DROP ROLE regress_pj_rm, regress_pj_rg;
+
 SELECT dblink_disconnect('other');
 DROP ROLE regress_pj_sess;

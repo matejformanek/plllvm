@@ -262,8 +262,6 @@ plllvm_pj_harvest(PLpgSQL_function *func, const PjScope *scope, PjHarvest *h)
 		h->pos[PJ_POS_RETURN].lineno = scope->ret->lineno;
 		h->pos[PJ_POS_RETURN].stmt = plllvm_pj_stmt_typename(scope->ret);
 	}
-	h->pos[PJ_POS_CAST].text =
-		gettext_noop("while casting return value to function's return type");
 
 	foreach_ptr(PjExpr, pe, scope->exprs)
 	{
@@ -414,6 +412,12 @@ harvest_return(PLpgSQL_function *func, PjHarvest *h)
 		/* a mere relabeling needs no code: the value is the same Datum */
 		if (cast_tree == NULL)
 			return NULL;
+
+		/* only a cast that cannot fail: a failure is for PL/pgSQL's own code */
+		if (!((h->srctype == INT4OID && (func->fn_rettype == INT8OID ||
+										 func->fn_rettype == FLOAT8OID)) ||
+			  (h->srctype == INT8OID && func->fn_rettype == FLOAT8OID)))
+			return "cast";
 
 		initStringInfo(&key);
 		initStringInfo(&facts);
@@ -844,7 +848,6 @@ emit_source(plllvm_ir *ir, PjEnv *env, PjHarvest *h, const Expr *tree,
 	{
 		plllvm_value src = *val;
 
-		plllvm_ir_emit(ir, "store i32 %d, ptr %%ctx", PJ_POS_CAST);
 		plllvm_expr_emit_cast(ir, h->cast_tree, &env->base, &src, val);
 	}
 }

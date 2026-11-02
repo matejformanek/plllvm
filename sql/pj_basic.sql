@@ -59,7 +59,8 @@ SELECT pj_expect('pb_big(int)', 'compiled') \gset
 SELECT pj_expect('pb_flt(double precision,double precision)', 'compiled') \gset
 SELECT pj_expect('pb_cmp(bigint,int)', 'compiled') \gset
 SELECT pj_expect('pb_i2f(int)', 'compiled') \gset
-SELECT pj_expect('pb_narrow(bigint)', 'compiled') \gset
+-- a cast that can fail is PL/pgSQL's
+SELECT pj_expect('pb_narrow(bigint)', 'declined:cast') \gset
 
 -- a bare variable or constant, of any type passed by value: the Datum moves
 CREATE FUNCTION pb_i2(x int2) RETURNS int2 LANGUAGE :pj_lang AS $$

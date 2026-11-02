@@ -51,18 +51,14 @@ SELECT pj_expect('pe_big(bigint,bigint)', 'compiled') \gset
 SELECT pj_expect('pe_flt(double precision,double precision)', 'compiled') \gset
 SELECT pj_expect('pe_sqrt(double precision)', 'compiled') \gset
 
--- the cast of the value: its own position, as in PL/pgSQL
+-- a cast that can fail is PL/pgSQL's, with its CONTEXT
 CREATE FUNCTION pe_narrow(n bigint) RETURNS int LANGUAGE :pj_lang AS $$
 BEGIN RETURN n * 100000; END $$;
 SELECT pe_narrow(1);
 SELECT pe_narrow(2);
 SELECT pe_narrow(100000);  -- fail
 SELECT pe_narrow(100000);  -- fail
--- a failed cast resets the plans, as PL/pgSQL rebuilds its cast: one call to plan again
-SELECT pe_narrow(3);
-SELECT pe_narrow(4);
-SELECT pe_narrow(5);
-SELECT pj_expect('pe_narrow(bigint)', 'compiled') \gset
+SELECT pj_expect('pe_narrow(bigint)', 'declined:cast') \gset
 
 -- errors that PL/pgSQL raises: the function is not compiled
 CREATE FUNCTION pe_i2(n int2) RETURNS int2 LANGUAGE :pj_lang AS $$

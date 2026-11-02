@@ -717,12 +717,10 @@ run(PLpgSQL_function *func, FunctionCallInfo fcinfo, PjEntry *e, PjVariant *v)
 
 		/*
 		 * Leave PL/pgSQL's expressions as an interpreted failure would: the
-		 * next evaluation takes the path that checks EXECUTE.  A failed cast
-		 * is PL/pgSQL's own cache, which only a plan reset reaches.
+		 * next evaluation takes the path that checks EXECUTE.  The cast of
+		 * the code cannot fail, so PL/pgSQL's cast state needs no mark.
 		 */
 		pj_mark_busy(e);
-		if (ctx.pos == PJ_POS_CAST)
-			ResetPlanCache();
 		activation_end(func, e, entry_cxt);
 		PG_RE_THROW();
 	}
@@ -835,8 +833,10 @@ execute_allowed(PjEntry *e)
 	PjHarvest  *h = e->harvest;
 	Oid			user = GetUserId();
 	LocalTransactionId lxid = MyProc->vxid.lxid;
+	uint64		epoch = exec_epoch; /* before the checks, which may deliver
+									 * one */
 
-	if (h->key_lxid == lxid && h->key_user == user && h->key_epoch == exec_epoch)
+	if (h->key_lxid == lxid && h->key_user == user && h->key_epoch == epoch)
 		return true;
 
 	foreach_oid(funcid, h->funcids)
@@ -850,7 +850,7 @@ execute_allowed(PjEntry *e)
 
 	h->key_lxid = lxid;
 	h->key_user = user;
-	h->key_epoch = exec_epoch;
+	h->key_epoch = epoch;
 	return true;
 }
 
