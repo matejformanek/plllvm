@@ -49,6 +49,8 @@ typedef enum plllvm_jit_kind
 	PLLLVM_JIT_FUNCTION,		/* a PL/LLVM function, i64 (ptr fcinfo) */
 	PLLLVM_JIT_EXPR,			/* a PL/pgSQL expression, i64 (ptr state, ptr
 								 * econtext, ptr isnull) */
+	PLLLVM_JIT_PJ,				/* a plpgsql_jit function, i64 (ptr fcinfo,
+								 * ptr ctx) */
 } plllvm_jit_kind;
 
 /*
@@ -63,8 +65,9 @@ typedef struct plllvm_jit_module
 	TransactionId owner_xmin;	/* pg_proc row compiled, set by the caller */
 	ItemPointerData owner_tid;	/* likewise */
 	uint64		gen;			/* backend-wide compile number */
-	char		symbol[NAMEDATALEN];	/* plllvm_<owner_oid>_<gen>, or
-										 * plllvm_expr_<gen> */
+	char		symbol[NAMEDATALEN];	/* plllvm_<owner_oid>_<gen>,
+										 * plllvm_expr_<gen> or
+										 * plllvm_pj_<gen> */
 	int			opt_level;
 	int			ir_instructions;	/* of the user IR, before linking */
 	int			helpers_linked; /* host helper definitions pulled in */
@@ -100,6 +103,9 @@ typedef struct plllvm_jit_result
 	int			checks_inserted;	/* plllvm.auto_checks calls added */
 	bool		needs_frame;
 	bool		uses_spi;
+	bool		capped;			/* true, when a PJ compile was refused at
+								 * plllvm.max_resident_compiles; no error is
+								 * set */
 } plllvm_jit_result;
 
 typedef struct plllvm_jit_session_info
@@ -114,6 +120,10 @@ typedef struct plllvm_jit_session_info
 	int64		compile_failures;
 	int64		retired;		/* compiles released, resident ones are
 								 * compiles - retired */
+	int64		pj_compiles;	/* the same for plpgsql_jit functions */
+	int64		pj_compile_failures;
+	int64		pj_retired;
+	int64		pj_capped;		/* compiles refused at the cap */
 } plllvm_jit_session_info;
 
 /* plllvm_jit.c */
@@ -126,6 +136,9 @@ extern bool plllvm_jit_compile(Oid owner_oid, Oid collation,
 							   plllvm_jit_result *result);
 extern bool plllvm_jit_compile_expr(const char *ir, int opt_level,
 									plllvm_jit_result *result);
+extern bool plllvm_jit_compile_pj(const char *ir, int opt_level,
+								  plllvm_jit_result *result);
+extern int64 plllvm_jit_pj_resident(void);
 extern bool plllvm_jit_check(const char *ir, const struct plllvm_path *path,
 							 int nargs, plllvm_jit_result *result);
 extern void plllvm_jit_release(plllvm_jit_module *mod);

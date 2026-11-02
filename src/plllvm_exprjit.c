@@ -85,7 +85,6 @@ static HTAB *programs = NULL;
 
 static ExprStateEvalFunc program_build(const Expr *expr, plllvm_expr_env *env,
 									   bool *keep);
-static const char *datum_box(plllvm_ir *ir, const plllvm_value *val);
 
 /*
  * Give a simple-expression ExprState compiled code, if it can have it
@@ -255,7 +254,7 @@ program_build(const Expr *expr, plllvm_expr_env *env, bool *keep)
 	plllvm_ir_block(ir, plllvm_ir_label(ir));
 
 	plllvm_expr_emit(ir, expr, env, &val);
-	datum = datum_box(ir, &val);
+	datum = plllvm_expr_box(ir, &val);
 
 	if (plllvm_expr_eager)
 	{
@@ -293,42 +292,4 @@ program_build(const Expr *expr, plllvm_expr_env *env, bool *keep)
 	MemoryContextDelete(cxt);
 
 	return addr;
-}
-
-/*
- * The value as a Datum, 0 when it is NULL
- */
-static const char *
-datum_box(plllvm_ir *ir, const plllvm_value *val)
-{
-	const char *datum;
-	const char *result = plllvm_ir_tmp(ir);
-
-	switch (val->repr)
-	{
-		case PLLLVM_I1:
-			datum = plllvm_ir_tmp(ir);
-			plllvm_ir_emit(ir, "%s = zext i1 %s to i64", datum, val->v);
-			break;
-		case PLLLVM_I32:
-			/* Int32GetDatum sign extends */
-			datum = plllvm_ir_tmp(ir);
-			plllvm_ir_emit(ir, "%s = sext i32 %s to i64", datum, val->v);
-			break;
-		case PLLLVM_I64:
-			datum = val->v;
-			break;
-		case PLLLVM_F64:
-			datum = plllvm_ir_tmp(ir);
-			plllvm_ir_emit(ir, "%s = bitcast double %s to i64", datum, val->v);
-			break;
-		default:
-			elog(ERROR, "unrecognized plllvm_repr: %d", (int) val->repr);
-			datum = NULL;		/* keep compiler quiet */
-	}
-
-	plllvm_ir_emit(ir, "%s = select i1 %s, i64 0, i64 %s", result, val->isnull,
-				   datum);
-
-	return result;
 }

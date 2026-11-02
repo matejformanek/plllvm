@@ -131,8 +131,9 @@ plllvm_code_cache(PG_FUNCTION_ARGS)
 		values[15] = BoolGetDatum(mod->released);
 		values[16] = CStringGetTextDatum(psprintf("%p", mod->addr));
 		values[17] = BoolGetDatum(mod->needs_frame);
-		values[18] = CStringGetTextDatum(mod->kind == PLLLVM_JIT_EXPR ?
-										 "expr" : "function");
+		values[18] = CStringGetTextDatum(mod->kind == PLLLVM_JIT_EXPR ? "expr" :
+										 mod->kind == PLLLVM_JIT_PJ ? "pj" :
+										 "function");
 
 		tuplestore_putvalues(rsinfo->setResult, rsinfo->setDesc, values, nulls);
 	}

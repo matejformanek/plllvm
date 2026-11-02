@@ -13,7 +13,9 @@
  * 1) plllvm_expr_check() says whether the whole tree can be compiled, and
  *    plllvm_expr_emit() emits it into the current block of the caller's
  *    function.  The caller supplies the Params through the env callbacks,
- *    and turns the value into a Datum.
+ *    and turns the value into a Datum (plllvm_expr_box()).
+ *    plllvm_expr_check_cast() and plllvm_expr_emit_cast() do the same for a
+ *    cast tree, whose CaseTestExpr reads the value being cast.
  *
  * 2) The emitted code evaluates as the interpreter does: the arguments
  *    first, left to right, then the strict NULL test (execExpr.c:2752-2801).
@@ -70,6 +72,18 @@ struct plllvm_expr_env
 extern bool plllvm_expr_check(const Expr *e, plllvm_expr_env *env, StringInfo hash_key,
 							  StringInfo facts, const char **why);
 extern void plllvm_expr_emit(plllvm_ir *ir, const Expr *e, plllvm_expr_env *env, plllvm_value *out);
+extern bool plllvm_expr_check_cast(const Expr *e,
+								   plllvm_expr_env *env,
+								   plllvm_repr caseval_repr,
+								   StringInfo hash_key,
+								   StringInfo facts,
+								   const char **why);
+extern void plllvm_expr_emit_cast(plllvm_ir *ir,
+								  const Expr *e,
+								  plllvm_expr_env *env,
+								  const plllvm_value *caseval,
+								  plllvm_value *out);
+extern const char *plllvm_expr_box(plllvm_ir *ir, const plllvm_value *val);
 extern const char *plllvm_repr_type(plllvm_repr repr);
 
 #endif							/* PLLLVM_EXPR_H */
