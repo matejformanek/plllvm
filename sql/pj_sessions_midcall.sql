@@ -1,9 +1,4 @@
---
--- pj_sessions_midcall: what changes during a compiled call
---
--- Expected from plllvm, once: the differences from PL/pgSQL are the ones the
--- documentation states, each row says what PL/pgSQL does.
---
+-- pj_sessions_midcall: what changes during a compiled call, expected from plllvm
 \set VERBOSITY terse
 CREATE EXTENSION dblink;
 SELECT format('host=%s port=%s dbname=%s user=%s',

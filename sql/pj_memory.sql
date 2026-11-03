@@ -119,3 +119,32 @@ SELECT pm_total() - :before < 1048576 AS flat;
 COMMIT;
 SELECT pm_peak() = :p1 AS peak_equal;
 SELECT pj_expect('pm_fib(int)', 'compiled') \gset
+
+-- a state built again for each change of user keeps nothing: a hashed IN
+-- list allocates its table when it is first evaluated
+CREATE ROLE regress_pj_ma;
+CREATE FUNCTION pm_ma(n int) RETURNS bool LANGUAGE :pj_lang STABLE AS $$
+BEGIN
+  RETURN n IN (1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18,
+               19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34,
+               35, 36, 37, 38, 39, 40);
+END $$;
+CREATE FUNCTION pm_ma_sd(n int) RETURNS bool LANGUAGE plpgsql STABLE SECURITY DEFINER AS $$
+BEGIN RETURN pm_ma(n); END $$;
+ALTER FUNCTION pm_ma_sd(int) OWNER TO regress_pj_ma;
+CREATE FUNCTION pm_ma_loop(k int) RETURNS int LANGUAGE plpgsql AS $$
+DECLARE c int := 0;
+BEGIN
+  FOR i IN 1..k LOOP
+    IF pm_ma(i) THEN c := c + 1; END IF;
+    IF pm_ma_sd(i) THEN c := c + 1; END IF;
+  END LOOP;
+  RETURN c;
+END $$;
+SELECT pm_ma_loop(100), pm_ma_loop(100);
+SELECT pm_total() AS before \gset
+SELECT pm_ma_loop(20000);
+SELECT pm_total() - :before < 1048576 AS flat;
+SELECT pj_expect('pm_ma(int)', 'compiled') \gset
+DROP OWNED BY regress_pj_ma;
+DROP ROLE regress_pj_ma;

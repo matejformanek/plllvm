@@ -1,11 +1,4 @@
---
--- pj_hazard: tests that crash the server when their fix regresses
--- (installcheck-hazard, on a throwaway cluster only)
---
--- Things that change under a recursion of compiled calls: the plans, the
--- function itself, the options of the next translation.  Values are those of
--- PL/pgSQL; expected from plllvm because the file needs the language.
---
+-- pj_hazard: changes under a recursion of compiled calls, which crash the server if their fix regresses
 SET plllvm.regress_test_mode = on;
 CREATE EXTENSION dblink;
 SELECT format('host=%s port=%s dbname=%s user=%s',

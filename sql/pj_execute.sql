@@ -376,6 +376,34 @@ GRANT EXECUTE ON FUNCTION hashint4(int4) TO PUBLIC;
 SELECT pxs_in(1), pxs_in(20);
 SELECT pj_expect('pxs_in(int)', 'compiled') \gset
 
+-- a function dropped by a callee in the middle of a call, not reached by this
+-- call: nothing is denied, and the call that reaches it fails as before
+CREATE FUNCTION pxd_h(n int) RETURNS int LANGUAGE sql STABLE AS 'SELECT n + 1 FROM generate_series(1, 1)';
+CREATE FUNCTION pxd_v(f int) RETURNS int LANGUAGE plpgsql SECURITY DEFINER AS $$
+BEGIN IF f > 0 THEN EXECUTE 'DROP FUNCTION pxd_h(int)'; END IF; RETURN 0; END $$;
+CREATE FUNCTION pxd_s(f int) RETURNS int LANGUAGE plpgsql STABLE AS $$ BEGIN RETURN pxd_v(f); END $$;
+CREATE FUNCTION pxd_c(n int, f int) RETURNS int LANGUAGE :pj_lang AS $$
+DECLARE i int;
+BEGIN
+  i := pxd_s(f);
+  IF n > 100 THEN RETURN pxd_h(n); END IF;
+  RETURN n;
+END $$;
+SET ROLE regress_pj_r1;
+SELECT pxd_c(200, 0), pxd_c(1, 0), pxd_c(200, 0), pxd_c(1, 0), pxd_c(200, 0);
+RESET ROLE;
+SELECT pj_expect('pxd_c(int,int)', 'compiled') \gset
+SET ROLE regress_pj_r1;
+BEGIN;
+SELECT pxd_c(1, 1) AS pxd_unreached;
+ROLLBACK;
+BEGIN;
+SAVEPOINT s;
+SELECT pxd_c(200, 1) AS pxd_reached;  -- fail
+ROLLBACK TO s;
+ROLLBACK;
+RESET ROLE;
+
 -- the I/O functions of a conversion are not checked by PL/pgSQL, so a role
 -- without them runs the call too
 CREATE FUNCTION pxs_io(n int) RETURNS int LANGUAGE :pj_lang AS $$

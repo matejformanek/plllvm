@@ -178,6 +178,7 @@ static void set_found(PjEmit *em, bool value);
 static void set_pos(PjEmit *em, int index);
 static void stmt_enter(PjEmit *em, PLpgSQL_stmt *stmt);
 static void poll(PjEmit *em);
+static void poll_if_boxed(PjEmit *em, int boxed0);
 static void begin_block(PjEmit *em, const char *label);
 static void branch(PjEmit *em, const char *label);
 static void branch_if(PjEmit *em, const char *cond, const char *yes,
@@ -339,7 +340,8 @@ walk_stmt(PjScopeWalk *w, PLpgSQL_stmt *stmt)
 
 				if (ex->cond != NULL)
 					scope_expr(w, ex->cond, ex->cond, BOOLOID, -1);
-				if (frame_find(w->frames, ex->label, !ex->is_exit, NULL) == NULL)
+				if (frame_find(w->frames, ex->label, !ex->is_exit,
+							   NULL) == NULL)
 					return "label";
 				return NULL;
 			}
@@ -355,7 +357,8 @@ walk_stmt(PjScopeWalk *w, PLpgSQL_stmt *stmt)
 					if (var == NULL)
 						return "datum:record";
 					scope_expr(w, ret, NULL, func->fn_rettype, -1);
-					((PjExpr *) llast(w->scope->exprs))->retvarno = ret->retvarno;
+					((PjExpr *) llast(w->scope->exprs))->retvarno =
+						ret->retvarno;
 				}
 				else if (ret->expr != NULL)
 					scope_expr(w, ret->expr, ret->expr, func->fn_rettype, -1);
@@ -700,7 +703,8 @@ harvest_expr(PLpgSQL_function *func, PjHarvest *h, PjEnv *env, PjExpr *pe,
 		initStringInfo(&facts);
 		pe->path = plllvm_expr_check(tree, &env->base, &key, &facts, &why) ?
 			PJ_PATH_NATIVE : PJ_PATH_BOXED;
-		if (pe->path == PJ_PATH_BOXED && contain_volatile_functions((Node *) tree))
+		if (pe->path == PJ_PATH_BOXED &&
+			contain_volatile_functions((Node *) tree))
 			return "volatile callee";
 
 		/* a tree for the executor reads the datums by number */
@@ -761,7 +765,7 @@ harvest_expr(PLpgSQL_function *func, PjHarvest *h, PjEnv *env, PjExpr *pe,
 
 	if (!plllvm_expr_type_repr(pe->type, &repr))
 		return "cast";
-	/* for the tests: a value of another representation than the placeholder's */
+	/* for the tests: a value of another representation than the placeholder */
 	if (plllvm_debug_inject == PLLLVM_INJECT_PJ_BAD_CAST_REPR)
 		repr = repr == PLLLVM_F64 ? PLLLVM_I64 : PLLLVM_F64;
 
@@ -773,7 +777,8 @@ harvest_expr(PLpgSQL_function *func, PjHarvest *h, PjEnv *env, PjExpr *pe,
 
 	initStringInfo(&key);
 	initStringInfo(&facts);
-	if (!plllvm_expr_check_cast(cast_tree, &env->base, repr, &key, &facts, &why))
+	if (!plllvm_expr_check_cast(cast_tree, &env->base, repr, &key, &facts,
+								&why))
 		return "cast";
 
 	oldcxt = MemoryContextSwitchTo(h->cxt);
@@ -1367,9 +1372,7 @@ emit_if(PjEmit *em, PLpgSQL_stmt_if *stmt)
 		branch(em, done);
 	begin_block(em, done);
 
-	/* some path here may have run the executor */
-	if (em->nboxed != boxed0)
-		em->poll_pending = true;
+	poll_if_boxed(em, boxed0);
 }
 
 /*
@@ -1409,8 +1412,7 @@ emit_loop(PjEmit *em, PLpgSQL_stmt *stmt)
 
 	frame_pop(&em->frames);
 	begin_block(em, end);
-	if (em->nboxed != boxed0)
-		em->poll_pending = true;
+	poll_if_boxed(em, boxed0);
 }
 
 /*
@@ -1576,8 +1578,7 @@ emit_fori(PjEmit *em, PLpgSQL_stmt_fori *stmt)
 	set_found(em, true);
 	branch(em, done);
 	begin_block(em, done);
-	if (em->nboxed != boxed0)
-		em->poll_pending = true;
+	poll_if_boxed(em, boxed0);
 }
 
 static void
@@ -1752,7 +1753,8 @@ boxed_value(PjEmit *em, int index, const PjExpr *pe, const char **datum,
 	{
 		const char *params = plllvm_ir_tmp(ir);
 
-		plllvm_ir_emit(ir, "%s = call ptr @plllvm_pj_params(ptr %%ctx)", params);
+		plllvm_ir_emit(ir, "%s = call ptr @plllvm_pj_params(ptr %%ctx)",
+					   params);
 		while ((dno = bms_next_member(pe->params, dno)) >= 0)
 		{
 			const char *value = plllvm_ir_tmp(ir);
@@ -1885,6 +1887,14 @@ static void
 poll(PjEmit *em)
 {
 	plllvm_ir_emit(em->ir, "call void @plllvm_cfi()");
+}
+
+/* some path to here may have run the executor since boxed0 */
+static void
+poll_if_boxed(PjEmit *em, int boxed0)
+{
+	if (em->nboxed != boxed0)
+		em->poll_pending = true;
 }
 
 static void

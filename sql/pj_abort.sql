@@ -154,3 +154,36 @@ GRANT EXECUTE ON FUNCTION int4div(int4, int4) TO PUBLIC;
 SELECT pba_h(200, 2), pba_h(1, 2);
 SELECT pj_expect('pba_h(int,int)', 'compiled') \gset
 DROP ROLE regress_pj_ab;
+
+-- a hash function that raises while the table of an IN list is built: the
+-- half-built state is not used again
+\set VERBOSITY default
+CREATE FUNCTION pba_eq(a int, b int) RETURNS bool LANGUAGE sql IMMUTABLE AS 'SELECT a = b';
+CREATE FUNCTION pba_hash(a int) RETURNS int LANGUAGE plpgsql IMMUTABLE AS $$
+BEGIN
+  IF current_setting('pba.fail', true) = 'on' AND a = 5 THEN
+    RAISE EXCEPTION 'hash failed';
+  END IF;
+  RETURN a;
+END $$;
+CREATE OPERATOR === (LEFTARG = int, RIGHTARG = int, FUNCTION = pba_eq, COMMUTATOR = ===, HASHES);
+CREATE OPERATOR FAMILY pba_fam USING hash;
+CREATE OPERATOR CLASS pba_cls FOR TYPE int USING hash FAMILY pba_fam AS
+  OPERATOR 1 ===, FUNCTION 1 pba_hash(int);
+CREATE FUNCTION pba_fh(n int) RETURNS bool LANGUAGE :pj_lang STABLE AS $$
+BEGIN RETURN n === ANY('{1,2,3,4,5,6,7,8,9,10}'::int[]); END $$;
+SELECT pba_fh(1), pba_fh(7), pba_fh(77);
+SELECT set_config('pba.fail', 'on', false);
+BEGIN;
+SAVEPOINT s;
+SELECT pba_fh(7) AS hash_fails;  -- fail
+ROLLBACK TO s;
+SELECT set_config('pba.fail', 'off', true);
+SELECT pba_fh(7) AS after_failure;
+SELECT pba_fh(77);
+COMMIT;
+SELECT pj_expect('pba_fh(int)', 'compiled') \gset
+RESET pba.fail;
+DROP FUNCTION pba_fh(int);
+DROP OPERATOR FAMILY pba_fam USING hash CASCADE;
+DROP OPERATOR === (int, int);

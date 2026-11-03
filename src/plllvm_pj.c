@@ -225,11 +225,7 @@ fall_back(FunctionCallInfo fcinfo, PjEntry *e, const char *path)
 		e->calls++;
 		e->last_path = path;
 
-		/*
-		 * Compiled frames leave PL/pgSQL's expressions as they were; the
-		 * interpreter would find them busy, as they are while a frame of its
-		 * own evaluates them.
-		 */
+		/* the interpreter finds the expressions busy, as under its own frame */
 		if (e->frames > 0)
 			pj_mark_busy(e);
 	}
@@ -723,10 +719,7 @@ run_compiled(PLpgSQL_function *func, FunctionCallInfo fcinfo, PjEntry *e)
 	return run(func, fcinfo, e, v);
 }
 
-/*
- * A variant that waits for the expressions of the harvest to be planned: once
- * none is left, the function is translated again from the plans
- */
+/* a variant waiting for plans: translate again once none is missing */
 static Datum
 wait_step(PLpgSQL_function *func, FunctionCallInfo fcinfo, PjEntry *e)
 {
@@ -929,10 +922,17 @@ execute_allowed(PjEntry *e)
 bool
 plllvm_pj_execute_check(PjHarvest *h, Oid user, uint64 epoch, Oid *denied)
 {
+	/*
+	 * A function dropped since the plan was made is not denied: the call that
+	 * reaches it fails as PL/pgSQL's does, and one that does not, runs.
+	 */
 	foreach_oid(funcid, h->funcids)
 	{
-		if (object_aclcheck(ProcedureRelationId, funcid, user,
-							ACL_EXECUTE) != ACLCHECK_OK)
+		bool		missing = false;
+
+		if (object_aclcheck_ext(ProcedureRelationId, funcid, user,
+								ACL_EXECUTE, &missing) != ACLCHECK_OK &&
+			!missing)
 		{
 			if (denied != NULL)
 				*denied = funcid;
@@ -940,7 +940,10 @@ plllvm_pj_execute_check(PjHarvest *h, Oid user, uint64 epoch, Oid *denied)
 		}
 	}
 	foreach_oid(funcid, h->funcids)
-		InvokeFunctionExecuteHook(funcid);
+	{
+		if (SearchSysCacheExists1(PROCOID, ObjectIdGetDatum(funcid)))
+			InvokeFunctionExecuteHook(funcid);
+	}
 
 	h->key_lxid = MyProc->vxid.lxid;
 	h->key_user = user;
@@ -1073,7 +1076,7 @@ plllvm_pj_infos(Oid fn, plllvm_pj_info **infos)
 			info->unplanned = h->nunplanned;
 			for (PjVariant *w = h->variants; w != NULL; w = w->next)
 				info->variants++;
-			if (v != NULL && !v->failed)
+			if (v != NULL && !v->failed && !v->waiting)
 			{
 				info->has_variant = true;
 				info->native = v->native;
@@ -1106,7 +1109,7 @@ plllvm_pj_ir_text(Oid fn)
 		if (e->stale || e->fn_oid != fn || e->harvest == NULL)
 			continue;
 		v = variant_find(e->harvest);
-		if (v != NULL && !v->failed)
+		if (v != NULL && !v->failed && !v->waiting)
 		{
 			hash_seq_term(&seq);
 			return pstrdup(v->ir);

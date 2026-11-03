@@ -19,16 +19,11 @@
  *    of a SQL expression.
  *
  * 2) The state of one activation level of a variant lives in a PjLevel: an
- *    ExprContext, the parameters and an ExprState per expression.  A level
- *    is never shared: the frame of a recursive call has the next one, so
- *    nothing is read after the call that overwrote it.  All of it hangs
- *    under one EState of the transaction, as PL/pgSQL's own, and goes with
- *    it; levels are kept between calls, and an ERROR deletes the one it
+ *    ExprContext, the parameters and an ExprState per expression.  Frames of
+ *    a recursion have a level each, so nothing is read after the call that
+ *    overwrote it.  Levels are kept between calls and hang under one EState
+ *    of the transaction, as PL/pgSQL's own; an ERROR deletes the one it
  *    crosses, as PL/pgSQL does not reuse a tree that failed.
- *
- * 3) A level and the code of its variant go together (plllvm_pj_levels_
- *    release()): an ExprState points into the harvest's tree copies, and a
- *    stale one must never be found again.
  *
  */
 #include "postgres.h"
@@ -50,8 +45,8 @@ static dlist_head live_levels = DLIST_STATIC_INIT(live_levels);
 static EState *xact_estate = NULL;
 
 static PjLevel *level_get(PjCtx *ctx);
-static PjLevel *level_find(PjCtx *ctx);
 static void level_build(PjLevel *lv, PjHarvest *h);
+static void level_forget(PjLevel *lv);
 static void level_free(PjLevel *lv);
 static void level_sample(PjLevel *lv);
 static void level_reset(PjLevel *lv);
@@ -97,6 +92,8 @@ plllvm_pj_boxed_eval(PjCtx *ctx, int32 idx)
 		CommandCounterIncrement();
 		PushActiveSnapshot(GetTransactionSnapshot());
 	}
+	/* what the executor keeps per query goes with the state that made it */
+	lv->econtext->ecxt_per_query_memory = slot->cxt;
 	result = ExecEvalExpr(slot->state, lv->econtext, &isnull);
 	if (pe->need)
 		PopActiveSnapshot();
@@ -129,7 +126,32 @@ level_get(PjCtx *ctx)
 
 	if (lv == NULL)
 	{
-		lv = level_find(ctx);
+		PjVariant  *v = ctx->variant;
+		MemoryContext cxt = ctx->harvest->cxt;
+
+		if (ctx->level >= v->nlevels)
+		{
+			int			n = Max(ctx->level + 1, Max(4, 2 * v->nlevels));
+			PjLevel   **levels = MemoryContextAllocZero(cxt,
+														n * sizeof(PjLevel *));
+
+			if (v->nlevels > 0)
+			{
+				memcpy(levels, v->levels, v->nlevels * sizeof(PjLevel *));
+				pfree(v->levels);
+			}
+			v->levels = levels;
+			v->nlevels = n;
+		}
+
+		lv = v->levels[ctx->level];
+		if (lv == NULL)
+		{
+			lv = MemoryContextAllocZero(cxt, sizeof(PjLevel));
+			lv->variant = v;
+			dlist_push_tail(&live_levels, &lv->node);
+			v->levels[ctx->level] = lv;
+		}
 		ctx->lv = lv;
 	}
 	if (lv->cxt == NULL)
@@ -138,39 +160,6 @@ level_get(PjCtx *ctx)
 	{
 		level_reset(lv);
 		lv->serial = ctx->serial;
-	}
-
-	return lv;
-}
-
-static PjLevel *
-level_find(PjCtx *ctx)
-{
-	PjVariant  *v = ctx->variant;
-	MemoryContext cxt = ctx->harvest->cxt;
-	PjLevel    *lv;
-
-	if (ctx->level >= v->nlevels)
-	{
-		int			n = Max(ctx->level + 1, Max(4, 2 * v->nlevels));
-		PjLevel   **levels = MemoryContextAllocZero(cxt, n * sizeof(PjLevel *));
-
-		if (v->nlevels > 0)
-		{
-			memcpy(levels, v->levels, v->nlevels * sizeof(PjLevel *));
-			pfree(v->levels);
-		}
-		v->levels = levels;
-		v->nlevels = n;
-	}
-
-	lv = v->levels[ctx->level];
-	if (lv == NULL)
-	{
-		lv = MemoryContextAllocZero(cxt, sizeof(PjLevel));
-		lv->variant = v;
-		dlist_push_tail(&live_levels, &lv->node);
-		v->levels[ctx->level] = lv;
 	}
 
 	return lv;
@@ -213,6 +202,16 @@ level_build(PjLevel *lv, PjHarvest *h)
 	lv->cxt = cxt;
 }
 
+/* the level has no state of this transaction */
+static void
+level_forget(PjLevel *lv)
+{
+	lv->cxt = NULL;
+	lv->econtext = NULL;
+	lv->params = NULL;
+	lv->slots = NULL;
+}
+
 /* nothing of the level is left; must not fail */
 static void
 level_free(PjLevel *lv)
@@ -221,10 +220,7 @@ level_free(PjLevel *lv)
 		return;
 	FreeExprContext(lv->econtext, false);
 	MemoryContextDelete(lv->cxt);
-	lv->cxt = NULL;
-	lv->econtext = NULL;
-	lv->params = NULL;
-	lv->slots = NULL;
+	level_forget(lv);
 }
 
 /*
@@ -234,8 +230,8 @@ level_free(PjLevel *lv)
 static void
 level_sample(PjLevel *lv)
 {
-	Size		size = MemoryContextMemAllocated(lv->econtext->ecxt_per_tuple_memory,
-												 false);
+	MemoryContext tuple = lv->econtext->ecxt_per_tuple_memory;
+	Size		size = MemoryContextMemAllocated(tuple, false);
 
 	plllvm_pj_count.peak_tuple_bytes = Max(plllvm_pj_count.peak_tuple_bytes,
 										   (int64) size);
@@ -308,7 +304,10 @@ plllvm_pj_level_abort(PjCtx *ctx)
 		level_free(ctx->lv);
 }
 
-/* with the code: all at use_count 0, so no frame holds a level */
+/*
+ * With the code, at use_count 0 so that no frame holds a level: an ExprState
+ * points into the harvest's tree copies and must not be found again
+ */
 void
 plllvm_pj_levels_release(PjVariant *v)
 {
@@ -331,33 +330,22 @@ void
 plllvm_pj_xact_callback(XactEvent event)
 {
 	dlist_iter	iter;
+	bool		commit = event == XACT_EVENT_COMMIT ||
+		event == XACT_EVENT_PARALLEL_COMMIT || event == XACT_EVENT_PREPARE;
 
-	if (event != XACT_EVENT_COMMIT && event != XACT_EVENT_PARALLEL_COMMIT &&
-		event != XACT_EVENT_PREPARE && event != XACT_EVENT_ABORT &&
+	if (!commit && event != XACT_EVENT_ABORT &&
 		event != XACT_EVENT_PARALLEL_ABORT)
 		return;
-
-	if (event != XACT_EVENT_ABORT && event != XACT_EVENT_PARALLEL_ABORT)
-	{
-		dlist_foreach(iter, &live_levels)
-		{
-			PjLevel    *lv = dlist_container(PjLevel, node, iter.cur);
-
-			if (lv->cxt != NULL)
-				level_sample(lv);
-		}
-		if (xact_estate != NULL)
-			FreeExecutorState(xact_estate);
-	}
-	xact_estate = NULL;
 
 	dlist_foreach(iter, &live_levels)
 	{
 		PjLevel    *lv = dlist_container(PjLevel, node, iter.cur);
 
-		lv->cxt = NULL;
-		lv->econtext = NULL;
-		lv->params = NULL;
-		lv->slots = NULL;
+		if (commit && lv->cxt != NULL)
+			level_sample(lv);
+		level_forget(lv);
 	}
+	if (commit && xact_estate != NULL)
+		FreeExecutorState(xact_estate);
+	xact_estate = NULL;
 }

@@ -56,6 +56,19 @@ SELECT s.symbol IS NOT NULL AS has_symbol,
        (SELECT count(*) FROM plllvm_code_cache() c WHERE c.symbol = s.symbol) AS in_cache
   FROM plllvm_pj_status('ps_inc(int)') s;
 SELECT s.symbol IS NULL AS declined_has_none FROM plllvm_pj_status('ps_if(int)') s;
+
+-- a variant that waits for plans has no code: no symbol and no IR, and the
+-- variant of the other codegen keeps its own
+CREATE FUNCTION ps_w(n int) RETURNS int LANGUAGE plpgsql_jit AS $$
+BEGIN IF n > 0 THEN RETURN n + 1; END IF; RETURN n * 2; END $$;
+SELECT ps_w(1), ps_w(2), ps_w(3);
+SET plllvm.pj_codegen = boxed;
+SELECT ps_w(4);
+SELECT s.last_path, s.variants, s.symbol IS NULL AS no_symbol, plllvm_pj_ir('ps_w(int)') IS NULL AS no_ir
+  FROM plllvm_pj_status('ps_w(int)') s;
+RESET plllvm.pj_codegen;
+SELECT s.last_path, s.symbol IS NOT NULL AS symbol, plllvm_pj_ir('ps_w(int)') IS NOT NULL AS ir
+  FROM (SELECT ps_w(5)) x, plllvm_pj_status('ps_w(int)') s;
 -- the entry polls for interrupts
 SELECT plllvm_pj_ir('ps_inc(int)') LIKE '%call void @plllvm_cfi()%' AS polls;
 SELECT count(*) AS expr_modules FROM plllvm_code_cache() WHERE kind <> 'pj' AND translate_ms IS NOT NULL;
