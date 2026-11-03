@@ -1667,8 +1667,11 @@ check_not_null(PjEmit *em, PLpgSQL_var *var, const char *isnull)
 	begin_block(em, bad);
 	/* the expression is done: the error is the statement's */
 	if (!em->nopos)
-		plllvm_ir_emit(ir, "store i32 %d, ptr %%ctx",
-					   ((PjExpr *) list_nth(em->h->exprs, em->next_expr - 1))->pos);
+	{
+		PjExpr	   *last = list_nth(em->h->exprs, em->next_expr - 1);
+
+		plllvm_ir_emit(ir, "store i32 %d, ptr %%ctx", last->pos);
+	}
 	plllvm_ir_emit(ir,
 				   "call void @plllvm_pj_not_null(ptr inttoptr (i64 "
 				   UINT64_FORMAT " to ptr))",
@@ -1690,8 +1693,11 @@ for_check(PjEmit *em, const char *failed, PjForError what)
 	begin_block(em, bad);
 	/* the bound is done: the error is the statement's */
 	if (!em->nopos)
-		plllvm_ir_emit(ir, "store i32 %d, ptr %%ctx",
-					   ((PjExpr *) list_nth(em->h->exprs, em->next_expr - 1))->pos);
+	{
+		PjExpr	   *last = list_nth(em->h->exprs, em->next_expr - 1);
+
+		plllvm_ir_emit(ir, "store i32 %d, ptr %%ctx", last->pos);
+	}
 	plllvm_ir_emit(ir, "call void @plllvm_pj_for_error(i32 %d)", (int) what);
 	plllvm_ir_emit(ir, "unreachable");
 	em->open = false;
@@ -1745,7 +1751,8 @@ poll(PjEmit *em, int stmtid)
 		return;
 	}
 	plllvm_ir_declare(em->ir, "declare void @plllvm_pj_cfi(ptr, i32)");
-	plllvm_ir_emit(em->ir, "call void @plllvm_pj_cfi(ptr %%ctx, i32 %d)", stmtid);
+	plllvm_ir_emit(em->ir, "call void @plllvm_pj_cfi(ptr %%ctx, i32 %d)",
+				   stmtid);
 }
 
 static void

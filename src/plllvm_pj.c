@@ -676,7 +676,9 @@ run_compiled(PLpgSQL_function *func, FunctionCallInfo fcinfo, PjEntry *e)
 	if (v->failed)
 		return fall_back(fcinfo, e, "interpreted:failed");
 
-	/* an expression in use takes PL/pgSQL's SPI path, which plans differently */
+	/*
+	 * an expression in use takes PL/pgSQL's SPI path, which plans differently
+	 */
 	if (pj_any_in_use(e))
 		return fall_back(fcinfo, e, "interpreted:in use");
 

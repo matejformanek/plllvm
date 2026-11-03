@@ -526,5 +526,44 @@ SELECT pq_fb(5);
 SELECT pj_expect('pq_fb(int)', 'compiled') \gset
 ROLLBACK;
 
+-- a second expression of a statement names itself: an ELSIF condition that
+-- failed, while the IF condition never did
+CREATE FUNCTION pq_ei(p int, q int) RETURNS int LANGUAGE :pj_lang AS $$
+BEGIN
+  IF (- (NULL::smallint)) <> mod(p, p) THEN RETURN -1;
+  ELSIF 10 % q > 100 THEN RETURN -2;
+  END IF;
+  RETURN 1;
+END $$;
+SELECT pq_ei(1, 1), pq_ei(2, 1), pq_ei(3, 1);
+SELECT pj_expect('pq_ei(int,int)', 'compiled') \gset
+BEGIN;
+SAVEPOINT s;
+\set VERBOSITY default
+SELECT pq_ei(1, 0);  -- fail
+\set VERBOSITY terse
+ROLLBACK TO s;
+SELECT pq_ei(0, 1) AS pq_ei_one;
+SELECT pj_expect('pq_ei(int,int)', 'interpreted:in use') \gset
+ROLLBACK;
+-- a cancel is the statement's, not an expression's: the function stays compiled
+CREATE FUNCTION pq_to(n bigint) RETURNS bigint LANGUAGE :pj_lang AS $$
+BEGIN
+  LOOP EXIT WHEN n % 2 = 1; END LOOP;
+  RETURN n;
+END $$;
+SELECT pq_to(1), pq_to(3), pq_to(5);
+SELECT pj_expect('pq_to(bigint)', 'compiled') \gset
+BEGIN;
+SAVEPOINT s;
+SET LOCAL statement_timeout = 100;
+\set VERBOSITY default
+SELECT pq_to(2);  -- fail
+\set VERBOSITY terse
+ROLLBACK TO s;
+SELECT pq_to(7);
+SELECT pj_expect('pq_to(bigint)', 'compiled') \gset
+ROLLBACK;
+
 DROP OWNED BY regress_pj_r1, regress_pj_r2, regress_pj_def, regress_pj_grp;
 DROP ROLE regress_pj_r1, regress_pj_r2, regress_pj_def, regress_pj_grp;
