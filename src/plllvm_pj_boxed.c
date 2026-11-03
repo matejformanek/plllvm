@@ -131,7 +131,8 @@ plllvm_pj_site_done(PjCtx *ctx, int32 idx, int32 flags)
 {
 	if (flags & PJ_DONE_RECHECK)
 		key_recheck(ctx, list_nth(ctx->harvest->exprs, idx));
-	if (flags & PJ_DONE_RESET)
+	/* a call the expression did not reach made no level */
+	if ((flags & PJ_DONE_RESET) && ctx->lv != NULL)
 		level_reset(ctx->lv);
 }
 

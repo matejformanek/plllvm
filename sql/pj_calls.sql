@@ -243,6 +243,15 @@ EXCEPTION WHEN OTHERS THEN
 END $$;
 SELECT pc_depth(100);
 
+-- a call in a branch the expression does not take: nothing was built for it
+CREATE FUNCTION pc_br(n int) RETURNS int LANGUAGE :pj_lang STABLE AS $$
+BEGIN
+  IF n > 0 AND length(n::text) > 1 THEN RETURN 1; END IF;
+  RETURN CASE WHEN n > 5 THEN pc_cal(n) ELSE n * 2 END + coalesce(n, length(pc_cal(n)::text));
+END $$;
+SELECT pc_br(0), pc_br(0), pc_br(-3), pc_br(7), pc_br(12), pc_br(3);
+SELECT pj_expect('pc_br(int)', 'compiled') \gset
+
 -- an I/O conversion of a NULL is a NULL: the input function is strict
 CREATE FUNCTION pc_ion(n int) RETURNS int LANGUAGE :pj_lang STABLE AS $$
 DECLARE v int;
@@ -345,6 +354,21 @@ CREATE FUNCTION pc_user(n int) RETURNS int LANGUAGE :pj_lang AS $$
 BEGIN RETURN pc_helper() + n; END $$;
 SELECT pc_user(1), pc_user(2);
 SELECT pj_expect('pc_user(int)', 'declined:volatile callee') \gset
+
+-- user code ran before an expression that is not planned yet: the function
+-- waits in PL/pgSQL, where one call is one run of the callee
+CREATE FUNCTION pc_wi(n int) RETURNS int LANGUAGE plpgsql STABLE AS $$
+BEGIN RAISE NOTICE 'callee %', n; RETURN n; END $$;
+CREATE FUNCTION pc_wait(n int) RETURNS int LANGUAGE :pj_lang STABLE AS $$
+DECLARE v int;
+BEGIN
+  v := pc_wi(n);
+  IF n > 100 THEN RETURN v + 1000; END IF;
+  RETURN v;
+END $$;
+SELECT pc_wait(1), pc_wait(2), pc_wait(3);
+SELECT pc_wait(200), pc_wait(4), pc_wait(5);
+SELECT pj_expect('pc_wait(int)', 'compiled') \gset
 
 -- a polymorphic callee read after the function was planned again
 CREATE FUNCTION pc_pid(x anyelement) RETURNS anyelement LANGUAGE plpgsql STABLE AS $$
