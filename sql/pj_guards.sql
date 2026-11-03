@@ -216,6 +216,32 @@ RESET search_path;
 SELECT pjg_h07(10);  -- fail
 DROP SCHEMA pjg_s1, pjg_s2 CASCADE;
 
+-- a role without the right to an inlined SQL function: PL/pgSQL does not
+-- inline it for that role, before and after an error
+CREATE ROLE regress_pj_inl;
+CREATE FUNCTION pjg_sq(x int) RETURNS int LANGUAGE sql IMMUTABLE AS 'SELECT x + 1';
+CREATE FUNCTION pjg_u(a int, b int) RETURNS int LANGUAGE :pj_lang AS $$
+BEGIN RETURN pjg_sq(a) / b; END $$;
+SELECT pjg_u(1, 1), pjg_u(1, 1), pjg_u(1, 1);
+SELECT pj_expect('pjg_u(int,int)', 'compiled') \gset
+REVOKE EXECUTE ON FUNCTION pjg_sq(int) FROM PUBLIC;
+BEGIN;
+SET ROLE regress_pj_inl;
+SAVEPOINT s;
+SELECT pjg_u(1, 1);  -- fail
+ROLLBACK TO s;
+SAVEPOINT s;
+SELECT pjg_u(1, 0);  -- fail
+ROLLBACK TO s;
+SELECT pjg_u(1, 1);  -- fail
+ROLLBACK;
+SET ROLE regress_pj_inl;
+SELECT pjg_u(1, 1);  -- fail
+RESET ROLE;
+GRANT EXECUTE ON FUNCTION pjg_sq(int) TO PUBLIC;
+DROP OWNED BY regress_pj_inl;
+DROP ROLE regress_pj_inl;
+
 DROP SCHEMA pjg_ta, pjg_tb CASCADE;
 DROP ROLE regress_pj_guard;
 
