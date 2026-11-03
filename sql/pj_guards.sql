@@ -218,3 +218,47 @@ DROP SCHEMA pjg_s1, pjg_s2 CASCADE;
 
 DROP SCHEMA pjg_ta, pjg_tb CASCADE;
 DROP ROLE regress_pj_guard;
+
+-- an expression PL/pgSQL has not planned leaves the call to it: one deopt,
+-- and the next call is compiled
+CREATE FUNCTION pjg_prime(n integer) RETURNS boolean LANGUAGE :pj_lang IMMUTABLE AS $$
+DECLARE idx integer := 2;
+BEGIN
+  LOOP
+    IF idx > n/2 THEN RETURN TRUE; END IF;
+    IF mod(n, idx) = 0 THEN RETURN FALSE; END IF;
+    idx := idx + 1;
+  END LOOP;
+END $$;
+SELECT pjg_prime(7), pjg_prime(7);
+SELECT pj_expect('pjg_prime(int)', 'compiled') \gset
+SELECT pj_mark() \gset
+SELECT pjg_prime(9);
+SELECT pj_delta(0, 0, NULL, 1, 0) \gset
+SELECT pj_expect('pjg_prime(int)', 'deopt') \gset
+SELECT pj_mark() \gset
+SELECT pjg_prime(9), pjg_prime(11);
+SELECT pj_delta(2, 0, NULL, 0, 1) \gset
+SELECT pj_expect('pjg_prime(int)', 'compiled') \gset
+
+-- a deopt to an expression that cannot be planned does not translate again
+-- and again: the interpreter raises, and only a planned expression is waited for
+CREATE FUNCTION pjg_nofn(n int) RETURNS int LANGUAGE :pj_lang AS $$
+BEGIN
+  IF n > 0 THEN RETURN n; END IF;
+  RETURN pjg_missing(n);
+END $$;
+SELECT pjg_nofn(1), pjg_nofn(1), pjg_nofn(1);
+SELECT pj_expect('pjg_nofn(int)', 'compiled') \gset
+SELECT pj_mark() \gset
+SELECT pjg_nofn(0);  -- fail
+SELECT pjg_nofn(0);  -- fail
+SELECT pjg_nofn(0);  -- fail
+SELECT pj_delta(0, 2, NULL, 1, 0) \gset
+SELECT pjg_attempts(0) \gset
+SELECT pj_expect('pjg_nofn(int)', 'interpreted:unplanned') \gset
+CREATE FUNCTION pjg_missing(n int) RETURNS int LANGUAGE plpgsql AS $$
+BEGIN RETURN n * 2; END $$;
+SELECT pjg_nofn(0);
+SELECT pjg_nofn(1);
+SELECT pj_expect('pjg_nofn(int)', 'declined:volatile callee') \gset
