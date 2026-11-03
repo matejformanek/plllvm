@@ -49,7 +49,7 @@ REGRESS = plllvm_setup $(REGRESS_FEATURES) $(REGRESS_KERNELS) expr_plugin \
 # files run against stock PL/pgSQL's output.  REGRESS_PJ_ONCE runs in one
 # variant only, REGRESS_PJ_OPT at opt level 3.
 REGRESS_PJ = pj_language pj_basic pj_errors pj_guards pj_execute pj_casts pj_sessions \
-		pj_control pj_kernels pj_ops pj_bounds pj_memory pj_boxed pj_abort
+		pj_control pj_kernels pj_ops pj_bounds pj_memory pj_boxed pj_abort pj_calls
 REGRESS_PJ_ONCE = pj_states pj_discard pj_execute_diff pj_arms pj_ctxraw \
 		pj_sessions_midcall
 REGRESS_PJ_OPT = pj_kernels pj_ops
@@ -345,6 +345,7 @@ installcheck-pj:
 	$(call pj_run,$(PLPGSQL_LOAD) -c plllvm.plpgsql_jit=off,$(PJ_FIXTURE) $(REGRESS_PJ) pj_stats)
 	$(call pj_run,$(PLPGSQL_LOAD) -c plllvm.pj_opt_level=0,$(PJ_FIXTURE) $(REGRESS_PJ) pj_stats)
 	$(call pj_run,$(PLPGSQL_LOAD) -c plllvm.pj_opt_level=2,$(PJ_FIXTURE) $(REGRESS_PJ) pj_stats)
+	$(call pj_run,$(PLPGSQL_LOAD) -c plllvm.pj_codegen=v1,$(PJ_FIXTURE) $(REGRESS_PJ) pj_stats)
 	$(call pj_run,$(EXPR_JIT) -c plllvm.expr_eager=on,$(PJ_FIXTURE) $(REGRESS_PJ) pj_stats)
 	$(call pj_run,$(PLPGSQL_LOAD) -c debug_discard_caches=1,$(PJ_FIXTURE) pj_guards pj_stats)
 

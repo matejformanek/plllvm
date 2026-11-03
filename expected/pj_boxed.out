@@ -7,8 +7,7 @@
 \else
   \set pj_lang plpgsql
 \endif
--- fib: every call is a call of the function through a site, and calls itself;
--- the variant with every expression boxed runs the executor on them
+-- fib: every call is a call of the function through a site, and calls itself
 CREATE FUNCTION pbx_fib(n int) RETURNS int LANGUAGE :pj_lang IMMUTABLE AS $$
 BEGIN
   IF n < 2 THEN RETURN n; END IF;
