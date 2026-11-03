@@ -1931,6 +1931,7 @@ block_checks(LLVMBasicBlockRef bb, bool *polls, bool *checks_stack)
 		if (LLVMIsALoadInst(in))
 			*polls |= strcmp(name, "InterruptPending") == 0;
 		else if (strcmp(name, "plllvm_cfi") == 0 ||
+				 strcmp(name, "plllvm_pj_cfi") == 0 ||
 				 strcmp(name, "ProcessInterrupts") == 0)
 			*polls = true;
 		else if (checks_stack && (strcmp(name, "plllvm_check_stack") == 0 ||

@@ -89,6 +89,7 @@ typedef struct PjScopeWalk
 	PLpgSQL_function *func;
 	PjScope    *scope;
 	List	   *frames;			/* PjFrame, innermost first */
+	int			cur_pos;		/* position of the statement or variable */
 } PjScopeWalk;
 
 typedef struct PjEmit
@@ -101,6 +102,7 @@ typedef struct PjEmit
 	bool		open;			/* the current block has no terminator yet */
 	bool		poll_pending;	/* poll after the next position store */
 	int			next_expr;
+	int			cur;			/* position stored in this block, or -1 */
 	List	   *frames;
 } PjEmit;
 
@@ -148,7 +150,7 @@ static void emit_loop(PjEmit *em, PLpgSQL_stmt *stmt);
 static void emit_fori(PjEmit *em, PLpgSQL_stmt_fori *stmt);
 static void emit_exit(PjEmit *em, PLpgSQL_stmt_exit *stmt);
 static void emit_return(PjEmit *em, PLpgSQL_stmt_return *stmt);
-static void emit_body(PjEmit *em, List *body);
+static void emit_body(PjEmit *em, List *body, int stmtid);
 static bool cond_may_raise(PjEmit *em);
 static bool may_raise(Node *node, void *context);
 static void expr_value(PjEmit *em, const void *owner, const char **datum,
@@ -161,7 +163,7 @@ static void for_check(PjEmit *em, const char *failed, PjForError what);
 static void set_found(PjEmit *em, bool value);
 static void set_pos(PjEmit *em, int index);
 static void stmt_enter(PjEmit *em, PLpgSQL_stmt *stmt);
-static void poll(PjEmit *em);
+static void poll(PjEmit *em, int stmtid);
 static void begin_block(PjEmit *em, const char *label);
 static void branch(PjEmit *em, const char *label);
 static void branch_if(PjEmit *em, const char *cond, const char *yes,
@@ -217,6 +219,8 @@ plllvm_pj_scope(PLpgSQL_function *func, PjScope *scope)
 
 	scope->npos = func->nstatements + 1 + func->ndatums;
 	scope->pos = palloc0_array(PjPos, scope->npos);
+	for (int i = 0; i < scope->npos; i++)
+		scope->pos[i].expr = -1;
 
 	scope->reason = walk_stmt(&w, (PLpgSQL_stmt *) func->action);
 }
@@ -274,6 +278,7 @@ walk_stmt(PjScopeWalk *w, PLpgSQL_stmt *stmt)
 					return reason;
 				foreach_ptr(PLpgSQL_if_elsif, elif, ifs->elsif_list)
 				{
+					w->cur_pos = stmt->stmtid;
 					scope_expr(w, elif->cond, elif->cond, BOOLOID, -1);
 					reason = walk_stmts(w, elif->stmts);
 					if (reason != NULL)
@@ -379,6 +384,7 @@ walk_block(PjScopeWalk *w, PLpgSQL_stmt_block *block)
 		var = (PLpgSQL_var *) func->datums[dno];
 		pos->lineno = var->lineno;
 		pos->text = PJ_INIT_TEXT;
+		w->cur_pos = func->nstatements + 1 + dno;
 		if (var->default_val != NULL)
 			scope_expr(w, var->default_val, var->default_val,
 					   var->datatype->typoid, var->datatype->atttypmod);
@@ -421,6 +427,7 @@ scope_pos(PjScopeWalk *w, PLpgSQL_stmt *stmt)
 
 	pos->lineno = stmt->lineno;
 	pos->stmt = plllvm_pj_stmt_typename(stmt);
+	w->cur_pos = stmt->stmtid;
 }
 
 static void
@@ -434,6 +441,7 @@ scope_expr(PjScopeWalk *w, const void *owner, PLpgSQL_expr *expr,
 	pe->retvarno = -1;
 	pe->dsttype = dsttype;
 	pe->dsttypmod = dsttypmod;
+	pe->pos = w->cur_pos;
 	w->scope->exprs = lappend(w->scope->exprs, pe);
 }
 
@@ -573,9 +581,18 @@ plllvm_pj_harvest(PLpgSQL_function *func, const PjScope *scope, PjHarvest *h)
 	env_init(&env, func);
 
 	oldcxt = MemoryContextSwitchTo(h->cxt);
-	h->npos = scope->npos;
-	h->pos = palloc_array(PjPos, scope->npos);
+	/* then a copy of its statement's for each expression, naming it */
+	h->nbase = scope->npos;
+	h->npos = scope->npos + list_length(scope->exprs);
+	h->pos = palloc_array(PjPos, h->npos);
 	memcpy(h->pos, scope->pos, sizeof(PjPos) * scope->npos);
+	for (int i = 0; i < list_length(scope->exprs); i++)
+	{
+		PjExpr	   *pe = list_nth(scope->exprs, i);
+
+		h->pos[scope->npos + i] = scope->pos[pe->pos];
+		h->pos[scope->npos + i].expr = i;
+	}
 	h->fori = list_copy(scope->fori);
 	MemoryContextSwitchTo(oldcxt);
 
@@ -1081,7 +1098,7 @@ plllvm_pj_emit(PLpgSQL_function *func, PjHarvest *h, PjVariant *v)
 		}
 	}
 
-	poll(&em);
+	poll(&em, -1);
 	emit_stmt(&em, (PLpgSQL_stmt *) func->action);
 
 	if (em.open)
@@ -1141,10 +1158,10 @@ emit_stmts(PjEmit *em, List *stmts)
  * it (exec_stmts).
  */
 static void
-emit_body(PjEmit *em, List *body)
+emit_body(PjEmit *em, List *body, int stmtid)
 {
 	if (body == NIL)
-		poll(em);
+		poll(em, stmtid);
 	else
 		em->poll_pending = true;
 	emit_stmts(em, body);
@@ -1201,7 +1218,8 @@ emit_block(PjEmit *em, PLpgSQL_stmt_block *block)
 		int			dno = block->initvarnos[i];
 		PLpgSQL_var *var = (PLpgSQL_var *) func->datums[dno];
 
-		set_pos(em, func->nstatements + 1 + dno);
+		set_pos(em, var->default_val != NULL ? em->h->nbase + em->next_expr :
+				func->nstatements + 1 + dno);
 		store_var(em, dno, "0", "true");
 		if (var->default_val != NULL)
 		{
@@ -1303,11 +1321,11 @@ emit_loop(PjEmit *em, PLpgSQL_stmt *stmt)
 	{
 		/* an error after the body reports the WHILE again */
 		if (cond_may_raise(em))
-			set_pos(em, stmt->stmtid);
+			set_pos(em, em->h->nbase + em->next_expr);
 		branch_if(em, expr_taken(em, wh->cond), body, end);
 		begin_block(em, body);
 	}
-	emit_body(em, is_while ? wh->body : lp->body);
+	emit_body(em, is_while ? wh->body : lp->body, stmt->stmtid);
 	if (em->open)
 		branch(em, head);
 
@@ -1432,7 +1450,7 @@ emit_fori(PjEmit *em, PLpgSQL_stmt_fori *stmt)
 	datum = plllvm_ir_tmp(ir);
 	plllvm_ir_emit(ir, "%s = sext i32 %s to i64", datum, c);
 	store_var(em, stmt->var->dno, datum, "false");
-	emit_body(em, stmt->body);
+	emit_body(em, stmt->body, stmt->stmtid);
 	if (em->open)
 		branch(em, next);
 
@@ -1590,6 +1608,10 @@ expr_value(PjEmit *em, const void *owner, const char **datum,
 	{
 		plllvm_value val;
 
+		/* the position of an expression that can raise names it */
+		if (may_raise((Node *) pe->tree, NULL) &&
+			em->cur != em->h->nbase + index)
+			set_pos(em, em->h->nbase + index);
 		plllvm_expr_emit(ir, pe->tree, &em->env.base, &val);
 		if (pe->cast_tree != NULL)
 		{
@@ -1643,6 +1665,10 @@ check_not_null(PjEmit *em, PLpgSQL_var *var, const char *isnull)
 	plllvm_ir_declare(ir, "declare void @plllvm_pj_not_null(ptr)");
 	branch_if(em, isnull, bad, ok);
 	begin_block(em, bad);
+	/* the expression is done: the error is the statement's */
+	if (!em->nopos)
+		plllvm_ir_emit(ir, "store i32 %d, ptr %%ctx",
+					   ((PjExpr *) list_nth(em->h->exprs, em->next_expr - 1))->pos);
 	plllvm_ir_emit(ir,
 				   "call void @plllvm_pj_not_null(ptr inttoptr (i64 "
 				   UINT64_FORMAT " to ptr))",
@@ -1662,6 +1688,10 @@ for_check(PjEmit *em, const char *failed, PjForError what)
 
 	branch_if(em, failed, bad, ok);
 	begin_block(em, bad);
+	/* the bound is done: the error is the statement's */
+	if (!em->nopos)
+		plllvm_ir_emit(ir, "store i32 %d, ptr %%ctx",
+					   ((PjExpr *) list_nth(em->h->exprs, em->next_expr - 1))->pos);
 	plllvm_ir_emit(ir, "call void @plllvm_pj_for_error(i32 %d)", (int) what);
 	plllvm_ir_emit(ir, "unreachable");
 	em->open = false;
@@ -1679,6 +1709,7 @@ set_pos(PjEmit *em, int index)
 {
 	if (!em->nopos)
 		plllvm_ir_emit(em->ir, "store i32 %d, ptr %%ctx", index);
+	em->cur = index;
 }
 
 /*
@@ -1687,18 +1718,34 @@ set_pos(PjEmit *em, int index)
 static void
 stmt_enter(PjEmit *em, PLpgSQL_stmt *stmt)
 {
-	set_pos(em, stmt->stmtid);
+	int			index = stmt->stmtid;
+
+	/* the statement's first expression names the position of both */
+	if (em->next_expr < list_length(em->h->exprs) &&
+		((PjExpr *) list_nth(em->h->exprs, em->next_expr))->pos == stmt->stmtid)
+		index = em->h->nbase + em->next_expr;
+	set_pos(em, index);
 	if (em->poll_pending)
 	{
 		em->poll_pending = false;
-		poll(em);
+		poll(em, stmt->stmtid);
 	}
 }
 
+/*
+ * A cancel is no error of an expression: stmtid, or none, is the position
+ * while the interrupt is processed
+ */
 static void
-poll(PjEmit *em)
+poll(PjEmit *em, int stmtid)
 {
-	plllvm_ir_emit(em->ir, "call void @plllvm_cfi()");
+	if (em->nopos || stmtid < 0)
+	{
+		plllvm_ir_emit(em->ir, "call void @plllvm_cfi()");
+		return;
+	}
+	plllvm_ir_declare(em->ir, "declare void @plllvm_pj_cfi(ptr, i32)");
+	plllvm_ir_emit(em->ir, "call void @plllvm_pj_cfi(ptr %%ctx, i32 %d)", stmtid);
 }
 
 static void
@@ -1706,6 +1753,7 @@ begin_block(PjEmit *em, const char *label)
 {
 	plllvm_ir_block(em->ir, label);
 	em->open = true;
+	em->cur = -1;
 }
 
 static void

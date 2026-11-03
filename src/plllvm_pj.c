@@ -139,6 +139,8 @@ static void exec_error_callback(void *arg);
 static bool guards_ok(PjHarvest *h);
 static bool execute_allowed(PjEntry *e);
 static void pj_mark_busy(PjEntry *e);
+static void pj_mark_running(PjEntry *e, PjCtx *ctx);
+static bool pj_any_in_use(PjEntry *e);
 static PjVariant *variant_find(PjHarvest *h);
 static void decline(PjEntry *e, const char *reason);
 static void decline_idle(PjEntry *e, const char *reason);
@@ -674,6 +676,10 @@ run_compiled(PLpgSQL_function *func, FunctionCallInfo fcinfo, PjEntry *e)
 	if (v->failed)
 		return fall_back(fcinfo, e, "interpreted:failed");
 
+	/* an expression in use takes PL/pgSQL's SPI path, which plans differently */
+	if (pj_any_in_use(e))
+		return fall_back(fcinfo, e, "interpreted:in use");
+
 	if (!execute_allowed(e))
 		return fall_back(fcinfo, e, "interpreted:execute");
 
@@ -716,11 +722,15 @@ run(PLpgSQL_function *func, FunctionCallInfo fcinfo, PjEntry *e, PjVariant *v)
 		e->last_path = "compiled";
 
 		/*
-		 * Leave PL/pgSQL's expressions as an interpreted failure would: the
-		 * next evaluation takes the path that checks EXECUTE.  The cast of
-		 * the code cannot fail, so PL/pgSQL's cast state needs no mark.
+		 * Leave the expression the error stopped as an interpreted failure
+		 * would: its next evaluation takes the path that checks EXECUTE.
+		 * Without positions, mark them all.  The cast of the code cannot
+		 * fail, so PL/pgSQL's cast state needs no mark.
 		 */
-		pj_mark_busy(e);
+		if (v->codegen == PLLLVM_PJ_NOPOS)
+			pj_mark_busy(e);
+		else
+			pj_mark_running(e, &ctx);
 		activation_end(func, e, entry_cxt);
 		PG_RE_THROW();
 	}
@@ -867,6 +877,47 @@ pj_mark_busy(PjEntry *e)
 		pe->expr->expr_simple_lxid = MyProc->vxid.lxid;
 		pe->expr->expr_simple_in_use = true;
 	}
+}
+
+/*
+ * pj_mark_busy() for the expression ctx->pos names, if it names one: PL/pgSQL
+ * leaves the others as they were, and so does an error outside an expression
+ * (exec_eval_simple_expr)
+ */
+static void
+pj_mark_running(PjEntry *e, PjCtx *ctx)
+{
+	PjHarvest  *h = e->harvest;
+	PjExpr	   *pe;
+	int			idx;
+
+	if (ctx->pos < 0 || ctx->pos >= h->npos)
+		return;
+	idx = h->pos[ctx->pos].expr;
+	if (idx < 0)
+		return;
+	pe = list_nth(h->exprs, idx);
+	if (pe->h1 != PJ_H1_READY || pe->expr == NULL)
+		return;
+	pe->expr->expr_simple_lxid = MyProc->vxid.lxid;
+	pe->expr->expr_simple_in_use = true;
+}
+
+/*
+ * Does an expression stand where PL/pgSQL would evaluate it through SPI?
+ */
+static bool
+pj_any_in_use(PjEntry *e)
+{
+	LocalTransactionId lxid = MyProc->vxid.lxid;
+
+	foreach_ptr(PjExpr, pe, e->harvest->exprs)
+	{
+		if (pe->h1 == PJ_H1_READY && pe->expr != NULL &&
+			pe->expr->expr_simple_in_use && pe->expr->expr_simple_lxid == lxid)
+			return true;
+	}
+	return false;
 }
 
 static PjVariant *
