@@ -109,7 +109,7 @@ SELECT pbd_tree(1), pbd_tree(2), pbd_tree(3);
       100 |      200 |      300
 (1 row)
 
-SELECT pj_expect('pbd_tree(int)', 'declined:node') \gset
+SELECT pj_expect('pbd_tree(int)', 'compiled') \gset
 -- 5,000 statements
 SELECT pbd_ddl(format('CREATE FUNCTION pbd_stmts(n int) RETURNS int LANGUAGE %s AS $b$ DECLARE x int := 0; BEGIN %s RETURN x; END $b$',
               :'pj_lang', (SELECT string_agg('x := x + n;', ' ') FROM generate_series(1, 5000))));

@@ -49,7 +49,7 @@ SELECT pj_expect('pbd_locals(int)', 'compiled') \gset
 SELECT pbd_ddl(format('CREATE FUNCTION pbd_tree(n int) RETURNS int LANGUAGE %s AS $b$ BEGIN RETURN %s; END $b$',
               :'pj_lang', (SELECT string_agg('n', ' + ') FROM generate_series(1, 100))));
 SELECT pbd_tree(1), pbd_tree(2), pbd_tree(3);
-SELECT pj_expect('pbd_tree(int)', 'declined:node') \gset
+SELECT pj_expect('pbd_tree(int)', 'compiled') \gset
 
 -- 5,000 statements
 SELECT pbd_ddl(format('CREATE FUNCTION pbd_stmts(n int) RETURNS int LANGUAGE %s AS $b$ DECLARE x int := 0; BEGIN %s RETURN x; END $b$',

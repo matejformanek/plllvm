@@ -98,6 +98,10 @@ pg_noreturn extern void plllvm_sqrt_negative(void);
 pg_noreturn extern void plllvm_pj_no_return(void);
 pg_noreturn extern void plllvm_pj_not_null(const char *name);
 pg_noreturn extern void plllvm_pj_for_error(int32 what);
+struct PjCtx;
+extern void *plllvm_pj_params(struct PjCtx *ctx);
+extern Datum plllvm_pj_boxed_eval(struct PjCtx *ctx, int32 idx);
+extern void plllvm_pj_boxed_reset(struct PjCtx *ctx);
 extern Datum plllvm_keep(Datum value);
 extern void plllvm_scratch_reset(void);
 extern Datum plllvm_rt_site_call(plllvm_site *site, NullableDatum *args,

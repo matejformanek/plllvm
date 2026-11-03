@@ -36,6 +36,7 @@
 #include "portability/instr_time.h"
 #include "storage/proc.h"
 #include "utils/acl.h"
+#include "utils/datum.h"
 #include "utils/hsearch.h"
 #include "utils/inval.h"
 #include "utils/memutils.h"
@@ -46,6 +47,9 @@
 
 /* invalidations of what EXECUTE depends on; see execute_allowed() */
 static uint64 exec_epoch = 0;
+
+/* of the compiled calls, for the levels of boxed expressions */
+static uint64 call_serial = 0;
 
 /* guard misses before a function is declined as thrashing */
 #define PJ_MAX_MISSES		8
@@ -85,6 +89,8 @@ typedef struct PjEntry
 	int64		guard_misses;
 	int64		translations;
 	PjHarvest  *harvest;
+	int			frames;			/* compiled calls running */
+	bool		waiting;		/* see translate_guarded() */
 	int			misses;			/* guard misses since the last reset */
 	int64		since_translation;	/* compiled calls since the last
 									 * translation */
@@ -131,6 +137,8 @@ static bool translate_guarded(PLpgSQL_function *func, PjEntry *e,
 static bool variant_guarded(PLpgSQL_function *func, PjEntry *e);
 static Datum run_compiled(PLpgSQL_function *func, FunctionCallInfo fcinfo,
 						  PjEntry *e);
+static Datum wait_step(PLpgSQL_function *func, FunctionCallInfo fcinfo,
+					   PjEntry *e);
 static Datum run(PLpgSQL_function *func, FunctionCallInfo fcinfo, PjEntry *e,
 				 PjVariant *v);
 static void activation_end(PLpgSQL_function *func, PjEntry *e,
@@ -216,6 +224,14 @@ fall_back(FunctionCallInfo fcinfo, PjEntry *e, const char *path)
 	{
 		e->calls++;
 		e->last_path = path;
+
+		/*
+		 * Compiled frames leave PL/pgSQL's expressions as they were; the
+		 * interpreter would find them busy, as they are while a frame of its
+		 * own evaluates them.
+		 */
+		if (e->frames > 0)
+			pj_mark_busy(e);
 	}
 
 	return call_handler_p(fcinfo);
@@ -395,6 +411,11 @@ seen_step(PLpgSQL_function *func, PjEntry *e)
 		e->last_path = "interpreted:unplanned";
 		return false;
 	}
+	if (e->waiting && scope.nunplanned > 0)
+	{
+		e->last_path = "waiting";
+		return false;
+	}
 
 	/*
 	 * After a deopt, only once the expression is planned: a plan that fails
@@ -424,7 +445,7 @@ typedef struct PjBuild
 	PjVariant  *variant;
 	MemoryContext tmp;			/* holds the harvest until it is published */
 	const char *reason;			/* why the function is declined, or NULL */
-	bool		capped;
+	PjEmitResult emitted;
 } PjBuild;
 
 static void
@@ -452,7 +473,7 @@ build_run(PjBuild *b)
 		b->variant->codegen = plllvm_pj_codegen;
 	}
 
-	b->capped = !plllvm_pj_emit(b->func, b->harvest, b->variant);
+	b->emitted = plllvm_pj_emit(b->func, b->harvest, b->variant);
 }
 
 /*
@@ -538,13 +559,24 @@ translate_guarded(PLpgSQL_function *func, PjEntry *e, PjScope *scope)
 
 	if (b.reason != NULL)
 		decline_idle(e, b.reason);
-	else if (b.capped)
+	else if (b.emitted == PJ_EMIT_CAPPED)
 	{
 		plllvm_pj_count.capped++;
 		e->last_path = "interpreted:capped";
 	}
+	else if (b.emitted == PJ_EMIT_WAITING)
+	{
+		/*
+		 * Code that runs the executor cannot give a call back to the
+		 * interpreter, and an unplanned expression is one it could not
+		 * evaluate: the calls stay interpreted until all are planned.
+		 */
+		e->waiting = true;
+		e->last_path = "waiting";
+	}
 	else
 	{
+		e->waiting = false;
 		INSTR_TIME_SET_CURRENT(elapsed);
 		INSTR_TIME_SUBTRACT(elapsed, start);
 		b.variant->translate_ms = INSTR_TIME_GET_MILLISEC(elapsed);
@@ -598,12 +630,20 @@ variant_guarded(PLpgSQL_function *func, PjEntry *e)
 
 	MemoryContextDelete(b.tmp);
 
-	if (b.capped)
+	if (b.emitted == PJ_EMIT_CAPPED)
 	{
 		/* not kept: retried at the next call */
 		plllvm_pj_count.capped++;
 		pfree(v);
 		e->last_path = "interpreted:capped";
+		return false;
+	}
+	if (b.emitted == PJ_EMIT_WAITING)
+	{
+		v->waiting = true;
+		v->next = h->variants;
+		h->variants = v;
+		e->last_path = "waiting";
 		return false;
 	}
 
@@ -674,10 +714,33 @@ run_compiled(PLpgSQL_function *func, FunctionCallInfo fcinfo, PjEntry *e)
 	if (v->failed)
 		return fall_back(fcinfo, e, "interpreted:failed");
 
+	if (v->waiting)
+		return wait_step(func, fcinfo, e);
+
 	if (!execute_allowed(e))
 		return fall_back(fcinfo, e, "interpreted:execute");
 
 	return run(func, fcinfo, e, v);
+}
+
+/*
+ * A variant that waits for the expressions of the harvest to be planned: once
+ * none is left, the function is translated again from the plans
+ */
+static Datum
+wait_step(PLpgSQL_function *func, FunctionCallInfo fcinfo, PjEntry *e)
+{
+	PjScope		scope;
+
+	plllvm_pj_scope(func, &scope);
+	plllvm_pj_classify(&scope);
+	if (scope.nunplanned == 0)
+	{
+		e->state = PJ_SEEN;
+		return fall_back(fcinfo, e, "interpreted:replan");
+	}
+
+	return fall_back(fcinfo, e, "waiting");
 }
 
 /*
@@ -699,6 +762,13 @@ run(PLpgSQL_function *func, FunctionCallInfo fcinfo, PjEntry *e, PjVariant *v)
 	arg.ctx = &ctx;
 
 	func->cfunc.use_count++;
+	e->frames++;
+	ctx.level = func->cfunc.use_count - 1;
+	ctx.serial = ++call_serial;
+	ctx.user = e->harvest->key_user;
+	ctx.epoch = e->harvest->key_epoch;
+	ctx.variant = v;
+	ctx.harvest = e->harvest;
 	errcallback.callback = exec_error_callback;
 	errcallback.arg = &arg;
 	errcallback.previous = error_context_stack;
@@ -707,6 +777,14 @@ run(PLpgSQL_function *func, FunctionCallInfo fcinfo, PjEntry *e, PjVariant *v)
 	PG_TRY();
 	{
 		retval = v->code(fcinfo, &ctx);
+
+		/* code that ran the executor was not given a deopt point */
+		if (ctx.deopt != 0 && ctx.evaluated)
+			elog(ERROR, "plpgsql_jit: deopt after the executor ran");
+
+		/* the result lives in memory of the code's own */
+		if (ctx.deopt == 0 && !fcinfo->isnull && !func->fn_retbyval)
+			retval = datumCopy(retval, false, func->fn_rettyplen);
 	}
 	PG_CATCH();
 	{
@@ -720,6 +798,8 @@ run(PLpgSQL_function *func, FunctionCallInfo fcinfo, PjEntry *e, PjVariant *v)
 		 * next evaluation takes the path that checks EXECUTE.  The cast of
 		 * the code cannot fail, so PL/pgSQL's cast state needs no mark.
 		 */
+		MemoryContextSwitchTo(entry_cxt);
+		plllvm_pj_level_abort(&ctx);
 		pj_mark_busy(e);
 		activation_end(func, e, entry_cxt);
 		PG_RE_THROW();
@@ -737,6 +817,8 @@ run(PLpgSQL_function *func, FunctionCallInfo fcinfo, PjEntry *e, PjVariant *v)
 		e->state = PJ_SEEN;
 		e->calls++;
 		activation_end(func, e, entry_cxt);
+		if (e->frames > 0)
+			pj_mark_busy(e);
 		return call_handler_p(fcinfo);
 	}
 
@@ -758,6 +840,7 @@ activation_end(PLpgSQL_function *func, PjEntry *e, MemoryContext entry_cxt)
 {
 	MemoryContextSwitchTo(entry_cxt);
 	func->cfunc.use_count--;
+	e->frames--;
 
 	/* funccache forgot a running function: its last frame lets go of us */
 	if (func->cfunc.use_count == 0 && func->cfunc.fn_hashkey == NULL)
@@ -830,26 +913,47 @@ execute_allowed(PjEntry *e)
 {
 	PjHarvest  *h = e->harvest;
 	Oid			user = GetUserId();
-	LocalTransactionId lxid = MyProc->vxid.lxid;
 	uint64		epoch = exec_epoch; /* before the checks, which may deliver
 									 * one */
 
-	if (h->key_lxid == lxid && h->key_user == user && h->key_epoch == epoch)
+	if (h->key_lxid == MyProc->vxid.lxid && h->key_user == user &&
+		h->key_epoch == epoch)
 		return true;
 
+	return plllvm_pj_execute_check(h, user, epoch, NULL);
+}
+
+/*
+ * The check itself, for the call's entry and for a call that finds the user
+ * or the privileges changed after the executor ran.  If a function is denied,
+ * its OID goes to *denied.
+ */
+bool
+plllvm_pj_execute_check(PjHarvest *h, Oid user, uint64 epoch, Oid *denied)
+{
 	foreach_oid(funcid, h->funcids)
 	{
 		if (object_aclcheck(ProcedureRelationId, funcid, user,
 							ACL_EXECUTE) != ACLCHECK_OK)
+		{
+			if (denied != NULL)
+				*denied = funcid;
 			return false;
+		}
 	}
 	foreach_oid(funcid, h->funcids)
 		InvokeFunctionExecuteHook(funcid);
 
-	h->key_lxid = lxid;
+	h->key_lxid = MyProc->vxid.lxid;
 	h->key_user = user;
 	h->key_epoch = epoch;
 	return true;
+}
+
+uint64
+plllvm_pj_exec_epoch(void)
+{
+	return exec_epoch;
 }
 
 /*
@@ -914,6 +1018,7 @@ release_harvest(PjEntry *e)
 		return;
 	for (PjVariant *v = h->variants; v != NULL; v = v->next)
 	{
+		plllvm_pj_levels_release(v);
 		if (v->mod != NULL)
 			plllvm_jit_release(v->mod);
 	}

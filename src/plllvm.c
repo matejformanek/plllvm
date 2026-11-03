@@ -36,6 +36,7 @@
 
 #include "plllvm.h"
 #include "plllvm_jit.h"
+#include "plllvm_pj.h"
 
 #ifdef PG_MODULE_MAGIC_EXT
 
@@ -83,6 +84,7 @@ static const struct config_enum_entry debug_inject_options[] = {
 static const struct config_enum_entry pj_codegen_options[] = {
 	{"native", PLLLVM_PJ_NATIVE, false},
 	{"nopos", PLLLVM_PJ_NOPOS, false},
+	{"boxed", PLLLVM_PJ_BOXED, false},
 	{NULL, 0, false}
 };
 
@@ -261,6 +263,7 @@ plllvm_xact_callback(XactEvent event, void *arg)
 {
 	if (event == XACT_EVENT_ABORT || event == XACT_EVENT_PARALLEL_ABORT)
 		plllvm_reset_after_error();
+	plllvm_pj_xact_callback(event);
 }
 
 static void

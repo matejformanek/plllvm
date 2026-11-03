@@ -214,8 +214,8 @@ BEGIN RETURN 2.5; END $$;
 SELECT pb_i2mul(3::int2), pb_num(4), pb_f8k();
 SELECT pb_i2mul(3::int2), pb_num(4), pb_f8k();
 SELECT pb_i2mul(3::int2), pb_num(4), pb_f8k();
-SELECT pj_expect('pb_i2mul(int2)', 'declined:node') \gset
-SELECT pj_expect('pb_num(int)', 'declined:datum:numeric') \gset
+SELECT pj_expect('pb_i2mul(int2)', 'declined:cast') \gset
+SELECT pj_expect('pb_num(int)', 'declined:cast') \gset
 -- a constant converts when the function is translated
 SELECT pj_expect('pb_f8k()', 'compiled') \gset
 
@@ -271,7 +271,7 @@ SELECT pj_expect('pb_out(int)', 'declined:signature') \gset
 SELECT pj_expect('pb_set1(int)', 'declined:signature') \gset
 SELECT pj_expect('pb_rec(int)', 'declined:cast') \gset
 SELECT pj_expect('pb_rnd()', 'declined:volatile callee') \gset
-SELECT pj_expect('pb_user(int)', 'declined:node') \gset
+SELECT pj_expect('pb_user(int)', 'compiled') \gset
 SELECT pj_expect('pb_sub(int)', 'declined:not simple') \gset
 SELECT pj_expect('pb_proc(int)', 'declined:signature') \gset
 
@@ -484,7 +484,7 @@ SELECT pj_expect('pb_dd6(int)', 'declined:datum:pb_dx2') \gset
 SELECT pj_expect('pb_dd7(pb_dx2)', 'declined:datum:pb_dx2') \gset
 SELECT pj_expect('pb_dd8(pb_dx2)', 'declined:datum:pb_dx2') \gset
 SELECT pj_expect('pb_dd9(pb_dx2)', 'compiled') \gset
-SELECT pj_expect('pb_dd10(pb_dx2)', 'declined:node') \gset
+SELECT pj_expect('pb_dd10(pb_dx2)', 'compiled') \gset
 ALTER DOMAIN pb_dx2 ADD CONSTRAINT pb_dx2_pos CHECK (VALUE IS NULL OR VALUE > 0);
 SELECT pb_dd1(-1);  -- fail
 SELECT pb_dd2(-5);  -- fail

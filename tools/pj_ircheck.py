@@ -53,6 +53,39 @@ BEGIN
     idx := idx + 1;
   END LOOP;
 END""", "7"),
+    "mandelbrot": ("text", """
+DECLARE
+  two CONSTANT float8 := 2.0;
+  four CONSTANT float8 := 4.0;
+  one CONSTANT float8 := 1.0;
+  onehalf CONSTANT float8 := 1.5;
+  fsz float8;
+  x integer; y integer; k integer;
+  cr float8; ci float8; zr float8; zi float8; tr float8; ti float8;
+  cnt integer := 0;
+  h bigint := 0;
+BEGIN
+  fsz := n;
+  FOR y IN 0..n-1 LOOP
+    ci := two * y / fsz - one;
+    FOR x IN 0..n-1 LOOP
+      cr := two * x / fsz - onehalf;
+      zr := 0; zi := 0; tr := 0; ti := 0; k := 0;
+      WHILE k < 50 AND tr + ti <= four LOOP
+        zi := two * zr * zi + ci;
+        zr := tr - ti + cr;
+        tr := zr * zr;
+        ti := zi * zi;
+        k := k + 1;
+      END LOOP;
+      IF tr + ti <= four THEN
+        cnt := cnt + 1;
+        h := (h * 31 + x * 7 + y) % 1000000007;
+      END IF;
+    END LOOP;
+  END LOOP;
+  RETURN cnt::text || '/' || h::text;
+END""", "9"),
 }
 
 SCRIPT = """\

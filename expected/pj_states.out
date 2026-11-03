@@ -75,7 +75,7 @@ SELECT p.proname, s.state, s.reason, s.last_path, s.calls, s.compiled_calls,
  ps_rnd  | declined | volatile callee | declined:volatile callee |     2 |              0 |            0
  ps_sub  | declined | not simple      | declined:not simple      |     2 |              0 |            0
  ps_text | declined | datum:text      | declined:datum:text      |     2 |              0 |            0
- ps_user | declined | node            | declined:node            |     2 |              0 |            0
+ ps_user | compiled |                 | compiled                 |     2 |              1 |            1
 (10 rows)
 
 -- a declined function keeps no code and no translation
@@ -100,7 +100,8 @@ SELECT kind, translate_ms > 0 AS translate_ms, ir_instructions > 0 AS ir
  kind | translate_ms | ir 
 ------+--------------+----
  pj   | t            | t
-(1 row)
+ pj   | t            | t
+(2 rows)
 
 -- the entry polls for interrupts
 SELECT plllvm_pj_ir('ps_inc(int)') LIKE '%call void @plllvm_cfi()%' AS polls;
@@ -181,9 +182,10 @@ SELECT opt_level, kind FROM plllvm_code_cache() WHERE kind = 'pj' AND NOT retire
  opt_level | kind 
 -----------+------
          2 | pj
+         2 | pj
          0 | pj
          3 | pj
-(3 rows)
+(4 rows)
 
 -- a variant that fails to compile is marked, the others run
 CREATE FUNCTION ps_mul(n int) RETURNS int LANGUAGE plpgsql_jit AS $$
