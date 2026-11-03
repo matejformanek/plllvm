@@ -817,5 +817,80 @@ GRANT EXECUTE ON FUNCTION hashint4(int4) TO PUBLIC;
 DROP ROLE regress_pj_qs;
 DROP OWNED BY regress_pj_qinv;
 DROP ROLE regress_pj_qinv, regress_pj_qg;
+-- a compiled frame fails in the expression an outer compiled frame runs, and a
+-- function in between catches it: the outer frame owns the mark
+CREATE FUNCTION pbx_wrj(n int, m int) RETURNS int LANGUAGE plpgsql STABLE AS $$
+BEGIN RETURN pbx_gj(n, m); EXCEPTION WHEN division_by_zero THEN RETURN 0; END $$;
+CREATE FUNCTION pbx_gj(n int, m int) RETURNS int LANGUAGE :pj_lang STABLE AS $$
+DECLARE v int;
+BEGIN
+  IF n <= 0 THEN RETURN 1; END IF;
+  IF n = 5 THEN v := NULL; ELSE v := 1; END IF;
+  RETURN pbx_wrj(n - 1, m - 1) / m + v;
+END $$;
+SELECT pbx_gj(0, 1), pbx_gj(1, 1), pbx_gj(5, 9), pbx_gj(2, 5), pbx_gj(2, 5), pbx_gj(2, 5);
+ pbx_gj | pbx_gj | pbx_gj | pbx_gj | pbx_gj | pbx_gj 
+--------+--------+--------+--------+--------+--------
+      1 |      2 |        |      1 |      1 |      1
+(1 row)
+
+SELECT pj_expect('pbx_gj(int,int)', 'compiled') \gset
+BEGIN;
+SELECT pbx_gj(2, 1) AS inner_error_caught;
+ inner_error_caught 
+--------------------
+                  1
+(1 row)
+
+SELECT pj_expect('pbx_gj(int,int)', 'compiled') \gset
+SAVEPOINT s;
+SELECT pbx_gj(5, 0) AS after_recursion;  -- fail
+ERROR:  division by zero
+ROLLBACK TO s;
+COMMIT;
+BEGIN;
+SAVEPOINT s;
+SELECT pbx_gj(5, 0) AS no_earlier_error;  -- fail
+ERROR:  division by zero
+ROLLBACK TO s;
+COMMIT;
+-- a compiled frame fails in the expression an outer compiled frame runs, and a
+-- function in between catches it: the outer frame owns the mark
+CREATE FUNCTION pbx_wrl(n int, m int) RETURNS int LANGUAGE plpgsql STABLE AS $$
+BEGIN RETURN pbx_gl(n, m); EXCEPTION WHEN division_by_zero THEN RETURN 0; END $$;
+CREATE FUNCTION pbx_gl(n int, m int) RETURNS int LANGUAGE :pj_lang STABLE AS $$
+DECLARE v int;
+BEGIN
+  IF n <= 0 THEN RETURN 1; END IF;
+  IF n = 5 THEN v := NULL; ELSE v := 1; END IF;
+  IF n = 2 THEN v := pbx_wrl(n - 1, m - 1); RETURN v; END IF;
+  RETURN pbx_wrl(n - 1, m - 1) / m + v;
+END $$;
+SELECT pbx_gl(0, 1), pbx_gl(1, 1), pbx_gl(5, 9), pbx_gl(2, 5), pbx_gl(2, 5), pbx_gl(2, 5);
+ pbx_gl | pbx_gl | pbx_gl | pbx_gl | pbx_gl | pbx_gl 
+--------+--------+--------+--------+--------+--------
+      1 |      2 |        |      1 |      1 |      1
+(1 row)
+
+SELECT pj_expect('pbx_gl(int,int)', 'compiled') \gset
+BEGIN;
+SELECT pbx_gl(3, 2) AS inner_error_caught;
+ inner_error_caught 
+--------------------
+                  1
+(1 row)
+
+SELECT pj_expect('pbx_gl(int,int)', 'compiled') \gset
+SAVEPOINT s;
+SELECT pbx_gl(5, 0) AS after_recursion;  -- fail
+ERROR:  division by zero
+ROLLBACK TO s;
+COMMIT;
+BEGIN;
+SAVEPOINT s;
+SELECT pbx_gl(5, 0) AS no_earlier_error;  -- fail
+ERROR:  division by zero
+ROLLBACK TO s;
+COMMIT;
 DROP OWNED BY regress_pj_bx, regress_pj_bo;
 DROP ROLE regress_pj_bx, regress_pj_bo;

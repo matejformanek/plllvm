@@ -360,3 +360,42 @@ RESET pba.fail;
 DROP FUNCTION pba_fh(int);
 DROP OPERATOR FAMILY pba_fam USING hash CASCADE;
 DROP OPERATOR === (int, int);
+-- a failed hash table in a frame nested in one that runs the same expression,
+-- caught between them: the next nested frame builds the table again
+CREATE FUNCTION pba_wr2(n int) RETURNS bool LANGUAGE plpgsql STABLE AS $$
+BEGIN RETURN pba_fr(n);
+EXCEPTION WHEN division_by_zero THEN PERFORM set_config('pba.fail', 'off', true); RETURN false; END $$;
+CREATE FUNCTION pba_hash2(a int) RETURNS int LANGUAGE plpgsql IMMUTABLE AS $$
+BEGIN
+  IF current_setting('pba.fail', true) = 'on' AND a = 5 THEN
+    RAISE EXCEPTION 'hash failed' USING ERRCODE = '22012';
+  END IF;
+  RETURN a;
+END $$;
+CREATE OPERATOR ==== (LEFTARG = int, RIGHTARG = int, FUNCTION = pba_eq, COMMUTATOR = ====, HASHES);
+CREATE OPERATOR FAMILY pba_fam2 USING hash;
+CREATE OPERATOR CLASS pba_cls2 FOR TYPE int USING hash FAMILY pba_fam2 AS
+  OPERATOR 1 ====, FUNCTION 1 pba_hash2(int);
+CREATE FUNCTION pba_fr(n int) RETURNS bool LANGUAGE :pj_lang STABLE AS $$
+BEGIN
+  RETURN CASE WHEN n > 0 THEN pba_wr2(n - 1) OR pba_wr2(n - 1)
+              ELSE (7 - n) ==== ANY('{1,2,3,4,5,6,7,8,9,10}'::int[]) END;
+END $$;
+SELECT pba_fr(0), pba_fr(1), pba_fr(1), pba_fr(1);
+ pba_fr | pba_fr | pba_fr | pba_fr 
+--------+--------+--------+--------
+ t      | t      | t      | t
+(1 row)
+
+SELECT pj_expect('pba_fr(int)', 'compiled') \gset
+BEGIN;
+SET LOCAL pba.fail = on;
+SELECT pba_fr(1) AS second_nested_after_failed_build;
+ second_nested_after_failed_build 
+----------------------------------
+ t
+(1 row)
+
+SELECT pj_expect('pba_fr(int)', 'compiled') \gset
+COMMIT;
+RESET pba.fail;
