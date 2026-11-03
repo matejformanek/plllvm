@@ -440,6 +440,25 @@ check-pj-ir: port-ok
 	python3 -I tools/pj_ircheck.py --psql '$(bindir)/psql' --host /tmp \
 	  --port $(PLLLVM_PORT) --opt '$(LLVM)/bin/opt' --kernels examples/kernels
 
+# The differential fuzzer: N programs from SEED, as plpgsql and as plpgsql_jit
+# at opt level 0 and 2, in the throwaway database pj_fuzz.  A difference is
+# reported by seed, with the program and both outputs in results-fuzz/.  Not part of
+# installcheck or verify.
+N ?= 2000
+SEED ?= 1
+
+.PHONY: fuzz-pj
+
+fuzz-pj: port-ok
+	@case "$(origin PLLLVM_PORT):$(PLLLVM_PORT)" in file:*|*:|*:544[2-5]) \
+	  echo "fuzz-pj needs the PLLLVM_PORT of a throwaway cluster" >&2; \
+	  exit 1;; esac
+	rm -rf results-fuzz
+	rc=0; for o in 0 2; do \
+	  python3 -I tools/pj_fuzz.py --psql '$(bindir)/psql' --host /tmp --port $(PLLLVM_PORT) \
+	    --n $(N) --seed $(SEED) --opt-level $$o --out results-fuzz/O$$o || rc=1; \
+	done; exit $$rc
+
 #
 # Every suite of a PR in order; the commit and each exit code go to
 # results-verify.log, and a failure does not stop the rest.
