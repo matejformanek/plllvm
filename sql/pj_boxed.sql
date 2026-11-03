@@ -21,6 +21,15 @@ SELECT pbx_fib(15);
 SELECT pj_delta(1973, 0, 986, 0, 1) \gset
 SELECT pj_expect('pbx_fib(int)', 'compiled') \gset
 
+-- what the executor keeps for a call goes with the transaction that made it
+SELECT pbx_fib(10);
+SELECT pbx_fib(11);
+BEGIN; SELECT pbx_fib(12); SELECT pbx_fib(13); COMMIT;
+BEGIN; SELECT pbx_fib(14); ROLLBACK;
+SELECT pbx_fib(15);
+BEGIN; SELECT pbx_fib(10); SAVEPOINT s; SELECT pbx_fib(11); ROLLBACK TO s; SELECT pbx_fib(12); COMMIT;
+SELECT pj_expect('pbx_fib(int)', 'compiled') \gset
+
 -- mandelbrot at small sizes: the loops are compiled, the result is a text
 CREATE FUNCTION pbx_mandel(sz int) RETURNS text LANGUAGE :pj_lang IMMUTABLE AS $$
 DECLARE

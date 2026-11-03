@@ -383,11 +383,11 @@ BEGIN RETURN length(n::text) + n; END $$;
 SELECT pxs_io(1), pxs_io(22), pxs_io(333);
 REVOKE EXECUTE ON FUNCTION int4out(int4) FROM PUBLIC;
 BEGIN; SET ROLE regress_pj_r1; SELECT pxs_io(4444) AS pxs_io_ok; ROLLBACK;
-GRANT EXECUTE ON FUNCTION int4out(int4) TO PUBLIC;
 SET ROLE regress_pj_r1;
 SELECT pxs_io(5), pxs_io(66);
 RESET ROLE;
 SELECT pj_expect('pxs_io(int)', 'compiled') \gset
+GRANT EXECUTE ON FUNCTION int4out(int4) TO PUBLIC;
 
 DROP OWNED BY regress_pj_r1, regress_pj_r2, regress_pj_def, regress_pj_grp;
 DROP ROLE regress_pj_r1, regress_pj_r2, regress_pj_def, regress_pj_grp;

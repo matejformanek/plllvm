@@ -29,6 +29,59 @@ SELECT pbx_fib(15);
 -- 1,973 calls, 986 of them not leaves; the first of them translated
 SELECT pj_delta(1973, 0, 986, 0, 1) \gset
 SELECT pj_expect('pbx_fib(int)', 'compiled') \gset
+-- what the executor keeps for a call goes with the transaction that made it
+SELECT pbx_fib(10);
+ pbx_fib 
+---------
+      55
+(1 row)
+
+SELECT pbx_fib(11);
+ pbx_fib 
+---------
+      89
+(1 row)
+
+BEGIN; SELECT pbx_fib(12); SELECT pbx_fib(13); COMMIT;
+ pbx_fib 
+---------
+     144
+(1 row)
+
+ pbx_fib 
+---------
+     233
+(1 row)
+
+BEGIN; SELECT pbx_fib(14); ROLLBACK;
+ pbx_fib 
+---------
+     377
+(1 row)
+
+SELECT pbx_fib(15);
+ pbx_fib 
+---------
+     610
+(1 row)
+
+BEGIN; SELECT pbx_fib(10); SAVEPOINT s; SELECT pbx_fib(11); ROLLBACK TO s; SELECT pbx_fib(12); COMMIT;
+ pbx_fib 
+---------
+      55
+(1 row)
+
+ pbx_fib 
+---------
+      89
+(1 row)
+
+ pbx_fib 
+---------
+     144
+(1 row)
+
+SELECT pj_expect('pbx_fib(int)', 'compiled') \gset
 -- mandelbrot at small sizes: the loops are compiled, the result is a text
 CREATE FUNCTION pbx_mandel(sz int) RETURNS text LANGUAGE :pj_lang IMMUTABLE AS $$
 DECLARE
