@@ -23,7 +23,6 @@ struct plllvm_path;
 
 struct PLpgSQL_function;
 struct PLpgSQL_expr;
-struct PLpgSQL_stmt_return;
 
 /* per backend; plllvm_pj_stats() */
 typedef struct plllvm_pj_counters
@@ -77,16 +76,18 @@ typedef struct PjCtx
 
 typedef Datum (*PjCode) (FunctionCallInfo fcinfo, PjCtx *ctx);
 
-/* what plpgsql_exec_error_callback() reads from the estate */
+/*
+ * What plpgsql_exec_error_callback() reads from the estate.  A statement has
+ * its stmtid for an index, a declared variable nstatements + 1 + its dno.
+ */
 typedef struct PjPos
 {
 	int			lineno;			/* 0: none */
 	const char *stmt;			/* statement type name, or NULL */
+	const char *text;			/* err_text, or NULL */
 } PjPos;
 
-/* positions of every function: none, the RETURN */
 #define PJ_POS_NONE		0
-#define PJ_POS_RETURN	1
 
 typedef enum PjH1
 {
@@ -105,12 +106,21 @@ typedef struct PjCast
 typedef enum PjPath
 {
 	PJ_PATH_MOVE,				/* copy the Datum of a variable or constant */
-	PJ_PATH_NATIVE				/* the expression compiler */
+	PJ_PATH_NATIVE,				/* the expression compiler */
+	PJ_PATH_FOLD				/* a constant, cast when we translated */
 } PjPath;
 
+/*
+ * An expression of the function, and what its value is converted to
+ * (exec_cast_value).  expr is NULL for the variable of a RETURN.
+ */
 typedef struct PjExpr
 {
 	struct PLpgSQL_expr *expr;
+	const void *owner;			/* expr, or the statement when it is NULL */
+	int			retvarno;
+	Oid			dsttype;
+	int32		dsttypmod;
 	PjH1		h1;
 	/* READY only, copies in the harvest context */
 	Expr	   *tree;
@@ -119,6 +129,11 @@ typedef struct PjExpr
 	CachedPlanSource *plansource;
 	CachedPlan *plan;
 	int			generation;
+	PjPath		path;
+	Expr	   *cast_tree;		/* NULL: none, or no code */
+	PjCast	   *cast;			/* guard of the cast, if there is one */
+	uint64		cast_gen;
+	Const	   *folded;
 } PjExpr;
 
 /* what the translator found in a function, once per pre-check */
@@ -126,7 +141,9 @@ typedef struct PjScope
 {
 	const char *reason;			/* NULL when the function is in scope */
 	List	   *exprs;			/* PjExpr, in walker order */
-	struct PLpgSQL_stmt_return *ret;	/* the RETURN that ends it, or NULL */
+	PjPos	   *pos;
+	int			npos;
+	List	   *fori;			/* stmtid of each FOR over integers */
 	int			nready;
 	int			nunplanned;
 	int			nnotsimple;
@@ -152,20 +169,16 @@ typedef struct PjHarvest
 {
 	MemoryContext cxt;
 	List	   *exprs;			/* PjExpr */
-	struct PLpgSQL_stmt_return *ret;
 	int			nunplanned;
-	PjPath		path;			/* of the RETURN's value */
-	Oid			srctype;		/* of that value; InvalidOid: no value */
-	Expr	   *cast_tree;		/* the cast of the value, or NULL */
-	PjCast	   *cast;
-	uint64		cast_gen;
-	List	   *funcids;		/* of the trees and the cast: EXECUTE is
+	PjPos	   *pos;
+	int			npos;
+	List	   *fori;
+	List	   *funcids;		/* of the trees and the casts: EXECUTE is
 								 * checked on them */
 	LocalTransactionId key_lxid;	/* they were checked in this transaction
 									 * ... */
 	Oid			key_user;		/* ... for this user ... */
 	uint64		key_epoch;		/* ... at this state of the catalogs */
-	PjPos		pos[2];
 	PjVariant  *variants;
 } PjHarvest;
 

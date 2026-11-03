@@ -45,6 +45,8 @@ const plllvm_host_symbol plllvm_host_symbols[] =
 	{"plllvm_div_zero", (void *) plllvm_div_zero},
 	{"plllvm_sqrt_negative", (void *) plllvm_sqrt_negative},
 	{"plllvm_pj_no_return", (void *) plllvm_pj_no_return},
+	{"plllvm_pj_not_null", (void *) plllvm_pj_not_null},
+	{"plllvm_pj_for_error", (void *) plllvm_pj_for_error},
 	{"plllvm_keep", (void *) plllvm_keep},
 	{"plllvm_scratch_reset", (void *) plllvm_scratch_reset},
 	{"plllvm_rt_site_call", (void *) plllvm_rt_site_call},
@@ -146,6 +148,44 @@ plllvm_pj_no_return(void)
 	ereport_domain(ERROR, PG_TEXTDOMAIN("plpgsql"),
 				   (errcode(ERRCODE_S_R_E_FUNCTION_EXECUTED_NO_RETURN_STATEMENT),
 					errmsg("control reached end of function without RETURN")));
+}
+
+/* the NOT NULL check of an assignment (exec_assign_value) */
+void
+plllvm_pj_not_null(const char *name)
+{
+	ereport_domain(ERROR, PG_TEXTDOMAIN("plpgsql"),
+				   (errcode(ERRCODE_NULL_VALUE_NOT_ALLOWED),
+					errmsg("null value cannot be assigned to variable \"%s\" declared NOT NULL",
+						   name)));
+}
+
+/* the checks of FOR over integers (exec_stmt_fori): 0 lower, 1 upper, 2 BY, 3 BY <= 0 */
+void
+plllvm_pj_for_error(int32 what)
+{
+	switch (what)
+	{
+		case 0:
+			ereport_domain(ERROR, PG_TEXTDOMAIN("plpgsql"),
+						   (errcode(ERRCODE_NULL_VALUE_NOT_ALLOWED),
+							errmsg("lower bound of FOR loop cannot be null")));
+			break;
+		case 1:
+			ereport_domain(ERROR, PG_TEXTDOMAIN("plpgsql"),
+						   (errcode(ERRCODE_NULL_VALUE_NOT_ALLOWED),
+							errmsg("upper bound of FOR loop cannot be null")));
+			break;
+		case 2:
+			ereport_domain(ERROR, PG_TEXTDOMAIN("plpgsql"),
+						   (errcode(ERRCODE_NULL_VALUE_NOT_ALLOWED),
+							errmsg("BY value of FOR loop cannot be null")));
+			break;
+		default:
+			ereport_domain(ERROR, PG_TEXTDOMAIN("plpgsql"),
+						   (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+							errmsg("BY value of FOR loop must be greater than zero")));
+	}
 }
 
 /*
