@@ -235,7 +235,20 @@ Only `plllvm_jit.c` and `plllvm_error.cpp` include LLVM headers.
   all are planned (`waiting`). After the executor ran, the code compares the
   user and the epoch of the catalogs with those of the call, checks the
   functions again if they differ and raises if one is denied; an
-  `ExprState` made for another user is built again. While a compiled frame
-  of a function is running, every call of it that goes to PL/pgSQL marks its
-  expressions as busy first, so that PL/pgSQL checks EXECUTE again as it
-  would after a failure.
+  `ExprState` made for another user is built again.
+* Marks. PL/pgSQL evaluates an expression that is busy in this transaction
+  through SPI, with its own plans. An error in a compiled frame marks the
+  expression its position names, unless a frame below it runs the same
+  expression: that frame owns the flag, as PL/pgSQL's outer frame does, and a
+  nested one writes nothing. A call that goes to PL/pgSQL while compiled
+  frames are on the stack marks the expression each of them runs for its
+  duration, and gives them back afterwards if no one has changed them. A call
+  finding any expression of the function busy goes to PL/pgSQL
+  (`interpreted:in use`), so compiled code runs only where PL/pgSQL takes its
+  simple path.
+* Differences from PL/pgSQL, kept: a compiled inner frame of a recursion
+  through an expression evaluates it on the simple path, where PL/pgSQL's
+  takes SPI, so values can follow the generic plan rather than the custom ones
+  of its first runs. Compiled frames use less stack than PL/pgSQL's: a
+  recursion deep enough for `stack depth limit exceeded` in PL/pgSQL may
+  return a value, and a deeper one still raises.
