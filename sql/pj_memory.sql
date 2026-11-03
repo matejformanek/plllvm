@@ -142,9 +142,13 @@ BEGIN
   RETURN c;
 END $$;
 SELECT pm_ma_loop(100), pm_ma_loop(100);
+-- in one transaction: what the executor keeps for the transaction is freed at its end
+BEGIN;
+SELECT pm_ma_loop(100);
 SELECT pm_total() AS before \gset
 SELECT pm_ma_loop(20000);
 SELECT pm_total() - :before < 1048576 AS flat;
+COMMIT;
 SELECT pj_expect('pm_ma(int)', 'compiled') \gset
 DROP OWNED BY regress_pj_ma;
 DROP ROLE regress_pj_ma;
