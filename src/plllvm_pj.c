@@ -147,6 +147,7 @@ static void activation_end(PLpgSQL_function *func, PjEntry *e,
 static void exec_error_callback(void *arg);
 static bool guards_ok(PjHarvest *h);
 static bool execute_allowed(PjEntry *e);
+static void pj_mark(PLpgSQL_expr *expr, LocalTransactionId lxid);
 static void pj_mark_busy(PjEntry *e);
 static Datum interp(FunctionCallInfo fcinfo, PjEntry *e);
 static void pj_mark_running(PjCtx *ctx);
@@ -986,9 +987,25 @@ pj_mark_busy(PjEntry *e)
 	{
 		if (pe->h1 != PJ_H1_READY || pe->expr == NULL)
 			continue;
-		pe->expr->expr_simple_lxid = MyProc->vxid.lxid;
-		pe->expr->expr_simple_in_use = true;
+		pj_mark(pe->expr, MyProc->vxid.lxid);
 	}
+}
+
+/*
+ * Mark expr busy in this transaction, as PL/pgSQL's own frame leaves it.  A
+ * busy expression is run by SPI, which replans in place and frees the old
+ * plan unless a refcount is held; PL/pgSQL holds one for the transaction
+ * once it has used the plan, and a compiled frame never does.  So a plan
+ * pointer without one is forgotten: PL/pgSQL then replans rather than
+ * compare it with the address of a new plan that reused its memory.
+ */
+static void
+pj_mark(PLpgSQL_expr *expr, LocalTransactionId lxid)
+{
+	if (expr->expr_simple_plan_lxid != lxid)
+		expr->expr_simple_plan = NULL;
+	expr->expr_simple_lxid = lxid;
+	expr->expr_simple_in_use = true;
 }
 
 /*
@@ -1003,8 +1020,7 @@ pj_mark_running(PjCtx *ctx)
 
 	if (expr == NULL || pj_outer_runs(ctx, expr))
 		return;
-	expr->expr_simple_lxid = MyProc->vxid.lxid;
-	expr->expr_simple_in_use = true;
+	pj_mark(expr, MyProc->vxid.lxid);
 }
 
 /* the expression the position of a compiled frame names, or NULL */
@@ -1096,8 +1112,7 @@ interp(FunctionCallInfo fcinfo, PjEntry *e)
 		saved[n].lxid = expr->expr_simple_lxid;
 		saved[n].in_use = expr->expr_simple_in_use;
 		n++;
-		expr->expr_simple_lxid = lxid;
-		expr->expr_simple_in_use = true;
+		pj_mark(expr, lxid);
 	}
 
 	PG_TRY();
