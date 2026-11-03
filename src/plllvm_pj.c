@@ -1080,6 +1080,7 @@ plllvm_pj_infos(Oid fn, plllvm_pj_info **infos)
 				info->boxed = v->boxed;
 				info->restartable = v->restartable;
 				info->translate_ms = v->translate_ms;
+				info->symbol = pstrdup(v->mod->symbol);
 			}
 		}
 		n++;

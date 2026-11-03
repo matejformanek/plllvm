@@ -51,6 +51,11 @@ SELECT s.exprs, s.unplanned, s.variants, s.native, s.boxed, s.restartable,
   FROM plllvm_pj_status('ps_inc(int)') s;
 SELECT kind, translate_ms > 0 AS translate_ms, ir_instructions > 0 AS ir
   FROM plllvm_code_cache() WHERE kind = 'pj';
+-- the symbol links the code to its function; a declined one has none
+SELECT s.symbol IS NOT NULL AS has_symbol,
+       (SELECT count(*) FROM plllvm_code_cache() c WHERE c.symbol = s.symbol) AS in_cache
+  FROM plllvm_pj_status('ps_inc(int)') s;
+SELECT s.symbol IS NULL AS declined_has_none FROM plllvm_pj_status('ps_if(int)') s;
 -- the entry polls for interrupts
 SELECT plllvm_pj_ir('ps_inc(int)') LIKE '%call void @plllvm_cfi()%' AS polls;
 SELECT count(*) AS expr_modules FROM plllvm_code_cache() WHERE kind <> 'pj' AND translate_ms IS NOT NULL;

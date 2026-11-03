@@ -69,6 +69,7 @@ typedef struct plllvm_pj_info
 	bool		boxed;
 	bool		restartable;
 	double		translate_ms;
+	char	   *symbol;			/* of the resident code, or NULL */
 } plllvm_pj_info;
 
 struct PjVariant;

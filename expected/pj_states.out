@@ -103,6 +103,21 @@ SELECT kind, translate_ms > 0 AS translate_ms, ir_instructions > 0 AS ir
  pj   | t            | t
 (2 rows)
 
+-- the symbol links the code to its function; a declined one has none
+SELECT s.symbol IS NOT NULL AS has_symbol,
+       (SELECT count(*) FROM plllvm_code_cache() c WHERE c.symbol = s.symbol) AS in_cache
+  FROM plllvm_pj_status('ps_inc(int)') s;
+ has_symbol | in_cache 
+------------+----------
+ t          |        1
+(1 row)
+
+SELECT s.symbol IS NULL AS declined_has_none FROM plllvm_pj_status('ps_if(int)') s;
+ declined_has_none 
+-------------------
+ t
+(1 row)
+
 -- the entry polls for interrupts
 SELECT plllvm_pj_ir('ps_inc(int)') LIKE '%call void @plllvm_cfi()%' AS polls;
  polls 

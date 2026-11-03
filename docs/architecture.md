@@ -21,6 +21,7 @@ plpgsql_jit` (v0.3).
 | `src/plllvm_sites.c` | call sites and constants: resolution, rebuild, EXECUTE checks, invalidation callbacks (`plllvm_rt_site_*` host functions) |
 | `src/plllvm_plpgsql.c` | the PL/pgSQL plugin: slot and chaining, `paramCompile` wrapper, trampolines on simple expressions, the Params of compiled code (`param_check`, `param_emit`); with `plllvm_pj.c`, the only file that includes `plpgsql.h` |
 | `src/plllvm_pj.c`, `src/plllvm_pj.h` | `LANGUAGE plpgsql_jit`: the call handler, the side entry of each PL/pgSQL function, translation in a subtransaction, guards, the error context, the counters of `plllvm_pj_stats()`; includes `plpgsql.h` |
+| `src/plllvm_pj_boxed.c` | `plpgsql_jit`: the expressions the compiler does not do, run by the executor on the translator's copy of the planned tree, and the per-transaction state they use; includes no `plpgsql.h` |
 | `src/plllvm_pj_translate.c` | `plpgsql_jit`: scope of a function, the planned trees of its expressions, the casts to their targets, the IR of a function (statements, loops, labels, positions); includes `plpgsql.h` |
 | `src/plllvm_ir.c` | IR text builder: temporaries, blocks, declarations |
 | `src/plllvm_expr.c` | planned expression tree to IR: the check (whole tree or nothing) and the emitter; knows neither LLVM nor PL/pgSQL |
@@ -217,3 +218,24 @@ Only `plllvm_jit.c` and `plllvm_error.cpp` include LLVM headers.
   them, so PL/pgSQL checks again too. A guard that misses sends the call to
   PL/pgSQL and the next call translates again; eight misses with fewer than
   1,000 compiled calls between decline the function (`thrash`).
+* An expression the expression compiler refuses, such as a call of a
+  function or an operator on another type, is evaluated by the executor, as
+  `exec_eval_simple_expr()` does: the code stores the variables the tree
+  reads into a `ParamListInfo`, `plllvm_pj_boxed_eval()` runs the
+  `ExprState` made from the tree copy, and the per-tuple memory is reset once
+  the value is out. The `ExprState`s, parameters and expression context of one
+  activation level of a variant (`use_count - 1`, so recursion has a level
+  per frame) hang under an `EState` of the transaction and go with it; an
+  ERROR deletes the level it crosses. A tree that calls a volatile function
+  is declined. A result of a type passed by reference is copied out of the
+  level by the handler.
+* Once the executor has run, user code has run, and a call cannot start
+  again in PL/pgSQL. A variant with such expressions has no deopt point, so
+  with an expression still unplanned the function waits in PL/pgSQL until
+  all are planned (`waiting`). After the executor ran, the code compares the
+  user and the epoch of the catalogs with those of the call, checks the
+  functions again if they differ and raises if one is denied; an
+  `ExprState` made for another user is built again. While a compiled frame
+  of a function is running, every call of it that goes to PL/pgSQL marks its
+  expressions as busy first, so that PL/pgSQL checks EXECUTE again as it
+  would after a failure.
