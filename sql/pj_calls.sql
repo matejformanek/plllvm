@@ -250,6 +250,7 @@ BEGIN
   RETURN CASE WHEN n > 5 THEN pc_cal(n) ELSE n * 2 END + coalesce(n, length(pc_cal(n)::text));
 END $$;
 SELECT pc_br(0), pc_br(0), pc_br(-3), pc_br(7), pc_br(12), pc_br(3);
+SELECT pc_br(0), pc_br(-3), pc_br(1);
 SELECT pj_expect('pc_br(int)', 'compiled') \gset
 
 -- an I/O conversion of a NULL is a NULL: the input function is strict
@@ -337,6 +338,13 @@ SELECT pc_c(5);
 SELECT pc_c(0);
 SELECT pc_c(5);
 SELECT pj_expect('pc_c(int)', 'declined:volatile callee') \gset
+-- also when the caller is not VOLATILE, which needs no snapshot of its own
+CREATE FUNCTION pc_vh(n int) RETURNS int LANGUAGE plpgsql AS $$
+BEGIN RETURN n + 1; END $$;
+CREATE FUNCTION pc_stv(n int) RETURNS int LANGUAGE :pj_lang STABLE AS $$
+BEGIN RETURN pc_vh(n) * 2; END $$;
+SELECT pc_stv(1), pc_stv(2), pc_stv(3);
+SELECT pj_expect('pc_stv(int)', 'declined:volatile callee') \gset
 CREATE FUNCTION pc_fibv(n int) RETURNS int LANGUAGE :pj_lang AS $$
 BEGIN
   IF n < 2 THEN RETURN n; END IF;
@@ -354,6 +362,25 @@ CREATE FUNCTION pc_user(n int) RETURNS int LANGUAGE :pj_lang AS $$
 BEGIN RETURN pc_helper() + n; END $$;
 SELECT pc_user(1), pc_user(2);
 SELECT pj_expect('pc_user(int)', 'declined:volatile callee') \gset
+
+-- a self-cancel in a function called through a site: the next statement of the
+-- caller is where PL/pgSQL notices it
+CREATE FUNCTION pc_cancel() RETURNS int LANGUAGE sql STABLE AS
+  'SELECT CASE WHEN pg_cancel_backend(pg_backend_pid()) THEN 1 ELSE 0 END';
+CREATE FUNCTION pc_sc(n int) RETURNS int LANGUAGE :pj_lang STABLE AS $$
+DECLARE i int;
+BEGIN
+  IF n = 0 THEN i := pc_cancel(); END IF;
+  RETURN n + 10;
+END $$;
+SELECT pc_sc(1);
+\set VERBOSITY default
+SELECT pc_sc(0);  -- fail
+SELECT pc_sc(2), pc_sc(3);
+SELECT pc_sc(0);  -- fail
+\set VERBOSITY terse
+SELECT pc_sc(1), pc_sc(2);
+SELECT pj_expect('pc_sc(int)', 'compiled') \gset
 
 -- user code ran before an expression that is not planned yet: the function
 -- waits in PL/pgSQL, where one call is one run of the callee
