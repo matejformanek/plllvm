@@ -257,6 +257,7 @@ PjCastKey
 PjCode
 PjCtx
 PjEmit
+PjEmitResult
 PjEntry
 PjEnv
 PjErrArg
@@ -265,11 +266,15 @@ PjForError
 PjFrame
 PjH1
 PjHarvest
+PjLevel
 PjMay
+PjParams
 PjPath
 PjPos
+PjSaved
 PjScope
 PjScopeWalk
+PjSlot
 PjState
 PjVariant
 Plan

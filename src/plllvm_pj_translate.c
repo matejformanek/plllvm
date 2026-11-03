@@ -61,6 +61,13 @@ typedef struct PjEnv
 	PLpgSQL_function *func;
 } PjEnv;
 
+/* the datums a tree reads */
+typedef struct PjParams
+{
+	PLpgSQL_function *func;
+	Bitmapset  *ids;
+} PjParams;
+
 typedef struct PjCastKey
 {
 	Oid			srctype;
@@ -99,8 +106,11 @@ typedef struct PjEmit
 	PLpgSQL_function *func;
 	PjHarvest  *h;
 	bool		nopos;
+	bool		all_boxed;		/* pj_codegen = boxed */
+	bool		in_return;		/* emitting the value of a RETURN */
 	bool		open;			/* the current block has no terminator yet */
 	bool		poll_pending;	/* poll after the next position store */
+	int			nboxed;			/* boxed evaluations emitted so far */
 	int			next_expr;
 	int			cur;			/* position stored in this block, or -1 */
 	List	   *frames;
@@ -136,6 +146,12 @@ static Const *cast_fold(Expr *cast_tree, const Const *src, Oid dsttype);
 static bool cast_has_io(Node *node, void *context);
 static Node *cast_bind(Node *node, void *context);
 static bool funcs_walker(Node *node, List **funcs);
+static bool params_walker(Node *node, PjParams *ctx);
+static void unbox(plllvm_ir *ir, const char *datum, const char *isnull,
+				  Oid type, plllvm_value *out);
+static PjPath expr_path(PjEmit *em, const PjExpr *pe);
+static void boxed_value(PjEmit *em, int index, const PjExpr *pe,
+						const char **datum, const char **isnull);
 static bool funcs_callback(Oid funcid, void *context);
 static const char *harvest_expr(PLpgSQL_function *func, PjHarvest *h,
 								PjEnv *env, PjExpr *pe, List **funcs);
@@ -164,6 +180,7 @@ static void set_found(PjEmit *em, bool value);
 static void set_pos(PjEmit *em, int index);
 static void stmt_enter(PjEmit *em, PLpgSQL_stmt *stmt);
 static void poll(PjEmit *em, int stmtid);
+static void poll_if_boxed(PjEmit *em, int boxed0);
 static void begin_block(PjEmit *em, const char *label);
 static void branch(PjEmit *em, const char *label);
 static void branch_if(PjEmit *em, const char *cond, const char *yes,
@@ -191,12 +208,6 @@ plllvm_pj_scope(PLpgSQL_function *func, PjScope *scope)
 		signature_polymorphic(func))
 	{
 		scope->reason = "signature";
-		return;
-	}
-
-	if (!func->fn_retbyval)
-	{
-		scope->reason = psprintf("datum:%s", format_type_be(func->fn_rettype));
 		return;
 	}
 
@@ -334,7 +345,8 @@ walk_stmt(PjScopeWalk *w, PLpgSQL_stmt *stmt)
 
 				if (ex->cond != NULL)
 					scope_expr(w, ex->cond, ex->cond, BOOLOID, -1);
-				if (frame_find(w->frames, ex->label, !ex->is_exit, NULL) == NULL)
+				if (frame_find(w->frames, ex->label, !ex->is_exit,
+							   NULL) == NULL)
 					return "label";
 				return NULL;
 			}
@@ -350,7 +362,8 @@ walk_stmt(PjScopeWalk *w, PLpgSQL_stmt *stmt)
 					if (var == NULL)
 						return "datum:record";
 					scope_expr(w, ret, NULL, func->fn_rettype, -1);
-					((PjExpr *) llast(w->scope->exprs))->retvarno = ret->retvarno;
+					((PjExpr *) llast(w->scope->exprs))->retvarno =
+						ret->retvarno;
 				}
 				else if (ret->expr != NULL)
 					scope_expr(w, ret->expr, ret->expr, func->fn_rettype, -1);
@@ -594,6 +607,15 @@ plllvm_pj_harvest(PLpgSQL_function *func, const PjScope *scope, PjHarvest *h)
 		h->pos[scope->npos + i].expr = i;
 	}
 	h->fori = list_copy(scope->fori);
+	h->ndatums = func->ndatums;
+	h->ptypes = palloc0_array(Oid, func->ndatums);
+	for (int dno = 0; dno < func->ndatums; dno++)
+	{
+		PLpgSQL_var *var = arg_var(func, dno);
+
+		if (var != NULL)
+			h->ptypes[dno] = var->datatype->typoid;
+	}
 	MemoryContextSwitchTo(oldcxt);
 
 	foreach_ptr(PjExpr, pe, scope->exprs)
@@ -614,6 +636,7 @@ plllvm_pj_harvest(PLpgSQL_function *func, const PjScope *scope, PjHarvest *h)
 				copy->plansource = expr->expr_simple_plansource;
 				copy->plan = expr->expr_simple_plan;
 				copy->generation = expr->expr_simple_plan->generation;
+				copy->need = expr->expr_simple_mutable && !func->fn_readonly;
 			}
 			else
 			{
@@ -680,23 +703,33 @@ harvest_expr(PLpgSQL_function *func, PjHarvest *h, PjEnv *env, PjExpr *pe,
 	}
 	else if (IsA(tree, Const))
 	{
-		move = true;
-		null_const = ((Const *) tree)->constisnull;
+		Const	   *c = (Const *) tree;
+
+		/* a datum of a type passed by reference is the executor's */
+		move = c->constisnull || c->constbyval;
+		null_const = c->constisnull;
 	}
 
 	if (move)
 		pe->path = PJ_PATH_MOVE;
 	else
 	{
+		PjParams	params = {func, NULL};
+
 		initStringInfo(&key);
 		initStringInfo(&facts);
-		if (!plllvm_expr_check(tree, &env->base, &key, &facts, &why))
-		{
-			if (contain_volatile_functions((Node *) tree))
-				return "volatile callee";
+		pe->path = plllvm_expr_check(tree, &env->base, &key, &facts, &why) ?
+			PJ_PATH_NATIVE : PJ_PATH_BOXED;
+		if (pe->path == PJ_PATH_BOXED &&
+			contain_volatile_functions((Node *) tree))
+			return "volatile callee";
+
+		/* a tree for the executor reads the datums by number */
+		if (params_walker((Node *) tree, &params))
 			return "node";
-		}
-		pe->path = PJ_PATH_NATIVE;
+		oldcxt = MemoryContextSwitchTo(h->cxt);
+		pe->params = bms_copy(params.ids);
+		MemoryContextSwitchTo(oldcxt);
 	}
 	funcs_walker((Node *) tree, funcs);
 
@@ -749,7 +782,7 @@ harvest_expr(PLpgSQL_function *func, PjHarvest *h, PjEnv *env, PjExpr *pe,
 
 	if (!plllvm_expr_type_repr(pe->type, &repr))
 		return "cast";
-	/* for the tests: a value of another representation than the placeholder's */
+	/* for the tests: a value of another representation than the placeholder */
 	if (plllvm_debug_inject == PLLLVM_INJECT_PJ_BAD_CAST_REPR)
 		repr = repr == PLLLVM_F64 ? PLLLVM_I64 : PLLLVM_F64;
 
@@ -761,7 +794,8 @@ harvest_expr(PLpgSQL_function *func, PjHarvest *h, PjEnv *env, PjExpr *pe,
 
 	initStringInfo(&key);
 	initStringInfo(&facts);
-	if (!plllvm_expr_check_cast(cast_tree, &env->base, repr, &key, &facts, &why))
+	if (!plllvm_expr_check_cast(cast_tree, &env->base, repr, &key, &facts,
+								&why))
 		return "cast";
 
 	oldcxt = MemoryContextSwitchTo(h->cxt);
@@ -822,22 +856,30 @@ param_emit(plllvm_expr_env *base, plllvm_ir *ir, const Param *p,
 {
 	const char *value = plllvm_ir_tmp(ir);
 	const char *isnull = plllvm_ir_tmp(ir);
-	const char *v = value;
 
 	plllvm_ir_emit(ir, "%s = load i64, ptr %%v%d", value, p->paramid - 1);
 	plllvm_ir_emit(ir, "%s = load i1, ptr %%n%d", isnull, p->paramid - 1);
+	unbox(ir, value, isnull, p->paramtype, out);
+}
 
-	switch (p->paramtype)
+/* a Datum of one of the types of the expression compiler, as its value */
+static void
+unbox(plllvm_ir *ir, const char *datum, const char *isnull, Oid type,
+	  plllvm_value *out)
+{
+	const char *v = datum;
+
+	switch (type)
 	{
 		case BOOLOID:
 			out->repr = PLLLVM_I1;
 			v = plllvm_ir_tmp(ir);
-			plllvm_ir_emit(ir, "%s = icmp ne i64 %s, 0", v, value);
+			plllvm_ir_emit(ir, "%s = icmp ne i64 %s, 0", v, datum);
 			break;
 		case INT4OID:
 			out->repr = PLLLVM_I32;
 			v = plllvm_ir_tmp(ir);
-			plllvm_ir_emit(ir, "%s = trunc i64 %s to i32", v, value);
+			plllvm_ir_emit(ir, "%s = trunc i64 %s to i32", v, datum);
 			break;
 		case INT8OID:
 			out->repr = PLLLVM_I64;
@@ -845,15 +887,15 @@ param_emit(plllvm_expr_env *base, plllvm_ir *ir, const Param *p,
 		case FLOAT8OID:
 			out->repr = PLLLVM_F64;
 			v = plllvm_ir_tmp(ir);
-			plllvm_ir_emit(ir, "%s = bitcast i64 %s to double", v, value);
+			plllvm_ir_emit(ir, "%s = bitcast i64 %s to double", v, datum);
 			break;
 		default:
-			elog(ERROR, "unexpected type of Param: %u", p->paramtype);
+			elog(ERROR, "unexpected type of a value: %u", type);
 	}
 
 	out->v = v;
 	out->isnull = isnull;
-	out->type = p->paramtype;
+	out->type = type;
 }
 
 /*
@@ -947,14 +989,45 @@ funcs_callback(Oid funcid, void *context)
 	return false;
 }
 
+/*
+ * The functions PL/pgSQL's executor checks EXECUTE for when it builds the
+ * tree: not the I/O functions of a CoerceViaIO or the comparison functions of
+ * a row comparison (execExpr.c), which check_functions_in_node() also reports
+ */
 static bool
 funcs_walker(Node *node, List **funcs)
 {
 	if (node == NULL)
 		return false;
-	if (check_functions_in_node(node, funcs_callback, funcs))
+	if (!IsA(node, CoerceViaIO) && !IsA(node, RowCompareExpr) &&
+		check_functions_in_node(node, funcs_callback, funcs))
 		return true;
 	return expression_tree_walker(node, funcs_walker, funcs);
+}
+
+/*
+ * Collect the datums of the Params of a tree; true if one is not a variable
+ * of the function that the compiled code keeps in a slot
+ */
+static bool
+params_walker(Node *node, PjParams *ctx)
+{
+	if (node == NULL)
+		return false;
+
+	if (IsA(node, Param))
+	{
+		Param	   *p = (Param *) node;
+		PLpgSQL_var *var = p->paramkind == PARAM_EXTERN ?
+			arg_var(ctx->func, p->paramid - 1) : NULL;
+
+		if (var == NULL || var->datatype->typoid != p->paramtype)
+			return true;
+		ctx->ids = bms_add_member(ctx->ids, p->paramid - 1);
+		return false;
+	}
+
+	return expression_tree_walker(node, params_walker, ctx);
 }
 
 /*
@@ -1022,7 +1095,7 @@ cast_bind(Node *node, void *context)
  * Returns false when plllvm.max_resident_compiles is reached; any other
  * failure raises an ERROR.
  */
-bool
+PjEmitResult
 plllvm_pj_emit(PLpgSQL_function *func, PjHarvest *h, PjVariant *v)
 {
 	MemoryContext cxt;
@@ -1032,6 +1105,26 @@ plllvm_pj_emit(PLpgSQL_function *func, PjHarvest *h, PjVariant *v)
 	char	   *text;
 	plllvm_jit_result result;
 	bool		ok;
+	bool		has_boxed = false;
+	bool		has_compiled = false;
+
+	em.all_boxed = v->codegen == PLLLVM_PJ_BOXED;
+	foreach_ptr(PjExpr, pe, h->exprs)
+	{
+		if (pe->h1 != PJ_H1_READY)
+			continue;
+		if (expr_path(&em, pe) == PJ_PATH_BOXED)
+			has_boxed = true;
+		else
+			has_compiled = true;
+	}
+
+	/*
+	 * Once the executor has run, a call cannot start again in the
+	 * interpreter, so code that runs it has no deopt point.
+	 */
+	if (has_boxed && h->nunplanned > 0)
+		return PJ_EMIT_WAITING;
 
 	plllvm_jit_session_ensure();
 
@@ -1123,7 +1216,7 @@ plllvm_pj_emit(PLpgSQL_function *func, PjHarvest *h, PjVariant *v)
 		if (result.capped)
 		{
 			MemoryContextDelete(cxt);
-			return false;
+			return PJ_EMIT_CAPPED;
 		}
 		ereport(ERROR,
 				(errcode(result.sqlerrcode),
@@ -1134,10 +1227,10 @@ plllvm_pj_emit(PLpgSQL_function *func, PjHarvest *h, PjVariant *v)
 
 	v->mod = result.mod;
 	v->code = (PjCode) result.mod->addr;
-	v->native = true;
-	v->boxed = false;
-	v->restartable = true;
-	return true;
+	v->native = has_compiled;
+	v->boxed = has_boxed;
+	v->restartable = !has_boxed;
+	return PJ_EMIT_OK;
 }
 
 static void
@@ -1267,6 +1360,7 @@ emit_if(PjEmit *em, PLpgSQL_stmt_if *stmt)
 	const char *done = plllvm_ir_label(em->ir);
 	List	   *conds = list_make1(stmt->cond);
 	List	   *bodies = list_make1(stmt->then_body);
+	int			boxed0 = em->nboxed;
 
 	foreach_ptr(PLpgSQL_if_elsif, elif, stmt->elsif_list)
 	{
@@ -1280,6 +1374,7 @@ emit_if(PjEmit *em, PLpgSQL_stmt_if *stmt)
 		const char *taken = expr_taken(em, cond);
 		const char *then = plllvm_ir_label(em->ir);
 		const char *next = plllvm_ir_label(em->ir);
+		bool		pending = em->poll_pending;
 
 		branch_if(em, taken, then, next);
 		begin_block(em, then);
@@ -1287,12 +1382,15 @@ emit_if(PjEmit *em, PLpgSQL_stmt_if *stmt)
 		if (em->open)
 			branch(em, done);
 		begin_block(em, next);
+		em->poll_pending = pending;
 	}
 
 	emit_stmts(em, stmt->else_body);
 	if (em->open)
 		branch(em, done);
 	begin_block(em, done);
+
+	poll_if_boxed(em, boxed0);
 }
 
 /*
@@ -1308,6 +1406,7 @@ emit_loop(PjEmit *em, PLpgSQL_stmt *stmt)
 	const char *head = plllvm_ir_label(em->ir);
 	const char *body = plllvm_ir_label(em->ir);
 	const char *end = plllvm_ir_label(em->ir);
+	int			boxed0 = em->nboxed;
 	PjFrame    *frame;
 
 	frame = frame_push(&em->frames, is_while ? wh->label : lp->label, true,
@@ -1331,6 +1430,7 @@ emit_loop(PjEmit *em, PLpgSQL_stmt *stmt)
 
 	frame_pop(&em->frames);
 	begin_block(em, end);
+	poll_if_boxed(em, boxed0);
 }
 
 /*
@@ -1343,8 +1443,10 @@ cond_may_raise(PjEmit *em)
 {
 	PjExpr	   *pe = list_nth(em->h->exprs, em->next_expr);
 
-	return pe->h1 == PJ_H1_READY && pe->path == PJ_PATH_NATIVE &&
-		may_raise((Node *) pe->tree, NULL);
+	if (pe->h1 != PJ_H1_READY)
+		return false;
+	return expr_path(em, pe) == PJ_PATH_BOXED ||
+		(pe->path == PJ_PATH_NATIVE && may_raise((Node *) pe->tree, NULL));
 }
 
 static bool
@@ -1404,6 +1506,7 @@ emit_fori(PjEmit *em, PLpgSQL_stmt_fori *stmt)
 	const char *c;
 	const char *e;
 	const char *out;
+	int			boxed0 = em->nboxed;
 
 	plllvm_ir_declare(ir, "declare void @plllvm_pj_for_error(i32)");
 
@@ -1493,6 +1596,7 @@ emit_fori(PjEmit *em, PLpgSQL_stmt_fori *stmt)
 	set_found(em, true);
 	branch(em, done);
 	begin_block(em, done);
+	poll_if_boxed(em, boxed0);
 }
 
 static void
@@ -1533,12 +1637,18 @@ emit_return(PjEmit *em, PLpgSQL_stmt_return *stmt)
 	const char *at;
 	const char *z;
 
+	/*
+	 * the handler copies a result passed by reference before anything resets
+	 * it
+	 */
+	em->in_return = true;
 	if (stmt->retvarno >= 0)
 		expr_value(em, stmt, &datum, &isnull);
 	else if (stmt->expr != NULL)
 		expr_value(em, stmt->expr, &datum, &isnull);
 	else if (em->func->fn_rettype != VOIDOID)
 		isnull = "true";
+	em->in_return = false;
 
 	at = field_ptr(ir, "%fcinfo", offsetof(FunctionCallInfoBaseData, isnull));
 	z = plllvm_ir_tmp(ir);
@@ -1609,10 +1719,21 @@ expr_value(PjEmit *em, const void *owner, const char **datum,
 		plllvm_value val;
 
 		/* the position of an expression that can raise names it */
-		if (may_raise((Node *) pe->tree, NULL) &&
+		if ((expr_path(em, pe) == PJ_PATH_BOXED ||
+			 may_raise((Node *) pe->tree, NULL)) &&
 			em->cur != em->h->nbase + index)
 			set_pos(em, em->h->nbase + index);
-		plllvm_expr_emit(ir, pe->tree, &em->env.base, &val);
+
+		if (expr_path(em, pe) == PJ_PATH_BOXED)
+		{
+			boxed_value(em, index, pe, datum, isnull);
+			if (pe->cast_tree == NULL)
+				return;
+			unbox(ir, *datum, *isnull, pe->type, &val);
+		}
+		else
+			plllvm_expr_emit(ir, pe->tree, &em->env.base, &val);
+
 		if (pe->cast_tree != NULL)
 		{
 			plllvm_value src = val;
@@ -1622,6 +1743,75 @@ expr_value(PjEmit *em, const void *owner, const char **datum,
 		*datum = plllvm_expr_box(ir, &val);
 		*isnull = val.isnull;
 	}
+}
+
+/* what the code does with an expression: path, but for pj_codegen = boxed */
+static PjPath
+expr_path(PjEmit *em, const PjExpr *pe)
+{
+	if (pe->path == PJ_PATH_NATIVE && em->all_boxed)
+		return PJ_PATH_BOXED;
+	return pe->path;
+}
+
+/*
+ * Run the expression in the executor: store the variables it reads into the
+ * parameters, evaluate, and reset the memory the evaluation used once the
+ * value is out (a RETURN is the handler's to copy)
+ */
+static void
+boxed_value(PjEmit *em, int index, const PjExpr *pe, const char **datum,
+			const char **isnull)
+{
+	plllvm_ir  *ir = em->ir;
+	const char *raw = plllvm_ir_tmp(ir);
+	const char *flag = plllvm_ir_tmp(ir);
+	const char *null = plllvm_ir_tmp(ir);
+	int			dno = -1;
+
+	plllvm_ir_declare(ir, "declare ptr @plllvm_pj_params(ptr)");
+	plllvm_ir_declare(ir, "declare i64 @plllvm_pj_boxed_eval(ptr, i32)");
+	plllvm_ir_declare(ir, "declare void @plllvm_pj_boxed_reset(ptr)");
+
+	if (pe->params != NULL)
+	{
+		const char *params = plllvm_ir_tmp(ir);
+
+		plllvm_ir_emit(ir, "%s = call ptr @plllvm_pj_params(ptr %%ctx)",
+					   params);
+		while ((dno = bms_next_member(pe->params, dno)) >= 0)
+		{
+			const char *value = plllvm_ir_tmp(ir);
+			const char *n = plllvm_ir_tmp(ir);
+			const char *z = plllvm_ir_tmp(ir);
+			size_t		at = dno * sizeof(ParamExternData);
+
+			plllvm_ir_emit(ir, "%s = load i64, ptr %%v%d", value, dno);
+			plllvm_ir_emit(ir, "store i64 %s, ptr %s", value,
+						   field_ptr(ir, params,
+									 at + offsetof(ParamExternData, value)));
+			plllvm_ir_emit(ir, "%s = load i1, ptr %%n%d", n, dno);
+			plllvm_ir_emit(ir, "%s = zext i1 %s to i8", z, n);
+			plllvm_ir_emit(ir, "store i8 %s, ptr %s", z,
+						   field_ptr(ir, params,
+									 at + offsetof(ParamExternData, isnull)));
+		}
+	}
+
+	plllvm_ir_emit(ir, "%s = call i64 @plllvm_pj_boxed_eval(ptr %%ctx, i32 %d)",
+				   raw, index);
+	plllvm_ir_emit(ir, "%s = load i8, ptr %s", flag,
+				   field_ptr(ir, "%ctx", offsetof(PjCtx, isnull)));
+	plllvm_ir_emit(ir, "%s = icmp ne i8 %s, 0", null, flag);
+	if (!em->in_return)
+		plllvm_ir_emit(ir, "call void @plllvm_pj_boxed_reset(ptr %%ctx)");
+
+	/* a poll before the next statement, as PL/pgSQL's */
+	em->nboxed++;
+	em->poll_pending = true;
+
+	*datum = raw;
+	*isnull = null;
 }
 
 /* is the next expression true? NULL is not */
@@ -1753,6 +1943,14 @@ poll(PjEmit *em, int stmtid)
 	plllvm_ir_declare(em->ir, "declare void @plllvm_pj_cfi(ptr, i32)");
 	plllvm_ir_emit(em->ir, "call void @plllvm_pj_cfi(ptr %%ctx, i32 %d)",
 				   stmtid);
+}
+
+/* some path to here may have run the executor since boxed0 */
+static void
+poll_if_boxed(PjEmit *em, int boxed0)
+{
+	if (em->nboxed != boxed0)
+		em->poll_pending = true;
 }
 
 static void

@@ -1837,7 +1837,7 @@ $$;
 
 CALL pj_ops_run();
 
--- with plpgsql_jit active, every case ran compiled but 1
+-- with plpgsql_jit active, every case ran compiled
 DO $$
 DECLARE
   got text[];
@@ -1848,7 +1848,7 @@ BEGIN
                FROM pg_proc p, LATERAL plllvm_pj_status(p.oid::regprocedure) s
               WHERE p.proname LIKE ''pj\_ops\_%'' AND s.last_path <> ''compiled'''
       INTO got;
-    IF got <> ARRAY['pj_ops_i4_39'] THEN
+    IF got <> '{}' THEN
       RAISE EXCEPTION 'not compiled: %', got;
     END IF;
   END IF;

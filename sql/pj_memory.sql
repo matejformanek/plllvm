@@ -41,3 +41,114 @@ SELECT pm_catch(10);
 SELECT pm_total() AS before \gset
 SELECT pm_catch(5000);
 SELECT pm_total() - :before < 1048576 AS flat;
+
+-- what the executor allocates is released in the iteration that allocated it:
+-- the biggest per-tuple memory the compiled code has seen does not grow with
+-- the number of iterations (0 on PL/pgSQL, which has no such number)
+CREATE FUNCTION pm_peak() RETURNS bigint LANGUAGE plpgsql AS $$
+DECLARE p bigint := 0;
+BEGIN
+  IF current_setting('plllvm.plpgsql_jit', true) IS NOT NULL
+     AND current_setting('debug_discard_caches')::int = 0 THEN
+    EXECUTE 'SELECT peak_tuple_bytes FROM plllvm_pj_stats()' INTO p;
+  END IF;
+  RETURN p;
+END $$;
+CREATE FUNCTION pm_while(n int) RETURNS int LANGUAGE :pj_lang AS $$
+DECLARE i int := 0; s int := 0;
+BEGIN
+  WHILE i < n LOOP
+    s := s + length(i::text);
+    i := i + 1;
+  END LOOP;
+  RETURN s;
+END $$;
+CREATE FUNCTION pm_cond(n int) RETURNS int LANGUAGE :pj_lang AS $$
+DECLARE i int := 0;
+BEGIN
+  WHILE length(i::text) < 20 AND i < n LOOP
+    i := i + 1;
+  END LOOP;
+  RETURN i;
+END $$;
+CREATE FUNCTION pm_cont(n int) RETURNS int LANGUAGE :pj_lang AS $$
+DECLARE i int := 0; s int := 0;
+BEGIN
+  LOOP
+    i := i + 1;
+    EXIT WHEN i > n;
+    CONTINUE WHEN length(i::text) > 1;
+    s := s + 1;
+  END LOOP;
+  RETURN s + i;
+END $$;
+CREATE FUNCTION pm_if(n int) RETURNS int LANGUAGE :pj_lang AS $$
+DECLARE i int := 0; s int := 0;
+BEGIN
+  FOR i IN 1..n LOOP
+    IF length(i::text) > 3 THEN CONTINUE; END IF;
+    s := s + 1;
+  END LOOP;
+  RETURN s;
+END $$;
+SELECT pm_while(10), pm_cond(10), pm_cont(10), pm_if(10);
+SELECT pm_while(10), pm_cond(10), pm_cont(10), pm_if(10);
+SELECT pm_while(1000), pm_cond(1000), pm_cont(1000), pm_if(1000);
+SELECT pm_peak() AS p1 \gset
+SELECT pm_while(100000), pm_cond(100000), pm_cont(100000), pm_if(100000);
+SELECT pm_peak() - :p1 < 1048576 AS peak_flat;
+SELECT pj_expect('pm_while(int)', 'compiled') \gset
+SELECT pj_expect('pm_cond(int)', 'compiled') \gset
+SELECT pj_expect('pm_cont(int)', 'compiled') \gset
+SELECT pj_expect('pm_if(int)', 'compiled') \gset
+
+-- recursion: a call allocates once per activation; nothing accumulates
+CREATE FUNCTION pm_fib(n int) RETURNS int LANGUAGE :pj_lang IMMUTABLE AS $$
+BEGIN
+  IF n < 2 THEN RETURN n; END IF;
+  RETURN pm_fib(n - 1) + pm_fib(n - 2);
+END $$;
+SELECT pm_fib(10), pm_fib(10);
+SELECT pm_fib(15);
+SELECT pm_peak() AS p1 \gset
+BEGIN;
+SELECT pm_fib(22);
+SELECT pm_total() AS before \gset
+SELECT pm_fib(22);
+SELECT pm_total() - :before < 1048576 AS flat;
+COMMIT;
+SELECT pm_peak() = :p1 AS peak_equal;
+SELECT pj_expect('pm_fib(int)', 'compiled') \gset
+
+-- a state built again for each change of user keeps nothing: a hashed IN
+-- list allocates its table when it is first evaluated
+CREATE ROLE regress_pj_ma;
+CREATE FUNCTION pm_ma(n int) RETURNS bool LANGUAGE :pj_lang STABLE AS $$
+BEGIN
+  RETURN n IN (1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18,
+               19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34,
+               35, 36, 37, 38, 39, 40);
+END $$;
+CREATE FUNCTION pm_ma_sd(n int) RETURNS bool LANGUAGE plpgsql STABLE SECURITY DEFINER AS $$
+BEGIN RETURN pm_ma(n); END $$;
+ALTER FUNCTION pm_ma_sd(int) OWNER TO regress_pj_ma;
+CREATE FUNCTION pm_ma_loop(k int) RETURNS int LANGUAGE plpgsql AS $$
+DECLARE c int := 0;
+BEGIN
+  FOR i IN 1..k LOOP
+    IF pm_ma(i) THEN c := c + 1; END IF;
+    IF pm_ma_sd(i) THEN c := c + 1; END IF;
+  END LOOP;
+  RETURN c;
+END $$;
+SELECT pm_ma_loop(100), pm_ma_loop(100);
+-- in one transaction: what the executor keeps for the transaction is freed at its end
+BEGIN;
+SELECT pm_ma_loop(100);
+SELECT pm_total() AS before \gset
+SELECT pm_ma_loop(20000);
+SELECT pm_total() - :before < 1048576 AS flat;
+COMMIT;
+SELECT pj_expect('pm_ma(int)', 'compiled') \gset
+DROP OWNED BY regress_pj_ma;
+DROP ROLE regress_pj_ma;

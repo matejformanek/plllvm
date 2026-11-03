@@ -3,8 +3,9 @@
 --
 -- PL/pgSQL checks it when it builds the ExprState, the first time in a
 -- transaction, and again after an error in that expression.  Compiled code
--- must never be more permissive; where it is stricter the sequence is in
--- pj_execute_diff.  Not run under debug_discard_caches, where every
+-- runs no function that PL/pgSQL would refuse; where it is stricter the
+-- sequence is in pj_execute_diff.  In a recursion through an expression one
+-- call's answer can differ, see there.  Not run under debug_discard_caches, where every
 -- evaluation builds an ExprState.
 --
 \getenv pj_lang PJ_LANG
@@ -364,6 +365,58 @@ BEGIN; SET ROLE regress_pj_r1; SELECT pn_for() AS pn_for_expect_denied; ROLLBACK
 GRANT EXECUTE ON FUNCTION int4(int8) TO PUBLIC;
 SELECT pn_for();  -- fail
 
+-- the hash function of a hashed IN list is checked when PL/pgSQL builds the
+-- expression, in the first transaction that reaches it
+CREATE FUNCTION pxs_in(n int) RETURNS bool LANGUAGE :pj_lang AS $$
+BEGIN RETURN n IN (1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11); END $$;
+SELECT pxs_in(1), pxs_in(2), pxs_in(3);
+REVOKE EXECUTE ON FUNCTION hashint4(int4) FROM PUBLIC;
+BEGIN; SET ROLE regress_pj_r1; SELECT pxs_in(1) AS pxs_in_expect_denied; ROLLBACK;
+BEGIN; SELECT pxs_in(1) AS pxs_in_su; ROLLBACK;
+GRANT EXECUTE ON FUNCTION hashint4(int4) TO PUBLIC;
+SELECT pxs_in(1), pxs_in(20);
+SELECT pj_expect('pxs_in(int)', 'compiled') \gset
+
+-- a function dropped by a callee in the middle of a call, not reached by this
+-- call: nothing is denied, and the call that reaches it fails as before
+CREATE FUNCTION pxd_h(n int) RETURNS int LANGUAGE sql STABLE AS 'SELECT n + 1 FROM generate_series(1, 1)';
+CREATE FUNCTION pxd_v(f int) RETURNS int LANGUAGE plpgsql SECURITY DEFINER AS $$
+BEGIN IF f > 0 THEN EXECUTE 'DROP FUNCTION pxd_h(int)'; END IF; RETURN 0; END $$;
+CREATE FUNCTION pxd_s(f int) RETURNS int LANGUAGE plpgsql STABLE AS $$ BEGIN RETURN pxd_v(f); END $$;
+CREATE FUNCTION pxd_c(n int, f int) RETURNS int LANGUAGE :pj_lang AS $$
+DECLARE i int;
+BEGIN
+  i := pxd_s(f);
+  IF n > 100 THEN RETURN pxd_h(n); END IF;
+  RETURN n;
+END $$;
+SET ROLE regress_pj_r1;
+SELECT pxd_c(200, 0), pxd_c(1, 0), pxd_c(200, 0), pxd_c(1, 0), pxd_c(200, 0);
+RESET ROLE;
+SELECT pj_expect('pxd_c(int,int)', 'compiled') \gset
+SET ROLE regress_pj_r1;
+BEGIN;
+SELECT pxd_c(1, 1) AS pxd_unreached;
+ROLLBACK;
+BEGIN;
+SAVEPOINT s;
+SELECT pxd_c(200, 1) AS pxd_reached;  -- fail
+ROLLBACK TO s;
+ROLLBACK;
+RESET ROLE;
+
+-- the I/O functions of a conversion are not checked by PL/pgSQL, so a role
+-- without them runs the call too
+CREATE FUNCTION pxs_io(n int) RETURNS int LANGUAGE :pj_lang AS $$
+BEGIN RETURN length(n::text) + n; END $$;
+SELECT pxs_io(1), pxs_io(22), pxs_io(333);
+REVOKE EXECUTE ON FUNCTION int4out(int4) FROM PUBLIC;
+BEGIN; SET ROLE regress_pj_r1; SELECT pxs_io(4444) AS pxs_io_ok; ROLLBACK;
+SET ROLE regress_pj_r1;
+SELECT pxs_io(5), pxs_io(66);
+RESET ROLE;
+SELECT pj_expect('pxs_io(int)', 'compiled') \gset
+GRANT EXECUTE ON FUNCTION int4out(int4) TO PUBLIC;
 -- an error marks the expression it stops, and no other: PL/pgSQL builds the
 -- rest as if there had been none.  A function with a marked expression is
 -- PL/pgSQL's until the transaction ends, because its SPI path plans

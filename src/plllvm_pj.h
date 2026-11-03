@@ -12,7 +12,11 @@
 #ifndef PLLLVM_PJ_H
 #define PLLLVM_PJ_H
 
+#include "access/xact.h"
+#include "executor/executor.h"
 #include "fmgr.h"
+#include "lib/ilist.h"
+#include "nodes/params.h"
 #include "nodes/pg_list.h"
 #include "nodes/primnodes.h"
 #include "utils/plancache.h"
@@ -65,13 +69,28 @@ typedef struct plllvm_pj_info
 	bool		boxed;
 	bool		restartable;
 	double		translate_ms;
+	char	   *symbol;			/* of the resident code, or NULL */
 } plllvm_pj_info;
+
+struct PjVariant;
+struct PjHarvest;
+struct PjLevel;
 
 /* the per-call state compiled code shares with the handler; pos is first */
 typedef struct PjCtx
 {
 	int32		pos;			/* index into the harvest's position table */
 	int32		deopt;			/* 1 + the expression to re-run interpreted */
+	int32		level;			/* use_count - 1: unique among live frames */
+	bool		evaluated;		/* the executor has run: no deopt any more */
+	bool		isnull;			/* of the last boxed evaluation */
+	uint64		serial;			/* of the call; tells a level's next call */
+	Oid			user;			/* the user and the state of the catalogs the */
+	uint64		epoch;			/* functions were last checked for */
+	struct PjVariant *variant;
+	struct PjHarvest *harvest;
+	struct PjLevel *lv;
+	struct PjCtx *outer;		/* the frame of the same entry below */
 } PjCtx;
 
 typedef Datum (*PjCode) (FunctionCallInfo fcinfo, PjCtx *ctx);
@@ -108,7 +127,8 @@ typedef enum PjPath
 {
 	PJ_PATH_MOVE,				/* copy the Datum of a variable or constant */
 	PJ_PATH_NATIVE,				/* the expression compiler */
-	PJ_PATH_FOLD				/* a constant, cast when we translated */
+	PJ_PATH_FOLD,				/* a constant, cast when we translated */
+	PJ_PATH_BOXED				/* the executor, on a copy of PL/pgSQL's tree */
 } PjPath;
 
 /*
@@ -132,6 +152,8 @@ typedef struct PjExpr
 	CachedPlan *plan;
 	int			generation;
 	PjPath		path;
+	Bitmapset  *params;			/* datums the tree reads, if boxed */
+	bool		need;			/* a snapshot of our own, if boxed */
 	Expr	   *cast_tree;		/* NULL: none, or no code */
 	PjCast	   *cast;			/* guard of the cast, if there is one */
 	uint64		cast_gen;
@@ -159,12 +181,39 @@ typedef struct PjVariant
 	plllvm_jit_module *mod;
 	PjCode		code;
 	bool		failed;
+	bool		waiting;		/* not restartable with expressions unplanned */
 	bool		native;
 	bool		boxed;
 	bool		restartable;
 	double		translate_ms;
 	char	   *ir;
+	struct PjLevel **levels;	/* by ctx.level */
+	int			nlevels;
 } PjVariant;
+
+/* a boxed expression's executor state, per level of one frame's activation */
+typedef struct PjSlot
+{
+	ExprState  *state;
+	MemoryContext cxt;
+	Oid			user;			/* the state was checked for ... */
+	uint64		epoch;			/* ... at this state of the catalogs */
+} PjSlot;
+
+/*
+ * What the boxed expressions of one activation level of a variant use, in
+ * the transaction that made it
+ */
+typedef struct PjLevel
+{
+	PjVariant  *variant;
+	dlist_node	node;			/* of the live levels */
+	MemoryContext cxt;			/* NULL: none in this transaction */
+	ExprContext *econtext;
+	ParamListInfo params;
+	PjSlot	   *slots;			/* by expression */
+	uint64		serial;			/* of the last call that used it */
+} PjLevel;
 
 /* one generation of a function's expressions, with the variants built on it */
 typedef struct PjHarvest
@@ -176,6 +225,8 @@ typedef struct PjHarvest
 	int			npos;
 	int			nbase;			/* then one per expression */
 	List	   *fori;
+	int			ndatums;
+	Oid		   *ptypes;			/* of the datums a boxed tree may read */
 	List	   *funcids;		/* of the trees and the casts: EXECUTE is
 								 * checked on them */
 	LocalTransactionId key_lxid;	/* they were checked in this transaction
@@ -188,14 +239,29 @@ typedef struct PjHarvest
 extern plllvm_pj_counters plllvm_pj_count;
 extern int	plllvm_pj_infos(Oid fn, plllvm_pj_info **infos);
 extern char *plllvm_pj_ir_text(Oid fn);
+extern uint64 plllvm_pj_exec_epoch(void);
+extern bool plllvm_pj_execute_check(PjHarvest *h, Oid user, uint64 epoch,
+									Oid *denied);
+
+/* plllvm_pj_boxed.c */
+extern void plllvm_pj_levels_release(PjVariant *v);
+extern void plllvm_pj_level_abort(PjCtx *ctx);
+extern void plllvm_pj_xact_callback(XactEvent event);
 
 /* plllvm_pj_translate.c */
 extern void plllvm_pj_scope(struct PLpgSQL_function *func, PjScope *scope);
 extern void plllvm_pj_classify(PjScope *scope);
 extern const char *plllvm_pj_harvest(struct PLpgSQL_function *func,
 									 const PjScope *scope, PjHarvest *h);
-extern bool plllvm_pj_emit(struct PLpgSQL_function *func, PjHarvest *h,
-						   PjVariant *v);
+typedef enum PjEmitResult
+{
+	PJ_EMIT_OK,
+	PJ_EMIT_CAPPED,				/* plllvm.max_resident_compiles is reached */
+	PJ_EMIT_WAITING				/* see PjVariant */
+} PjEmitResult;
+
+extern PjEmitResult plllvm_pj_emit(struct PLpgSQL_function *func, PjHarvest *h,
+								   PjVariant *v);
 extern const char *plllvm_pj_stmt_typename(void *stmt);
 
 #endif							/* PLLLVM_PJ_H */

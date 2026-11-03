@@ -142,5 +142,62 @@ SELECT pj_expect('pdd_if(int)', 'interpreted:execute') \gset
 ROLLBACK;
 GRANT EXECUTE ON FUNCTION int4mul(int4, int4) TO PUBLIC;
 
+-- the same IF with a tree for the executor in the branch (PL/pgSQL: 0)
+CREATE FUNCTION pdd_ifx(n int) RETURNS int LANGUAGE plpgsql_jit AS $$
+BEGIN
+  IF n > 0 THEN RETURN n + 1; ELSE RETURN n * 2 + length(n::text); END IF;
+END $$;
+SELECT pdd_ifx(1), pdd_ifx(2), pdd_ifx(-1), pdd_ifx(-2), pdd_ifx(3), pdd_ifx(-3);
+SELECT pj_expect('pdd_ifx(int)', 'compiled') \gset
+REVOKE EXECUTE ON FUNCTION int4mul(int4, int4) FROM PUBLIC;
+BEGIN;
+SELECT pdd_ifx(-1);
+SET ROLE regress_pj_r1;
+SAVEPOINT s;
+SELECT pdd_ifx(-1);  -- fail
+ROLLBACK TO s;
+RESET ROLE;
+SELECT pj_expect('pdd_ifx(int)', 'interpreted:execute') \gset
+ROLLBACK;
+GRANT EXECUTE ON FUNCTION int4mul(int4, int4) TO PUBLIC;
+
+-- a function only the executor's own build of the expression checks, here the
+-- hash function of a hashed IN list: a state built for another user is built
+-- again (PL/pgSQL: t, the state it built for the first call)
+CREATE FUNCTION pdd_in(n int) RETURNS bool LANGUAGE plpgsql_jit AS $$
+BEGIN RETURN n IN (1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11); END $$;
+SELECT pdd_in(1), pdd_in(2), pdd_in(3);
+SELECT pj_expect('pdd_in(int)', 'compiled') \gset
+REVOKE EXECUTE ON FUNCTION hashint4(int4) FROM PUBLIC;
+BEGIN;
+SELECT pdd_in(1);
+SET ROLE regress_pj_r1;
+SAVEPOINT s;
+SELECT pdd_in(2);  -- fail
+ROLLBACK TO s;
+RESET ROLE;
+ROLLBACK;
+GRANT EXECUTE ON FUNCTION hashint4(int4) TO PUBLIC;
+
+-- a recursion through an expression: the inner frames evaluate it as the
+-- simple path does, where PL/pgSQL's take SPI, with a custom plan for the first
+-- five evaluations that drops the strict call with a NULL argument.
+-- PL/pgSQL: NULL, NULL, NULL, then 22012, 22012 (22012 from the first under
+-- plan_cache_mode = force_generic_plan)
+CREATE FUNCTION pdd_g(n int, m int) RETURNS int LANGUAGE plpgsql_jit STABLE AS $$
+DECLARE v int;
+BEGIN
+  IF n <= 0 THEN RETURN 10 / (n + m); END IF;
+  IF n = 1 THEN v := NULL; ELSE v := 1; END IF;
+  RETURN pdd_g(n - 1, m) + v;
+END $$;
+SELECT pdd_g(0, 1), pdd_g(2, 1);
+SELECT pdd_g(0, 1), pdd_g(2, 1);
+SELECT pdd_g(2, 0);  -- fail
+SELECT pdd_g(2, 0);  -- fail
+SELECT pdd_g(2, 0);  -- fail
+SELECT pdd_g(2, 0);  -- fail
+SELECT pdd_g(2, 0);  -- fail
+
 DROP OWNED BY regress_pj_r1, regress_pj_grp;
 DROP ROLE regress_pj_r1, regress_pj_grp;

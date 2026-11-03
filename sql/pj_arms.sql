@@ -60,8 +60,39 @@ SELECT bool_and(variants = 2 AND last_path = 'compiled') AS two_variants
   FROM (SELECT * FROM plllvm_pj_status('pa_loop(int)')
         UNION ALL SELECT * FROM plllvm_pj_status('pa_sumn(int)')
         UNION ALL SELECT * FROM plllvm_pj_status('pa_inc(int)')) s;
--- nopos loses the line of a CONTEXT, nothing else
+-- nopos loses the line of a CONTEXT, and marks every expression after an
+-- error: it can return a wrong value, or run a function PL/pgSQL refuses
 SELECT pa_sumn(100000);
 SELECT pa_sumn(100000);
 RESET plllvm.pj_codegen;
 SELECT pa_sumn(100000);
+
+-- boxed: every expression goes to the executor, and the values are the same
+CREATE FUNCTION pa_fib(n integer) RETURNS integer LANGUAGE :pj_lang IMMUTABLE AS $$
+BEGIN
+  IF n < 2 THEN RETURN n; END IF;
+  RETURN pa_fib(n - 1) + pa_fib(n - 2);
+END $$;
+SET plllvm.pj_codegen = native;
+SELECT pa_fib(5);
+SELECT pa_fib(12);
+SELECT pj_mark() \gset
+SELECT pa_fib(12);
+SELECT pj_delta(465, 0, 232, 0, 0) \gset
+SET plllvm.pj_codegen = boxed;
+SELECT pa_run('boxed', 0);
+SELECT pa_run('boxed', 0);
+SELECT pa_run('boxed', 0);
+SELECT pa_fib(5);
+SELECT pa_fib(12);
+SELECT pj_mark() \gset
+SELECT pa_fib(12);
+SELECT pj_delta(465, 0, 697, 0, 0) \gset
+SELECT pa_run('boxed', 0);
+SELECT bool_and(variants = 3 AND last_path = 'compiled' AND boxed AND NOT restartable) AS boxed_ran
+  FROM (SELECT * FROM plllvm_pj_status('pa_loop(int)')
+        UNION ALL SELECT * FROM plllvm_pj_status('pa_sumn(int)')
+        UNION ALL SELECT * FROM plllvm_pj_status('pa_inc(int)')) s;
+SELECT boxed_evals > 0 AS boxed_evals_seen FROM plllvm_pj_stats();
+SELECT pa_sumn(100000);
+RESET plllvm.pj_codegen;

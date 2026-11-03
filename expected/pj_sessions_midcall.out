@@ -1,0 +1,112 @@
+-- pj_sessions_midcall: what changes during a compiled call, expected from plllvm
+\set VERBOSITY terse
+CREATE EXTENSION dblink;
+SELECT format('host=%s port=%s dbname=%s user=%s',
+              current_setting('unix_socket_directories'),
+              current_setting('port'), current_database(), current_user) AS conn \gset
+SELECT dblink_connect('other', :'conn');
+ dblink_connect 
+----------------
+ OK
+(1 row)
+
+-- a callee replaced by another session in the middle of a call.  pmc_cb is
+-- inlined into the tree, so the running call keeps the old body and the next
+-- call sees the new one.  PL/pgSQL sees the new body at the next evaluation.
+CREATE FUNCTION pmc_cb(n int) RETURNS int LANGUAGE sql STABLE AS 'SELECT n + 1';
+CREATE TABLE pmc_t (i int);
+CREATE FUNCTION pmc_swap(f int) RETURNS int LANGUAGE plpgsql STABLE AS $$
+BEGIN
+  IF f > 0 THEN
+    PERFORM dblink_exec('other', 'CREATE OR REPLACE FUNCTION pmc_cb(n int) RETURNS int LANGUAGE sql STABLE AS ''SELECT n + 100''');
+    -- a lock point: the invalidation is delivered
+    PERFORM count(*) FROM pmc_t;
+  END IF;
+  RETURN 0;
+END $$;
+CREATE FUNCTION pmc_loop(n int, f int) RETURNS int LANGUAGE plpgsql_jit STABLE AS $$
+DECLARE i int := 0; s int := 0;
+BEGIN
+  WHILE i < n LOOP
+    s := s + pmc_cb(i);
+    i := i + 1 + pmc_swap(f);
+  END LOOP;
+  RETURN s;
+END $$;
+SELECT pmc_loop(3, 0), pmc_loop(3, 0), pmc_loop(3, 0);
+ pmc_loop | pmc_loop | pmc_loop 
+----------+----------+----------
+        6 |        6 |        6
+(1 row)
+
+SELECT pj_expect('pmc_loop(int,int)', 'compiled') \gset
+-- 1 + 2 + 3 here (PL/pgSQL: 1 + 101 + 102)
+SELECT pmc_loop(3, 1);
+ pmc_loop 
+----------
+        6
+(1 row)
+
+SELECT pj_expect('pmc_loop(int,int)', 'compiled') \gset
+-- the next call has the new body, in PL/pgSQL and here
+SELECT pmc_loop(3, 0);
+ pmc_loop 
+----------
+      303
+(1 row)
+
+SELECT pj_expect('pmc_loop(int,int)', 'interpreted:guard miss') \gset
+SELECT pmc_loop(3, 0), pmc_loop(3, 0);
+ pmc_loop | pmc_loop 
+----------+----------
+      303 |      303
+(1 row)
+
+SELECT pj_expect('pmc_loop(int,int)', 'compiled') \gset
+-- a role switched by a callee: the next expression reached after the callee
+-- is checked under the new role, where PL/pgSQL checks nothing until the
+-- expression is built again (PL/pgSQL: 42501 at RETURN for f(1), -1 for f(-1)).
+CREATE ROLE regress_pj_mc;
+CREATE FUNCTION pmc_sw() RETURNS int LANGUAGE plpgsql STABLE AS $$
+BEGIN
+  PERFORM set_config('role', 'regress_pj_mc', true);
+  RETURN 0;
+END $$;
+CREATE FUNCTION pmc_k(n int) RETURNS int LANGUAGE plpgsql_jit STABLE AS $$
+DECLARE i int;
+BEGIN
+  i := pmc_sw();
+  IF n > 0 THEN RETURN n * 2; END IF;
+  RETURN n;
+END $$;
+SELECT pmc_k(1), pmc_k(-1);
+ pmc_k | pmc_k 
+-------+-------
+     2 |    -1
+(1 row)
+
+SELECT pj_expect('pmc_k(int)', 'compiled') \gset
+REVOKE EXECUTE ON FUNCTION int4mul(int4, int4) FROM PUBLIC;
+BEGIN;
+SAVEPOINT s;
+SELECT pmc_k(1);  -- fail
+ERROR:  permission denied for function int4mul
+ROLLBACK TO s;
+SELECT pmc_k(-1);  -- fail
+ERROR:  permission denied for function int4mul
+ROLLBACK;
+GRANT EXECUTE ON FUNCTION int4mul(int4, int4) TO PUBLIC;
+SELECT pmc_k(1);
+ pmc_k 
+-------
+     2
+(1 row)
+
+SELECT dblink_disconnect('other');
+ dblink_disconnect 
+-------------------
+ OK
+(1 row)
+
+DROP OWNED BY regress_pj_mc;
+DROP ROLE regress_pj_mc;

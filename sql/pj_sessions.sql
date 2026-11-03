@@ -161,5 +161,18 @@ SELECT dblink_exec('other', 'GRANT EXECUTE ON FUNCTION int4mul(int4, int4) TO PU
 SELECT pjs_if(1), pjs_if(-1);
 DROP ROLE regress_pj_ifr;
 
+-- a constraint added to a domain there, to a tree that casts to it
+CREATE DOMAIN pjs_dx AS int;
+CREATE FUNCTION pjs_dom(n int) RETURNS int LANGUAGE :pj_lang AS $$
+BEGIN RETURN (n + length(n::text))::pjs_dx + 0; END $$;
+SELECT pjs_dom(1), pjs_dom(2), pjs_dom(3);
+SELECT pj_expect('pjs_dom(int)', 'compiled') \gset
+SELECT dblink_exec('other', 'ALTER DOMAIN pjs_dx ADD CONSTRAINT pjs_dx_big CHECK (VALUE > 100)');
+SELECT pjs_dom(4);  -- fail
+SELECT pjs_dom(200);
+SELECT dblink_exec('other', 'ALTER DOMAIN pjs_dx DROP CONSTRAINT pjs_dx_big');
+SELECT pjs_dom(4), pjs_dom(5), pjs_dom(6);
+SELECT pj_expect('pjs_dom(int)', 'compiled') \gset
+
 SELECT dblink_disconnect('other');
 DROP ROLE regress_pj_sess;

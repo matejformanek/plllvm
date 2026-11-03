@@ -67,7 +67,7 @@ SELECT pe_i2(5::int2);
 SELECT pe_i2(5::int2);
 SELECT pe_i2(5000::int2);  -- fail
 SELECT pe_i2(5000::int2);  -- fail
-SELECT pj_expect('pe_i2(int2)', 'declined:node') \gset
+SELECT pj_expect('pe_i2(int2)', 'declined:cast') \gset
 
 CREATE FUNCTION pe_none() RETURNS int LANGUAGE :pj_lang AS $$ BEGIN END $$;
 SELECT pe_none();  -- fail

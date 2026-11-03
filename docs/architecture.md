@@ -21,6 +21,7 @@ plpgsql_jit` (v0.3).
 | `src/plllvm_sites.c` | call sites and constants: resolution, rebuild, EXECUTE checks, invalidation callbacks (`plllvm_rt_site_*` host functions) |
 | `src/plllvm_plpgsql.c` | the PL/pgSQL plugin: slot and chaining, `paramCompile` wrapper, trampolines on simple expressions, the Params of compiled code (`param_check`, `param_emit`); with `plllvm_pj.c`, the only file that includes `plpgsql.h` |
 | `src/plllvm_pj.c`, `src/plllvm_pj.h` | `LANGUAGE plpgsql_jit`: the call handler, the side entry of each PL/pgSQL function, translation in a subtransaction, guards, the error context, the counters of `plllvm_pj_stats()`; includes `plpgsql.h` |
+| `src/plllvm_pj_boxed.c` | `plpgsql_jit`: the expressions the compiler does not do, run by the executor on the translator's copy of the planned tree, and the per-transaction state they use; includes no `plpgsql.h` |
 | `src/plllvm_pj_translate.c` | `plpgsql_jit`: scope of a function, the planned trees of its expressions, the casts to their targets, the IR of a function (statements, loops, labels, positions); includes `plpgsql.h` |
 | `src/plllvm_ir.c` | IR text builder: temporaries, blocks, declarations |
 | `src/plllvm_expr.c` | planned expression tree to IR: the check (whole tree or nothing) and the emitter; knows neither LLVM nor PL/pgSQL |
@@ -213,7 +214,46 @@ Only `plllvm_jit.c` and `plllvm_error.cpp` include LLVM headers.
   (transaction, user, epoch of the catalogs it depends on), read before the
   check; when the key differs all functions are checked again, and a denial
   sends the call to PL/pgSQL, which raises it. After a compiled error the
-  expressions of the function are marked as an interpreted failure leaves
-  them, so PL/pgSQL checks again too. A guard that misses sends the call to
+  expression it stopped is marked as an interpreted failure leaves it (see
+  Marks below). A guard that misses sends the call to
   PL/pgSQL and the next call translates again; eight misses with fewer than
   1,000 compiled calls between decline the function (`thrash`).
+* An expression the expression compiler refuses, such as a call of a
+  function or an operator on another type, is evaluated by the executor, as
+  `exec_eval_simple_expr()` does: the code stores the variables the tree
+  reads into a `ParamListInfo`, `plllvm_pj_boxed_eval()` runs the
+  `ExprState` made from the tree copy, and the per-tuple memory is reset once
+  the value is out. The `ExprState`s, parameters and expression context of one
+  activation level of a variant (`use_count - 1`, so recursion has a level
+  per frame) hang under an `EState` of the transaction and go with it; an
+  ERROR deletes the level it crosses. A tree that calls a volatile function
+  is declined. A result of a type passed by reference is copied out of the
+  level by the handler.
+* Once the executor has run, user code has run, and a call cannot start
+  again in PL/pgSQL. A variant with such expressions has no deopt point, so
+  with an expression still unplanned the function waits in PL/pgSQL until
+  all are planned (`waiting`). After the executor ran, the code compares the
+  user and the epoch of the catalogs with those of the call, checks the
+  functions again if they differ and raises if one is denied; an
+  `ExprState` made for another user is built again.
+* Marks. PL/pgSQL evaluates an expression that is busy in this transaction
+  through SPI, with its own plans. An error in a compiled frame marks the
+  expression its position names, unless a frame below it runs the same
+  expression: that frame owns the flag, as PL/pgSQL's outer frame does, and a
+  nested one writes nothing. A call that goes to PL/pgSQL while compiled
+  frames are on the stack marks the expression each of them runs for its
+  duration, and gives them back afterwards if no one has changed them. A call
+  finding any expression of the function busy goes to PL/pgSQL
+  (`interpreted:in use`), so a compiled call starts only where PL/pgSQL
+  takes its simple path.
+* Differences from PL/pgSQL, kept: a compiled inner frame of a recursion
+  through an expression evaluates it on the simple path, where PL/pgSQL's
+  takes SPI, so values can follow the generic plan rather than the custom ones
+  of its first runs. A later SPI run of such an expression lags on the plan
+  count, so it can take a custom plan where PL/pgSQL takes the generic one;
+  the call then returns, or raises 22012, where PL/pgSQL raises 42501, and the
+  denied function does not run. A mark set in the middle of a call on an
+  expression no outer frame runs is seen by the compiled frame as well.
+  Compiled frames use less stack than PL/pgSQL's: a
+  recursion deep enough for `stack depth limit exceeded` in PL/pgSQL may
+  return a value, and a deeper one still raises.

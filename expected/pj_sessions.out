@@ -405,6 +405,45 @@ SELECT pjs_if(1), pjs_if(-1);
 (1 row)
 
 DROP ROLE regress_pj_ifr;
+-- a constraint added to a domain there, to a tree that casts to it
+CREATE DOMAIN pjs_dx AS int;
+CREATE FUNCTION pjs_dom(n int) RETURNS int LANGUAGE :pj_lang AS $$
+BEGIN RETURN (n + length(n::text))::pjs_dx + 0; END $$;
+SELECT pjs_dom(1), pjs_dom(2), pjs_dom(3);
+ pjs_dom | pjs_dom | pjs_dom 
+---------+---------+---------
+       2 |       3 |       4
+(1 row)
+
+SELECT pj_expect('pjs_dom(int)', 'compiled') \gset
+SELECT dblink_exec('other', 'ALTER DOMAIN pjs_dx ADD CONSTRAINT pjs_dx_big CHECK (VALUE > 100)');
+ dblink_exec  
+--------------
+ ALTER DOMAIN
+(1 row)
+
+SELECT pjs_dom(4);  -- fail
+ERROR:  value for domain pjs_dx violates check constraint "pjs_dx_big"
+CONTEXT:  PL/pgSQL function pjs_dom(integer) line 2 at RETURN
+SELECT pjs_dom(200);
+ pjs_dom 
+---------
+     203
+(1 row)
+
+SELECT dblink_exec('other', 'ALTER DOMAIN pjs_dx DROP CONSTRAINT pjs_dx_big');
+ dblink_exec  
+--------------
+ ALTER DOMAIN
+(1 row)
+
+SELECT pjs_dom(4), pjs_dom(5), pjs_dom(6);
+ pjs_dom | pjs_dom | pjs_dom 
+---------+---------+---------
+       5 |       6 |       7
+(1 row)
+
+SELECT pj_expect('pjs_dom(int)', 'compiled') \gset
 SELECT dblink_disconnect('other');
  dblink_disconnect 
 -------------------

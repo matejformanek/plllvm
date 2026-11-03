@@ -146,7 +146,7 @@ All are superuser only and show the current backend.
 | `plllvm_function_status(regprocedure)` | `not_compiled`, `live`, `stale` or `dropped`, with resident and retired compiles |
 | `plllvm_expr_stats()` | expression JIT in PL/pgSQL (below): `state`; expressions `fired`, `installed` (given code), `compiled`, `declined`, failed (`failures`) and left interpreted at the cap (`capped`); `programs` kept; `compiled_evals`, evaluations of code compiled under `plllvm.expr_eager` |
 | `plllvm_pj_stats()` | `LANGUAGE plpgsql_jit` (below): handler entries `calls` = `compiled_calls` + `deopts` + `interpreted_calls`, and among the interpreted `declines`, `guard_misses`, `null_args`, `plugin_fallbacks`, `capped`; `translations`, `attempts`, `failures`, `boxed_evals`, `resident`, `peak_tuple_bytes` |
-| `plllvm_pj_status(regprocedure)` | one row per signature and input collation of a `plpgsql_jit` function: `state` (`new`, `seen`, `compiled`, `declined`), `reason`, call counts, `last_path`, and for the translation `exprs`, `unplanned`, `variants`, `native`, `boxed`, `restartable`, `translate_ms` |
+| `plllvm_pj_status(regprocedure)` | one row per signature and input collation of a `plpgsql_jit` function: `state` (`new`, `seen`, `compiled`, `declined`), `reason`, call counts, `last_path`, and for the translation `exprs`, `unplanned`, `variants`, `native`, `boxed`, `restartable`, `translate_ms`, `symbol` (the name of the code in `plllvm_code_cache()` and in a profile) |
 | `plllvm_pj_ir(regprocedure)` | the IR of that variant, for inspection |
 | `plllvm_jit_test(ir, opt_level, codegen)` | compiles a body without calling it: `ok`, SQLSTATE, message, detail, line and column of a parse error, instruction and helper counts, checks added; `codegen => false` only checks the IR |
 
@@ -216,14 +216,19 @@ second translates the function to LLVM IR if it is in scope, and later calls
 run the code. In scope so far: blocks with `DECLARE` (defaults, `NOT NULL`,
 `CONSTANT`), assignment to a variable, `IF`, `LOOP`, `WHILE`, `FOR` over
 integers (`REVERSE`, `BY`), `EXIT` and `CONTINUE` with labels, and `RETURN`,
-with arguments, variables and result of a type passed by value that is no
-domain. An expression is a bare variable or constant, or one of `bool`,
-`int4`, `int8` and `float8` as in the expression JIT. Its value converts to
+with arguments and variables of a type passed by value that is no domain,
+and a result of any type that no variable holds. An expression is a bare
+variable or constant, or one of `bool`, `int4`, `int8` and `float8` as in the
+expression JIT; any other expression that PL/pgSQL plans as simple, calls of
+non-volatile functions included, is evaluated by the executor and costs what
+that costs. Its value converts to
 the type of its target only by a widening (`int4` to `int8` or `float8`,
 `int8` to `float8`), a pinned relabeling, or, for a constant, a conversion
 made when the function is translated. An expression that PL/pgSQL has not
 planned yet, as the branch that a first call did not reach, sends the call
-back to PL/pgSQL, and the function is translated again once it is planned.
+back to PL/pgSQL, and the function is translated again once it is planned;
+if the function has expressions for the executor, it runs in PL/pgSQL until
+all are planned.
 Anything else is declined, and `plllvm_pj_status()` says why; the function
 then runs in PL/pgSQL as before. The code runs only while the plans it was
 made from are valid, and not for a call with a NULL argument. Counters of
@@ -249,7 +254,7 @@ PL/pgSQL function and a `plpgsql_jit` one call each other freely.
 | `plllvm.expr_opt_level` | int 0–3 | 2 | superuser | LLVM optimization level of compiled expressions |
 | `plllvm.plpgsql_jit` | bool | on | superuser | the handler of `LANGUAGE plpgsql_jit` (above); off sends every call to PL/pgSQL |
 | `plllvm.pj_opt_level` | int 0–3 | 2 | superuser | LLVM optimization level of translated `plpgsql_jit` functions; another value builds another variant of the same translation at the next call |
-| `plllvm.pj_codegen` | `native`, `nopos` | native | superuser | not in `SHOW ALL`; `nopos` leaves out the stores of the statement position, so that an error says no line |
+| `plllvm.pj_codegen` | `native`, `nopos`, `boxed` | native | superuser | not in `SHOW ALL`; `nopos` leaves out the stores of the statement position, so that an error says no line, and after an error marks every expression of the function, so it can return a wrong value or run a function PL/pgSQL would refuse (it is for measurements only); `boxed` gives every expression to the executor |
 | `plllvm.expr_max_programs` | int 1–1000000 | 1000 | superuser | compiled expressions (and failed builds) kept in a session; beyond it, new expressions are interpreted |
 | `plllvm.expr_eager` | bool | off | superuser | tests only: take an expression at its first evaluation instead of the second |
 | `plllvm.regress_test_mode` | bool | off | any user | reduce volatile output (times, addresses) in regression tests |
@@ -326,8 +331,9 @@ ported: it needs `UPDATE` and `INSERT` through SPI, and its checksum does
 not depend on these writes, so a port without them would skip the work it
 measures.
 
-v0.3 adds `LANGUAGE plpgsql_jit`. It compiles functions whose body is a
-`RETURN`; statements, variables and the rest of the expressions follow.
+v0.3 adds `LANGUAGE plpgsql_jit`. It compiles scalar statements and
+locals, and runs the other simple expressions of such a function through the
+executor; SQL statements, exceptions and by-reference variables follow.
 
 ## Building and testing
 
@@ -354,7 +360,7 @@ make stage cluster-start installcheck doctor cluster-stop
 | `check-host-api` | checks that `docs/host-api.ll` declares the whole host API (part of `installcheck`) |
 | `installcheck-discard` | call-site and cache tests under `debug_discard_caches=1` |
 | `installcheck-opt` | the kernel tests at `plllvm.opt_level` 0 and 3 |
-| `installcheck-hazard PLLLVM_PORT=<port>` | tests that crash the server if their fix regresses; throwaway cluster only |
+| `installcheck-hazard PLLLVM_PORT=<port>` | tests that crash the server if their fix regresses, among them `pj_hazard` (plans, a function and the options of translation changed under a recursion of compiled calls); throwaway cluster only |
 | `installcheck-plpgsql PLLLVM_PORT=<port>` | PostgreSQL's PL/pgSQL tests without plllvm, then with it loaded and `plllvm.expr_jit` off, on, and on with `plllvm.expr_eager`; every output must match the first. `PG_SRC` and `PG_BUILD` are the server's source and build tree (the workspace's `code/` and `code/build-jit`) |
 | `installcheck-pj` | the `pj_` tests, written for stock PL/pgSQL's output and run with `LANGUAGE plpgsql_jit` (`PJ_LANG`): the handler off and on, with `plllvm.expr_jit` and `plllvm.expr_eager`, and `pj_stats` under cache flushes |
 | `installcheck-pj-once`, `installcheck-pj-opt` | the `pj_` tests whose output comes from plllvm, in one variant, and at the highest opt level |

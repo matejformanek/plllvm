@@ -75,7 +75,7 @@ SELECT p.proname, s.state, s.reason, s.last_path, s.calls, s.compiled_calls,
  ps_rnd  | declined | volatile callee | declined:volatile callee |     2 |              0 |            0
  ps_sub  | declined | not simple      | declined:not simple      |     2 |              0 |            0
  ps_text | declined | datum:text      | declined:datum:text      |     2 |              0 |            0
- ps_user | declined | node            | declined:node            |     2 |              0 |            0
+ ps_user | compiled |                 | compiled                 |     2 |              1 |            1
 (10 rows)
 
 -- a declined function keeps no code and no translation
@@ -100,6 +100,54 @@ SELECT kind, translate_ms > 0 AS translate_ms, ir_instructions > 0 AS ir
  kind | translate_ms | ir 
 ------+--------------+----
  pj   | t            | t
+ pj   | t            | t
+(2 rows)
+
+-- the symbol links the code to its function; a declined one has none
+SELECT s.symbol IS NOT NULL AS has_symbol,
+       (SELECT count(*) FROM plllvm_code_cache() c WHERE c.symbol = s.symbol) AS in_cache
+  FROM plllvm_pj_status('ps_inc(int)') s;
+ has_symbol | in_cache 
+------------+----------
+ t          |        1
+(1 row)
+
+SELECT s.symbol IS NULL AS declined_has_none FROM plllvm_pj_status('ps_if(int)') s;
+ declined_has_none 
+-------------------
+ t
+(1 row)
+
+-- a variant that waits for plans has no code: no symbol and no IR, and the
+-- variant of the other codegen keeps its own
+CREATE FUNCTION ps_w(n int) RETURNS int LANGUAGE plpgsql_jit AS $$
+BEGIN IF n > 0 THEN RETURN n + 1; END IF; RETURN n * 2; END $$;
+SELECT ps_w(1), ps_w(2), ps_w(3);
+ ps_w | ps_w | ps_w 
+------+------+------
+    2 |    3 |    4
+(1 row)
+
+SET plllvm.pj_codegen = boxed;
+SELECT ps_w(4);
+ ps_w 
+------
+    5
+(1 row)
+
+SELECT s.last_path, s.variants, s.symbol IS NULL AS no_symbol, plllvm_pj_ir('ps_w(int)') IS NULL AS no_ir
+  FROM plllvm_pj_status('ps_w(int)') s;
+ last_path | variants | no_symbol | no_ir 
+-----------+----------+-----------+-------
+ waiting   |        2 | t         | t
+(1 row)
+
+RESET plllvm.pj_codegen;
+SELECT s.last_path, s.symbol IS NOT NULL AS symbol, plllvm_pj_ir('ps_w(int)') IS NOT NULL AS ir
+  FROM (SELECT ps_w(5)) x, plllvm_pj_status('ps_w(int)') s;
+ last_path | symbol | ir 
+-----------+--------+----
+ compiled  | t      | t
 (1 row)
 
 -- the entry polls for interrupts
@@ -181,9 +229,11 @@ SELECT opt_level, kind FROM plllvm_code_cache() WHERE kind = 'pj' AND NOT retire
  opt_level | kind 
 -----------+------
          2 | pj
+         2 | pj
+         2 | pj
          0 | pj
          3 | pj
-(3 rows)
+(5 rows)
 
 -- a variant that fails to compile is marked, the others run
 CREATE FUNCTION ps_mul(n int) RETURNS int LANGUAGE plpgsql_jit AS $$

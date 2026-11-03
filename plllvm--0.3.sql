@@ -122,13 +122,15 @@ REVOKE ALL ON FUNCTION plllvm_pj_stats() FROM PUBLIC;
 -- the translation, native, boxed, restartable and translate_ms the variant
 -- the session's plllvm.pj_opt_level and plllvm.pj_codegen select; they are
 -- NULL when there is none.  translate_ms is the whole translation, in
--- plllvm_code_cache() too (rows of kind pj)
+-- plllvm_code_cache() too (rows of kind pj); symbol is the name of that
+-- variant's code there and in a profile
 CREATE FUNCTION plllvm_pj_status(fn regprocedure)
   RETURNS TABLE(signature text, collation regcollation, state text,
                 reason text, calls int8, compiled_calls int8, deopts int8,
                 guard_misses int8, translations int8, last_path text,
                 exprs int4, unplanned int4, variants int4, native bool,
-                boxed bool, restartable bool, translate_ms float8)
+                boxed bool, restartable bool, translate_ms float8,
+                symbol text)
   STRICT VOLATILE LANGUAGE c AS 'MODULE_PATHNAME';
 
 REVOKE ALL ON FUNCTION plllvm_pj_status(regprocedure) FROM PUBLIC;

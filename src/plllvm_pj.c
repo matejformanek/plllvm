@@ -36,6 +36,7 @@
 #include "portability/instr_time.h"
 #include "storage/proc.h"
 #include "utils/acl.h"
+#include "utils/datum.h"
 #include "utils/hsearch.h"
 #include "utils/inval.h"
 #include "utils/memutils.h"
@@ -46,6 +47,9 @@
 
 /* invalidations of what EXECUTE depends on; see execute_allowed() */
 static uint64 exec_epoch = 0;
+
+/* of the compiled calls, for the levels of boxed expressions */
+static uint64 call_serial = 0;
 
 /* guard misses before a function is declined as thrashing */
 #define PJ_MAX_MISSES		8
@@ -71,6 +75,7 @@ typedef enum PjState
 typedef struct PjEntry
 {
 	PLpgSQL_function *func;		/* hash key */
+	PjCtx	   *top;			/* innermost compiled frame */
 	bool		stale;			/* true, when fn_cxt is gone */
 	PjState		state;
 	const char *reason;			/* when declined */
@@ -85,6 +90,8 @@ typedef struct PjEntry
 	int64		guard_misses;
 	int64		translations;
 	PjHarvest  *harvest;
+	int			frames;			/* compiled calls running */
+	bool		waiting;		/* see translate_guarded() */
 	int			misses;			/* guard misses since the last reset */
 	int64		since_translation;	/* compiled calls since the last
 									 * translation */
@@ -131,6 +138,8 @@ static bool translate_guarded(PLpgSQL_function *func, PjEntry *e,
 static bool variant_guarded(PLpgSQL_function *func, PjEntry *e);
 static Datum run_compiled(PLpgSQL_function *func, FunctionCallInfo fcinfo,
 						  PjEntry *e);
+static Datum wait_step(PLpgSQL_function *func, FunctionCallInfo fcinfo,
+					   PjEntry *e);
 static Datum run(PLpgSQL_function *func, FunctionCallInfo fcinfo, PjEntry *e,
 				 PjVariant *v);
 static void activation_end(PLpgSQL_function *func, PjEntry *e,
@@ -139,7 +148,10 @@ static void exec_error_callback(void *arg);
 static bool guards_ok(PjHarvest *h);
 static bool execute_allowed(PjEntry *e);
 static void pj_mark_busy(PjEntry *e);
-static void pj_mark_running(PjEntry *e, PjCtx *ctx);
+static Datum interp(FunctionCallInfo fcinfo, PjEntry *e);
+static void pj_mark_running(PjCtx *ctx);
+static PLpgSQL_expr *pj_frame_expr(PjCtx *ctx);
+static bool pj_outer_runs(PjCtx *ctx, PLpgSQL_expr *expr);
 static bool pj_any_in_use(PjEntry *e);
 static PjVariant *variant_find(PjHarvest *h);
 static void decline(PjEntry *e, const char *reason);
@@ -220,7 +232,7 @@ fall_back(FunctionCallInfo fcinfo, PjEntry *e, const char *path)
 		e->last_path = path;
 	}
 
-	return call_handler_p(fcinfo);
+	return interp(fcinfo, e);
 }
 
 static void
@@ -397,6 +409,11 @@ seen_step(PLpgSQL_function *func, PjEntry *e)
 		e->last_path = "interpreted:unplanned";
 		return false;
 	}
+	if (e->waiting && scope.nunplanned > 0)
+	{
+		e->last_path = "waiting";
+		return false;
+	}
 
 	/*
 	 * After a deopt, only once the expression is planned: a plan that fails
@@ -426,7 +443,7 @@ typedef struct PjBuild
 	PjVariant  *variant;
 	MemoryContext tmp;			/* holds the harvest until it is published */
 	const char *reason;			/* why the function is declined, or NULL */
-	bool		capped;
+	PjEmitResult emitted;
 } PjBuild;
 
 static void
@@ -454,7 +471,7 @@ build_run(PjBuild *b)
 		b->variant->codegen = plllvm_pj_codegen;
 	}
 
-	b->capped = !plllvm_pj_emit(b->func, b->harvest, b->variant);
+	b->emitted = plllvm_pj_emit(b->func, b->harvest, b->variant);
 }
 
 /*
@@ -540,13 +557,24 @@ translate_guarded(PLpgSQL_function *func, PjEntry *e, PjScope *scope)
 
 	if (b.reason != NULL)
 		decline_idle(e, b.reason);
-	else if (b.capped)
+	else if (b.emitted == PJ_EMIT_CAPPED)
 	{
 		plllvm_pj_count.capped++;
 		e->last_path = "interpreted:capped";
 	}
+	else if (b.emitted == PJ_EMIT_WAITING)
+	{
+		/*
+		 * Code that runs the executor cannot give a call back to the
+		 * interpreter, and an unplanned expression is one it could not
+		 * evaluate: the calls stay interpreted until all are planned.
+		 */
+		e->waiting = true;
+		e->last_path = "waiting";
+	}
 	else
 	{
+		e->waiting = false;
 		INSTR_TIME_SET_CURRENT(elapsed);
 		INSTR_TIME_SUBTRACT(elapsed, start);
 		b.variant->translate_ms = INSTR_TIME_GET_MILLISEC(elapsed);
@@ -600,12 +628,20 @@ variant_guarded(PLpgSQL_function *func, PjEntry *e)
 
 	MemoryContextDelete(b.tmp);
 
-	if (b.capped)
+	if (b.emitted == PJ_EMIT_CAPPED)
 	{
 		/* not kept: retried at the next call */
 		plllvm_pj_count.capped++;
 		pfree(v);
 		e->last_path = "interpreted:capped";
+		return false;
+	}
+	if (b.emitted == PJ_EMIT_WAITING)
+	{
+		v->waiting = true;
+		v->next = h->variants;
+		h->variants = v;
+		e->last_path = "waiting";
 		return false;
 	}
 
@@ -676,6 +712,9 @@ run_compiled(PLpgSQL_function *func, FunctionCallInfo fcinfo, PjEntry *e)
 	if (v->failed)
 		return fall_back(fcinfo, e, "interpreted:failed");
 
+	if (v->waiting)
+		return wait_step(func, fcinfo, e);
+
 	/*
 	 * an expression in use takes PL/pgSQL's SPI path, which plans differently
 	 */
@@ -686,6 +725,23 @@ run_compiled(PLpgSQL_function *func, FunctionCallInfo fcinfo, PjEntry *e)
 		return fall_back(fcinfo, e, "interpreted:execute");
 
 	return run(func, fcinfo, e, v);
+}
+
+/* a variant waiting for plans: translate again once none is missing */
+static Datum
+wait_step(PLpgSQL_function *func, FunctionCallInfo fcinfo, PjEntry *e)
+{
+	PjScope		scope;
+
+	plllvm_pj_scope(func, &scope);
+	plllvm_pj_classify(&scope);
+	if (scope.nunplanned == 0)
+	{
+		e->state = PJ_SEEN;
+		return fall_back(fcinfo, e, "interpreted:replan");
+	}
+
+	return fall_back(fcinfo, e, "waiting");
 }
 
 /*
@@ -707,6 +763,15 @@ run(PLpgSQL_function *func, FunctionCallInfo fcinfo, PjEntry *e, PjVariant *v)
 	arg.ctx = &ctx;
 
 	func->cfunc.use_count++;
+	e->frames++;
+	ctx.outer = e->top;
+	e->top = &ctx;
+	ctx.level = func->cfunc.use_count - 1;
+	ctx.serial = ++call_serial;
+	ctx.user = e->harvest->key_user;
+	ctx.epoch = e->harvest->key_epoch;
+	ctx.variant = v;
+	ctx.harvest = e->harvest;
 	errcallback.callback = exec_error_callback;
 	errcallback.arg = &arg;
 	errcallback.previous = error_context_stack;
@@ -715,9 +780,18 @@ run(PLpgSQL_function *func, FunctionCallInfo fcinfo, PjEntry *e, PjVariant *v)
 	PG_TRY();
 	{
 		retval = v->code(fcinfo, &ctx);
+
+		/* code that ran the executor was not given a deopt point */
+		if (ctx.deopt != 0 && ctx.evaluated)
+			elog(ERROR, "plpgsql_jit: deopt after the executor ran");
+
+		/* the result lives in memory of the code's own */
+		if (ctx.deopt == 0 && !fcinfo->isnull && !func->fn_retbyval)
+			retval = datumCopy(retval, false, func->fn_rettyplen);
 	}
 	PG_CATCH();
 	{
+		e->top = ctx.outer;
 		plllvm_pj_count.compiled_calls++;
 		e->compiled_calls++;
 		e->calls++;
@@ -729,16 +803,19 @@ run(PLpgSQL_function *func, FunctionCallInfo fcinfo, PjEntry *e, PjVariant *v)
 		 * Without positions, mark them all.  The cast of the code cannot
 		 * fail, so PL/pgSQL's cast state needs no mark.
 		 */
+		MemoryContextSwitchTo(entry_cxt);
+		plllvm_pj_level_abort(&ctx);
 		if (v->codegen == PLLLVM_PJ_NOPOS)
 			pj_mark_busy(e);
 		else
-			pj_mark_running(e, &ctx);
+			pj_mark_running(&ctx);
 		activation_end(func, e, entry_cxt);
 		PG_RE_THROW();
 	}
 	PG_END_TRY();
 
 	error_context_stack = errcallback.previous;
+	e->top = ctx.outer;
 
 	if (ctx.deopt != 0)
 	{
@@ -749,7 +826,7 @@ run(PLpgSQL_function *func, FunctionCallInfo fcinfo, PjEntry *e, PjVariant *v)
 		e->state = PJ_SEEN;
 		e->calls++;
 		activation_end(func, e, entry_cxt);
-		return call_handler_p(fcinfo);
+		return interp(fcinfo, e);
 	}
 
 	plllvm_pj_count.compiled_calls++;
@@ -770,6 +847,7 @@ activation_end(PLpgSQL_function *func, PjEntry *e, MemoryContext entry_cxt)
 {
 	MemoryContextSwitchTo(entry_cxt);
 	func->cfunc.use_count--;
+	e->frames--;
 
 	/* funccache forgot a running function: its last frame lets go of us */
 	if (func->cfunc.use_count == 0 && func->cfunc.fn_hashkey == NULL)
@@ -833,35 +911,67 @@ guards_ok(PjHarvest *h)
  * May the user execute the functions in the code?  PL/pgSQL checks them when
  * it builds the ExprState of an expression, and again at every evaluation of
  * one that failed.  We check all of them whenever the transaction, the user
- * or the privileges changed since the last check, so we are never more
- * permissive.  A failure here sends the call to PL/pgSQL, which raises it
- * at the right expression, or not at all.
+ * or the privileges changed since the last check, so no function runs that
+ * PL/pgSQL would refuse, but for a privilege lost inside a transaction.  A
+ * failure here sends the call to PL/pgSQL, which raises it at the right
+ * expression, or not at all.
  */
 static bool
 execute_allowed(PjEntry *e)
 {
 	PjHarvest  *h = e->harvest;
 	Oid			user = GetUserId();
-	LocalTransactionId lxid = MyProc->vxid.lxid;
 	uint64		epoch = exec_epoch; /* before the checks, which may deliver
 									 * one */
 
-	if (h->key_lxid == lxid && h->key_user == user && h->key_epoch == epoch)
+	if (h->key_lxid == MyProc->vxid.lxid && h->key_user == user &&
+		h->key_epoch == epoch)
 		return true;
 
+	return plllvm_pj_execute_check(h, user, epoch, NULL);
+}
+
+/*
+ * The check itself, for the call's entry and for a call that finds the user
+ * or the privileges changed after the executor ran.  If a function is denied,
+ * its OID goes to *denied.
+ */
+bool
+plllvm_pj_execute_check(PjHarvest *h, Oid user, uint64 epoch, Oid *denied)
+{
+	/*
+	 * A function dropped since the plan was made is not denied: the call that
+	 * reaches it fails as PL/pgSQL's does, and one that does not, runs.
+	 */
 	foreach_oid(funcid, h->funcids)
 	{
-		if (object_aclcheck(ProcedureRelationId, funcid, user,
-							ACL_EXECUTE) != ACLCHECK_OK)
+		bool		missing = false;
+
+		if (object_aclcheck_ext(ProcedureRelationId, funcid, user,
+								ACL_EXECUTE, &missing) != ACLCHECK_OK &&
+			!missing)
+		{
+			if (denied != NULL)
+				*denied = funcid;
 			return false;
+		}
 	}
 	foreach_oid(funcid, h->funcids)
-		InvokeFunctionExecuteHook(funcid);
+	{
+		if (SearchSysCacheExists1(PROCOID, ObjectIdGetDatum(funcid)))
+			InvokeFunctionExecuteHook(funcid);
+	}
 
-	h->key_lxid = lxid;
+	h->key_lxid = MyProc->vxid.lxid;
 	h->key_user = user;
 	h->key_epoch = epoch;
 	return true;
+}
+
+uint64
+plllvm_pj_exec_epoch(void)
+{
+	return exec_epoch;
 }
 
 /*
@@ -887,22 +997,48 @@ pj_mark_busy(PjEntry *e)
  * (exec_eval_simple_expr)
  */
 static void
-pj_mark_running(PjEntry *e, PjCtx *ctx)
+pj_mark_running(PjCtx *ctx)
 {
-	PjHarvest  *h = e->harvest;
-	PjExpr	   *pe;
+	PLpgSQL_expr *expr = pj_frame_expr(ctx);
+
+	if (expr == NULL || pj_outer_runs(ctx, expr))
+		return;
+	expr->expr_simple_lxid = MyProc->vxid.lxid;
+	expr->expr_simple_in_use = true;
+}
+
+/* the expression the position of a compiled frame names, or NULL */
+static PLpgSQL_expr *
+pj_frame_expr(PjCtx *ctx)
+{
+	PjHarvest  *h = ctx->harvest;
 	int			idx;
+	PjExpr	   *pe;
 
 	if (ctx->pos < 0 || ctx->pos >= h->npos)
-		return;
+		return NULL;
 	idx = h->pos[ctx->pos].expr;
 	if (idx < 0)
-		return;
+		return NULL;
 	pe = list_nth(h->exprs, idx);
-	if (pe->h1 != PJ_H1_READY || pe->expr == NULL)
-		return;
-	pe->expr->expr_simple_lxid = MyProc->vxid.lxid;
-	pe->expr->expr_simple_in_use = true;
+	if (pe->h1 != PJ_H1_READY)
+		return NULL;
+	return pe->expr;
+}
+
+/*
+ * Does a frame below this one run the expression?  Then that frame owns the
+ * flag, as PL/pgSQL's outer frame does: a nested one writes nothing.
+ */
+static bool
+pj_outer_runs(PjCtx *ctx, PLpgSQL_expr *expr)
+{
+	for (PjCtx *c = ctx->outer; c != NULL; c = c->outer)
+	{
+		if (pj_frame_expr(c) == expr)
+			return true;
+	}
+	return false;
 }
 
 /*
@@ -920,6 +1056,70 @@ pj_any_in_use(PjEntry *e)
 			return true;
 	}
 	return false;
+}
+
+/*
+ * What a compiled frame of the entry has saved of an expression while the
+ * interpreter runs
+ */
+typedef struct PjSaved
+{
+	PLpgSQL_expr *expr;
+	LocalTransactionId lxid;
+	bool		in_use;
+} PjSaved;
+
+/*
+ * The interpreter, with the expression each compiled frame of the entry is
+ * running marked busy, as PL/pgSQL's own frames leave them while a nested call
+ * runs.  They are given back afterwards, but only if no one has changed them.
+ */
+static Datum
+interp(FunctionCallInfo fcinfo, PjEntry *e)
+{
+	PjSaved    *saved;
+	volatile int n = 0;
+	volatile Datum result = (Datum) 0;
+	LocalTransactionId lxid = MyProc->vxid.lxid;
+
+	if (e == NULL || e->top == NULL)
+		return call_handler_p(fcinfo);
+
+	saved = palloc_array(PjSaved, e->frames);
+	for (PjCtx *c = e->top; c != NULL; c = c->outer)
+	{
+		PLpgSQL_expr *expr = pj_frame_expr(c);
+
+		if (expr == NULL)
+			continue;
+		saved[n].expr = expr;
+		saved[n].lxid = expr->expr_simple_lxid;
+		saved[n].in_use = expr->expr_simple_in_use;
+		n++;
+		expr->expr_simple_lxid = lxid;
+		expr->expr_simple_in_use = true;
+	}
+
+	PG_TRY();
+	{
+		result = call_handler_p(fcinfo);
+	}
+	PG_FINALLY();
+	{
+		for (int i = n - 1; i >= 0; i--)
+		{
+			PLpgSQL_expr *x = saved[i].expr;
+
+			if (x->expr_simple_lxid == lxid && x->expr_simple_in_use)
+			{
+				x->expr_simple_lxid = saved[i].lxid;
+				x->expr_simple_in_use = saved[i].in_use;
+			}
+		}
+	}
+	PG_END_TRY();
+
+	return result;
 }
 
 static PjVariant *
@@ -967,6 +1167,7 @@ release_harvest(PjEntry *e)
 		return;
 	for (PjVariant *v = h->variants; v != NULL; v = v->next)
 	{
+		plllvm_pj_levels_release(v);
 		if (v->mod != NULL)
 			plllvm_jit_release(v->mod);
 	}
@@ -1023,13 +1224,14 @@ plllvm_pj_infos(Oid fn, plllvm_pj_info **infos)
 			info->unplanned = h->nunplanned;
 			for (PjVariant *w = h->variants; w != NULL; w = w->next)
 				info->variants++;
-			if (v != NULL && !v->failed)
+			if (v != NULL && !v->failed && !v->waiting)
 			{
 				info->has_variant = true;
 				info->native = v->native;
 				info->boxed = v->boxed;
 				info->restartable = v->restartable;
 				info->translate_ms = v->translate_ms;
+				info->symbol = pstrdup(v->mod->symbol);
 			}
 		}
 		n++;
@@ -1055,7 +1257,7 @@ plllvm_pj_ir_text(Oid fn)
 		if (e->stale || e->fn_oid != fn || e->harvest == NULL)
 			continue;
 		v = variant_find(e->harvest);
-		if (v != NULL && !v->failed)
+		if (v != NULL && !v->failed && !v->waiting)
 		{
 			hash_seq_term(&seq);
 			return pstrdup(v->ir);

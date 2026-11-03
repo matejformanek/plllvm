@@ -413,8 +413,8 @@ plllvm_pj_status(PG_FUNCTION_ARGS)
 	ninfos = plllvm_pj_infos(PG_GETARG_OID(0), &infos);
 	for (int i = 0; i < ninfos; i++)
 	{
-		Datum		values[17] = {0};
-		bool		nulls[17] = {0};
+		Datum		values[18] = {0};
+		bool		nulls[18] = {0};
 
 		values[0] = CStringGetTextDatum(infos[i].signature);
 		values[1] = ObjectIdGetDatum(infos[i].collation);
@@ -449,6 +449,10 @@ plllvm_pj_status(PG_FUNCTION_ARGS)
 		}
 		else
 			nulls[13] = nulls[14] = nulls[15] = nulls[16] = true;
+		if (infos[i].symbol != NULL)
+			values[17] = CStringGetTextDatum(infos[i].symbol);
+		else
+			nulls[17] = true;
 
 		tuplestore_putvalues(rsinfo->setResult, rsinfo->setDesc, values, nulls);
 	}
