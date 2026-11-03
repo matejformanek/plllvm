@@ -44,7 +44,6 @@
 static dlist_head live_levels = DLIST_STATIC_INIT(live_levels);
 static EState *xact_estate = NULL;
 
-static PjLevel *level_get(PjCtx *ctx);
 static void level_build(PjLevel *lv, PjHarvest *h);
 static void level_forget(PjLevel *lv);
 static void level_free(PjLevel *lv);
@@ -59,7 +58,7 @@ static void key_recheck(PjCtx *ctx, const PjExpr *pe);
 void *
 plllvm_pj_params(PjCtx *ctx)
 {
-	return level_get(ctx)->params->params;
+	return plllvm_pj_level(ctx)->params->params;
 }
 
 /*
@@ -69,7 +68,7 @@ plllvm_pj_params(PjCtx *ctx)
 Datum
 plllvm_pj_boxed_eval(PjCtx *ctx, int32 idx)
 {
-	PjLevel    *lv = level_get(ctx);
+	PjLevel    *lv = plllvm_pj_level(ctx);
 	const PjExpr *pe = list_nth(ctx->harvest->exprs, idx);
 	PjSlot	   *slot = &lv->slots[idx];
 	MemoryContext oldcxt;
@@ -122,12 +121,27 @@ plllvm_pj_boxed_reset(PjCtx *ctx)
 }
 
 /*
+ * After an expression with sites ran, as the executor of an evaluation does:
+ * check EXECUTE again if user code ran, and free what the evaluation
+ * allocated once its value is out.  The result of a RETURN is not reset: the
+ * handler copies it out.
+ */
+void
+plllvm_pj_site_done(PjCtx *ctx, int32 idx, int32 flags)
+{
+	if (flags & PJ_DONE_RECHECK)
+		key_recheck(ctx, list_nth(ctx->harvest->exprs, idx));
+	if (flags & PJ_DONE_RESET)
+		level_reset(ctx->lv);
+}
+
+/*
  * The level of the frame, made on first use in a transaction.  Its memory is
  * reset by the first use of a later call, which is when the result of a RETURN
  * has been copied out.
  */
-static PjLevel *
-level_get(PjCtx *ctx)
+PjLevel *
+plllvm_pj_level(PjCtx *ctx)
 {
 	PjLevel    *lv = ctx->lv;
 
@@ -200,6 +214,7 @@ level_build(PjLevel *lv, PjHarvest *h)
 		params->params[i].pflags = PARAM_FLAG_CONST;
 	}
 	lv->slots = palloc0_array(PjSlot, list_length(h->exprs));
+	lv->sites = palloc0_array(PjSiteSlot, Max(lv->variant->nsites, 1));
 	MemoryContextSwitchTo(oldcxt);
 
 	econtext->ecxt_param_list_info = params;
@@ -217,6 +232,7 @@ level_forget(PjLevel *lv)
 	lv->econtext = NULL;
 	lv->params = NULL;
 	lv->slots = NULL;
+	lv->sites = NULL;
 }
 
 /* nothing of the level is left; must not fail */

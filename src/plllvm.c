@@ -85,6 +85,7 @@ static const struct config_enum_entry pj_codegen_options[] = {
 	{"native", PLLLVM_PJ_NATIVE, false},
 	{"nopos", PLLLVM_PJ_NOPOS, false},
 	{"boxed", PLLLVM_PJ_BOXED, false},
+	{"v1", PLLLVM_PJ_V1, false},
 	{NULL, 0, false}
 };
 

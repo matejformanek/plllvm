@@ -102,6 +102,26 @@ struct PjCtx;
 extern void *plllvm_pj_params(struct PjCtx *ctx);
 extern Datum plllvm_pj_boxed_eval(struct PjCtx *ctx, int32 idx);
 extern void plllvm_pj_boxed_reset(struct PjCtx *ctx);
+
+/*
+ * A call of a function from compiled code, for plllvm_pj_invoke(): the
+ * arguments are stored into fcinfo, which stays with the activation level
+ * and the transaction, as PL/pgSQL's ExprState does
+ */
+typedef struct PjSite
+{
+	FunctionCallInfo fcinfo;
+	bool		track;			/* count the call, as EEOP_FUNCEXPR_FUSAGE */
+} PjSite;
+
+extern PjSite *plllvm_pj_site(struct PjCtx *ctx, int32 idx);
+extern Datum plllvm_pj_invoke_track(PjSite *site);
+extern Datum plllvm_pj_io(struct PjCtx *ctx, int32 idx, Datum arg, int32 isnull);
+extern void plllvm_pj_site_done(struct PjCtx *ctx, int32 idx, int32 flags);
+
+/* the flags of plllvm_pj_site_done() */
+#define PJ_DONE_RECHECK		1
+#define PJ_DONE_RESET		2
 extern Datum plllvm_keep(Datum value);
 extern void plllvm_scratch_reset(void);
 extern Datum plllvm_rt_site_call(plllvm_site *site, NullableDatum *args,

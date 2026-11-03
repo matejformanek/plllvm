@@ -67,7 +67,25 @@ SELECT pa_sumn(100000);
 RESET plllvm.pj_codegen;
 SELECT pa_sumn(100000);
 
--- boxed: every expression goes to the executor, and the values are the same
+-- v1: the operators that are function calls are calls of their functions
+-- through an fcinfo, not inline code
+SET plllvm.pj_codegen = v1;
+SELECT pa_run('v1', 0);
+SELECT pa_run('v1', 0);
+SELECT pa_run('v1', 0);
+SELECT bool_and(variants = 3 AND last_path = 'compiled') AS v1_ran
+  FROM (SELECT * FROM plllvm_pj_status('pa_loop(int)')
+        UNION ALL SELECT * FROM plllvm_pj_status('pa_sumn(int)')
+        UNION ALL SELECT * FROM plllvm_pj_status('pa_inc(int)')) s;
+SELECT plllvm_pj_ir('pa_inc(int)') ~ 'call i64 inttoptr' AS inc_calls,
+       plllvm_pj_ir('pa_inc(int)') !~ '@plllvm_int4_pl' AS inc_no_helper,
+       plllvm_pj_ir('pa_loop(int)') ~ 'call i64 inttoptr' AS loop_calls;
+SELECT pa_sumn(100000);
+RESET plllvm.pj_codegen;
+
+-- boxed: every expression goes to the executor, and the values are the same;
+-- fib has no expression of its own the compiler refuses, so under the others
+-- it runs none
 CREATE FUNCTION pa_fib(n integer) RETURNS integer LANGUAGE :pj_lang IMMUTABLE AS $$
 BEGIN
   IF n < 2 THEN RETURN n; END IF;
@@ -78,7 +96,7 @@ SELECT pa_fib(5);
 SELECT pa_fib(12);
 SELECT pj_mark() \gset
 SELECT pa_fib(12);
-SELECT pj_delta(465, 0, 232, 0, 0) \gset
+SELECT pj_delta(465, 0, 0, 0, 0) \gset
 SET plllvm.pj_codegen = boxed;
 SELECT pa_run('boxed', 0);
 SELECT pa_run('boxed', 0);
@@ -89,7 +107,7 @@ SELECT pj_mark() \gset
 SELECT pa_fib(12);
 SELECT pj_delta(465, 0, 697, 0, 0) \gset
 SELECT pa_run('boxed', 0);
-SELECT bool_and(variants = 3 AND last_path = 'compiled' AND boxed AND NOT restartable) AS boxed_ran
+SELECT bool_and(variants = 4 AND last_path = 'compiled' AND boxed AND NOT restartable) AS boxed_ran
   FROM (SELECT * FROM plllvm_pj_status('pa_loop(int)')
         UNION ALL SELECT * FROM plllvm_pj_status('pa_sumn(int)')
         UNION ALL SELECT * FROM plllvm_pj_status('pa_inc(int)')) s;

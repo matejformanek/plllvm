@@ -69,7 +69,7 @@ SELECT count(*) FILTER (WHERE is_prime_k(i)), sum(inc_k(i)), count(*) FILTER (WH
   FROM generate_series(2, 200) i;
 SELECT pj_expect('is_prime_k(int)', 'compiled') \gset
 
--- mandelbrot at full size: the loops compiled, the result a text from the executor
+-- mandelbrot at full size: the loops compiled, the result a text through sites
 CREATE FUNCTION mandelbrot_k(sz integer) RETURNS text LANGUAGE :pj_lang IMMUTABLE AS $$
 DECLARE
   two CONSTANT float8 := 2.0;
@@ -106,5 +106,20 @@ END $$;
 SELECT mandelbrot_k(20), mandelbrot_k(21);
 SELECT pj_mark() \gset
 SELECT mandelbrot_k(440);
-SELECT pj_delta(1, 0, 1, 0, 0) \gset
+SELECT pj_delta(1, 0, 0, 0, 0) \gset
 SELECT pj_expect('mandelbrot_k(int)', 'compiled') \gset
+
+-- fib at full size: the first call runs in the interpreter, the second
+-- translates at depth 0, and every frame of it runs compiled
+CREATE FUNCTION fib_k(n integer) RETURNS integer LANGUAGE :pj_lang IMMUTABLE AS $$
+BEGIN
+  IF n < 2 THEN
+    RETURN n;
+  END IF;
+  RETURN fib_k(n - 1) + fib_k(n - 2);
+END $$;
+SELECT fib_k(10);
+SELECT pj_mark() \gset
+SELECT fib_k(28);
+SELECT pj_delta(1028457, 0, 0, 0, 1) \gset
+SELECT pj_expect('fib_k(int)', 'compiled') \gset

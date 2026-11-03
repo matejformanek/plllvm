@@ -59,6 +59,13 @@ typedef struct PjEnv
 {
 	plllvm_expr_env base;
 	PLpgSQL_function *func;
+	PjHarvest  *h;
+	/* of one check: the expression's snapshot rule, and what its calls are */
+	bool		need;
+	int			ncalls;
+	bool		nonleaf;
+	/* of an emit: the sites made so far */
+	List	   *sites;
 } PjEnv;
 
 /* the datums a tree reads */
@@ -134,11 +141,17 @@ static void frame_pop(List **frames);
 static PjFrame *frame_find(List *frames, const char *label, bool loop_only,
 						   bool *crossed_for);
 static bool signature_polymorphic(PLpgSQL_function *func);
-static void env_init(PjEnv *env, PLpgSQL_function *func);
+static void env_init(PjEnv *env, PLpgSQL_function *func, PjHarvest *h);
 static bool param_check(plllvm_expr_env *env, const Param *p,
 						StringInfo facts);
 static void param_emit(plllvm_expr_env *env, plllvm_ir *ir, const Param *p,
 					   plllvm_value *out);
+static bool call_check(plllvm_expr_env *base, const Node *node);
+static void call_emit(plllvm_expr_env *base, plllvm_ir *ir, const Node *node,
+					  const plllvm_value *args, int nargs, plllvm_value *out);
+static const char *bare_emit(plllvm_expr_env *base, plllvm_ir *ir, Oid funcid,
+							 const char *const *args, int nargs);
+static bool site_nonleaf(const Node *node);
 static PjCast *cast_get(Oid srctype, int32 srctypmod, Oid dsttype,
 						Expr **tree);
 static bool cast_pinned(Oid srctype, Oid dsttype);
@@ -176,6 +189,7 @@ static void store_var(PjEmit *em, int dno, const char *datum,
 					  const char *isnull);
 static void check_not_null(PjEmit *em, PLpgSQL_var *var, const char *isnull);
 static void for_check(PjEmit *em, const char *failed, PjForError what);
+static void site_done(PjEmit *em, int index, const PjExpr *pe);
 static void set_found(PjEmit *em, bool value);
 static void set_pos(PjEmit *em, int index);
 static void stmt_enter(PjEmit *em, PLpgSQL_stmt *stmt);
@@ -591,7 +605,7 @@ plllvm_pj_harvest(PLpgSQL_function *func, const PjScope *scope, PjHarvest *h)
 	List	   *funcs = NIL;
 	const char *reason = NULL;
 
-	env_init(&env, func);
+	env_init(&env, func, h);
 
 	oldcxt = MemoryContextSwitchTo(h->cxt);
 	/* then a copy of its statement's for each expression, naming it */
@@ -718,11 +732,18 @@ harvest_expr(PLpgSQL_function *func, PjHarvest *h, PjEnv *env, PjExpr *pe,
 
 		initStringInfo(&key);
 		initStringInfo(&facts);
+		env->need = pe->need;
+		env->ncalls = 0;
+		env->nonleaf = false;
 		pe->path = plllvm_expr_check(tree, &env->base, &key, &facts, &why) ?
 			PJ_PATH_NATIVE : PJ_PATH_BOXED;
-		if (pe->path == PJ_PATH_BOXED &&
-			contain_volatile_functions((Node *) tree))
+		if (contain_volatile_functions((Node *) tree))
 			return "volatile callee";
+		if (pe->path == PJ_PATH_NATIVE)
+		{
+			pe->ncalls = env->ncalls;
+			pe->nonleaf = env->nonleaf;
+		}
 
 		/* a tree for the executor reads the datums by number */
 		if (params_walker((Node *) tree, &params))
@@ -823,12 +844,17 @@ arg_var(PLpgSQL_function *func, int dno)
 }
 
 static void
-env_init(PjEnv *env, PLpgSQL_function *func)
+env_init(PjEnv *env, PLpgSQL_function *func, PjHarvest *h)
 {
+	memset(env, 0, sizeof(PjEnv));
 	env->base.param_check = param_check;
 	env->base.param_emit = param_emit;
+	env->base.call_check = call_check;
+	env->base.call_emit = call_emit;
+	env->base.bare_emit = bare_emit;
 	env->base.arg = env;
 	env->func = func;
+	env->h = h;
 }
 
 /*
@@ -862,6 +888,214 @@ param_emit(plllvm_expr_env *base, plllvm_ir *ir, const Param *p,
 	unbox(ir, value, isnull, p->paramtype, out);
 }
 
+/*
+ * May the compiler call this function, or convert through the I/O functions,
+ * as the executor would?  A volatile callee is refused by the caller
+ * (admission), and an expression that needs a snapshot of its own is the
+ * executor's.
+ */
+static bool
+call_check(plllvm_expr_env *base, const Node *node)
+{
+	PjEnv	   *env = (PjEnv *) base->arg;
+	int			nargs;
+
+	if (env->need)
+		return false;
+
+	switch (nodeTag(node))
+	{
+		case T_FuncExpr:
+			nargs = list_length(((const FuncExpr *) node)->args);
+			break;
+		case T_OpExpr:
+			nargs = list_length(((const OpExpr *) node)->args);
+			break;
+		case T_CoerceViaIO:
+			{
+				const CoerceViaIO *io = (const CoerceViaIO *) node;
+				Oid			input;
+				Oid			ioparam;
+
+				/* a NULL is not passed on, and a domain checks it */
+				if (get_typtype(io->resulttype) == TYPTYPE_DOMAIN)
+					return false;
+				getTypeInputInfo(io->resulttype, &input, &ioparam);
+				if (!func_strict(input))
+					return false;
+				nargs = 1;
+				break;
+			}
+		default:
+			return false;
+	}
+	if (nargs > FUNC_MAX_ARGS)
+		return false;
+
+	env->ncalls++;
+	if (site_nonleaf(node))
+		env->nonleaf = true;
+	return true;
+}
+
+/*
+ * May the call run code that is not the server's own?  A function of the
+ * catalogs, on types of the catalogs, does not.
+ */
+static bool
+site_nonleaf(const Node *node)
+{
+	Oid			funcid = InvalidOid;
+	Oid			result;
+	List	   *args;
+
+	switch (nodeTag(node))
+	{
+		case T_FuncExpr:
+			funcid = ((const FuncExpr *) node)->funcid;
+			result = ((const FuncExpr *) node)->funcresulttype;
+			args = ((const FuncExpr *) node)->args;
+			break;
+		case T_OpExpr:
+			funcid = ((const OpExpr *) node)->opfuncid;
+			result = ((const OpExpr *) node)->opresulttype;
+			args = ((const OpExpr *) node)->args;
+			break;
+		default:
+			result = ((const CoerceViaIO *) node)->resulttype;
+			args = list_make1(((const CoerceViaIO *) node)->arg);
+			break;
+	}
+
+	if ((OidIsValid(funcid) && funcid >= FirstUnpinnedObjectId) ||
+		result >= FirstUnpinnedObjectId)
+		return true;
+	foreach_ptr(Node, arg, args)
+	{
+		if (exprType(arg) >= FirstUnpinnedObjectId)
+			return true;
+	}
+	return false;
+}
+
+/*
+ * The call of a site: the arguments stored into the site's fcinfo, then the
+ * call, which does the strictness test (plllvm_pj_invoke).  A CoerceViaIO is
+ * one call of the host.
+ */
+static void
+call_emit(plllvm_expr_env *base, plllvm_ir *ir, const Node *node,
+		  const plllvm_value *args, int nargs, plllvm_value *out)
+{
+	PjEnv	   *env = (PjEnv *) base->arg;
+	PjSiteDesc *desc = palloc0_object(PjSiteDesc);
+	int			idx = list_length(env->sites);
+	Oid			result;
+	const char *datum;
+	const char *flag;
+	const char *byte = plllvm_ir_tmp(ir);
+
+	desc->node = node;
+	desc->nargs = nargs;
+	desc->nonleaf = site_nonleaf(node);
+	switch (nodeTag(node))
+	{
+		case T_FuncExpr:
+			desc->funcid = ((const FuncExpr *) node)->funcid;
+			desc->collation = ((const FuncExpr *) node)->inputcollid;
+			result = ((const FuncExpr *) node)->funcresulttype;
+			break;
+		case T_OpExpr:
+			desc->funcid = ((const OpExpr *) node)->opfuncid;
+			desc->collation = ((const OpExpr *) node)->inputcollid;
+			result = ((const OpExpr *) node)->opresulttype;
+			break;
+		default:
+			desc->kind = PJ_SITE_IO;
+			result = ((const CoerceViaIO *) node)->resulttype;
+			break;
+	}
+	env->sites = lappend(env->sites, desc);
+
+	if (desc->kind == PJ_SITE_IO)
+	{
+		const char *z = plllvm_ir_tmp(ir);
+
+		plllvm_ir_declare(ir, "declare i64 @plllvm_pj_io(ptr, i32, i64, i32)");
+		plllvm_ir_emit(ir, "%s = zext i1 %s to i32", z, args[0].isnull);
+		datum = plllvm_ir_tmp(ir);
+		plllvm_ir_emit(ir, "%s = call i64 @plllvm_pj_io(ptr %%ctx, i32 %d, i64 %s, i32 %s)",
+					   datum, idx, plllvm_expr_box(ir, &args[0]), z);
+		flag = field_ptr(ir, "%ctx", offsetof(PjCtx, isnull));
+	}
+	else
+	{
+		const char *site = plllvm_ir_tmp(ir);
+		const char *fcinfo = plllvm_ir_tmp(ir);
+
+		plllvm_ir_declare(ir, "declare ptr @plllvm_pj_site(ptr, i32)");
+		plllvm_ir_declare(ir, "declare i64 @plllvm_pj_invoke(ptr)");
+		plllvm_ir_emit(ir, "%s = call ptr @plllvm_pj_site(ptr %%ctx, i32 %d)",
+					   site, idx);
+		plllvm_ir_emit(ir, "%s = load ptr, ptr %s", fcinfo, site);
+		for (int i = 0; i < nargs; i++)
+		{
+			const char *z = plllvm_ir_tmp(ir);
+			size_t		at = offsetof(FunctionCallInfoBaseData, args) +
+				i * sizeof(NullableDatum);
+
+			plllvm_ir_emit(ir, "store i64 %s, ptr %s", plllvm_expr_box(ir, &args[i]),
+						   field_ptr(ir, fcinfo, at + offsetof(NullableDatum, value)));
+			plllvm_ir_emit(ir, "%s = zext i1 %s to i8", z, args[i].isnull);
+			plllvm_ir_emit(ir, "store i8 %s, ptr %s", z,
+						   field_ptr(ir, fcinfo, at + offsetof(NullableDatum, isnull)));
+		}
+		datum = plllvm_ir_tmp(ir);
+		plllvm_ir_emit(ir, "%s = call i64 @plllvm_pj_invoke(ptr %s)", datum, site);
+		flag = field_ptr(ir, fcinfo, offsetof(FunctionCallInfoBaseData, isnull));
+	}
+
+	plllvm_ir_emit(ir, "%s = load i8, ptr %s", byte, flag);
+	flag = plllvm_ir_tmp(ir);
+	plllvm_ir_emit(ir, "%s = icmp ne i8 %s, 0", flag, byte);
+	unbox(ir, datum, flag, result, out);
+}
+
+/*
+ * An operator of the table as a call of its function: one fcinfo of the
+ * harvest, a constant address.  Only a function that cannot re-enter, never
+ * runs code of a user and allocates nothing is called this way.
+ */
+static const char *
+bare_emit(plllvm_expr_env *base, plllvm_ir *ir, Oid funcid,
+		  const char *const *args, int nargs)
+{
+	PjEnv	   *env = (PjEnv *) base->arg;
+	FmgrInfo   *flinfo = MemoryContextAllocZero(env->h->cxt, sizeof(FmgrInfo));
+	FunctionCallInfo fcinfo = MemoryContextAllocZero(env->h->cxt,
+													 SizeForFunctionCallInfo(nargs));
+	char	   *fc;
+	const char *result = plllvm_ir_tmp(ir);
+
+	fmgr_info_cxt(funcid, flinfo, env->h->cxt);
+	InitFunctionCallInfoData(*fcinfo, flinfo, nargs, InvalidOid, NULL, NULL);
+	fc = psprintf("inttoptr (i64 " UINT64_FORMAT " to ptr)",
+				  (uint64) (uintptr_t) fcinfo);
+
+	for (int i = 0; i < nargs; i++)
+		plllvm_ir_emit(ir, "store i64 %s, ptr %s", args[i],
+					   field_ptr(ir, fc,
+								 offsetof(FunctionCallInfoBaseData, args) +
+								 i * sizeof(NullableDatum) +
+								 offsetof(NullableDatum, value)));
+	plllvm_ir_emit(ir, "store i8 0, ptr %s",
+				   field_ptr(ir, fc, offsetof(FunctionCallInfoBaseData, isnull)));
+	plllvm_ir_emit(ir, "%s = call i64 inttoptr (i64 " UINT64_FORMAT " to ptr)(ptr %s)",
+				   result, (uint64) (uintptr_t) flinfo->fn_addr, fc);
+
+	return result;
+}
+
 /* a Datum of one of the types of the expression compiler, as its value */
 static void
 unbox(plllvm_ir *ir, const char *datum, const char *isnull, Oid type,
@@ -890,7 +1124,7 @@ unbox(plllvm_ir *ir, const char *datum, const char *isnull, Oid type,
 			plllvm_ir_emit(ir, "%s = bitcast i64 %s to double", v, datum);
 			break;
 		default:
-			elog(ERROR, "unexpected type of a value: %u", type);
+			out->repr = PLLLVM_DATUM;
 	}
 
 	out->v = v;
@@ -1107,6 +1341,7 @@ plllvm_pj_emit(PLpgSQL_function *func, PjHarvest *h, PjVariant *v)
 	bool		ok;
 	bool		has_boxed = false;
 	bool		has_compiled = false;
+	bool		has_user = false;
 
 	em.all_boxed = v->codegen == PLLLVM_PJ_BOXED;
 	foreach_ptr(PjExpr, pe, h->exprs)
@@ -1116,14 +1351,17 @@ plllvm_pj_emit(PLpgSQL_function *func, PjHarvest *h, PjVariant *v)
 		if (expr_path(&em, pe) == PJ_PATH_BOXED)
 			has_boxed = true;
 		else
+		{
 			has_compiled = true;
+			has_user |= pe->nonleaf;
+		}
 	}
 
 	/*
-	 * Once the executor has run, a call cannot start again in the
-	 * interpreter, so code that runs it has no deopt point.
+	 * Once the executor or code of a user has run, a call cannot start again
+	 * in the interpreter, so code that runs them has no deopt point.
 	 */
-	if (has_boxed && h->nunplanned > 0)
+	if ((has_boxed || has_user) && h->nunplanned > 0)
 		return PJ_EMIT_WAITING;
 
 	plllvm_jit_session_ensure();
@@ -1133,7 +1371,8 @@ plllvm_pj_emit(PLpgSQL_function *func, PjHarvest *h, PjVariant *v)
 								ALLOCSET_DEFAULT_SIZES);
 	oldcxt = MemoryContextSwitchTo(cxt);
 
-	env_init(&em.env, func);
+	env_init(&em.env, func, h);
+	em.env.base.no_native_ops = v->codegen == PLLLVM_PJ_V1;
 	em.func = func;
 	em.h = h;
 	em.nopos = v->codegen == PLLLVM_PJ_NOPOS;
@@ -1210,6 +1449,13 @@ plllvm_pj_emit(PLpgSQL_function *func, PjHarvest *h, PjVariant *v)
 	MemoryContextSwitchTo(h->cxt);
 	v->ir = pstrdup(text);
 	MemoryContextSwitchTo(oldcxt);
+	if (ok)
+	{
+		v->nsites = list_length(em.env.sites);
+		v->sites = MemoryContextAlloc(h->cxt, sizeof(PjSiteDesc) * Max(v->nsites, 1));
+		for (int i = 0; i < v->nsites; i++)
+			v->sites[i] = *(PjSiteDesc *) list_nth(em.env.sites, i);
+	}
 
 	if (!ok)
 	{
@@ -1229,7 +1475,7 @@ plllvm_pj_emit(PLpgSQL_function *func, PjHarvest *h, PjVariant *v)
 	v->code = (PjCode) result.mod->addr;
 	v->native = has_compiled;
 	v->boxed = has_boxed;
-	v->restartable = !has_boxed;
+	v->restartable = !has_boxed && !has_user;
 	return PJ_EMIT_OK;
 }
 
@@ -1732,7 +1978,11 @@ expr_value(PjEmit *em, const void *owner, const char **datum,
 			unbox(ir, *datum, *isnull, pe->type, &val);
 		}
 		else
+		{
 			plllvm_expr_emit(ir, pe->tree, &em->env.base, &val);
+			if (pe->ncalls > 0)
+				site_done(em, index, pe);
+		}
 
 		if (pe->cast_tree != NULL)
 		{
@@ -1812,6 +2062,31 @@ boxed_value(PjEmit *em, int index, const PjExpr *pe, const char **datum,
 
 	*datum = raw;
 	*isnull = null;
+}
+
+/*
+ * After an expression with calls: what the evaluation of the executor does
+ * once its value is out, but a RETURN's value is the handler's to copy, so
+ * it is not freed.  Only a call that may run code of a user needs the check
+ * of EXECUTE, and a poll before the next statement.
+ */
+static void
+site_done(PjEmit *em, int index, const PjExpr *pe)
+{
+	int			flags = (pe->nonleaf ? PJ_DONE_RECHECK : 0) |
+		(em->in_return ? 0 : PJ_DONE_RESET);
+
+	if (pe->nonleaf)
+	{
+		em->nboxed++;
+		em->poll_pending = true;
+	}
+	if (flags == 0)
+		return;
+
+	plllvm_ir_declare(em->ir, "declare void @plllvm_pj_site_done(ptr, i32, i32)");
+	plllvm_ir_emit(em->ir, "call void @plllvm_pj_site_done(ptr %%ctx, i32 %d, i32 %d)",
+				   index, flags);
 }
 
 /* is the next expression true? NULL is not */

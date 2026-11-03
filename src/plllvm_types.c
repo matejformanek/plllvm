@@ -63,6 +63,7 @@ extern int32 plllvm_nargs(FunctionCallInfo fcinfo);
 extern Datum plllvm_return_null(FunctionCallInfo fcinfo);
 extern void plllvm_cfi(void);
 extern void plllvm_pj_cfi(int32 *pos, int32 at);
+extern Datum plllvm_pj_invoke(PjSite *site);
 extern void plllvm_check_stack(void);
 extern Datum plllvm_call0(plllvm_site *site, bool *isnull);
 extern Datum plllvm_call1(plllvm_site *site, Datum a0, bool n0, bool *isnull);
@@ -191,6 +192,34 @@ pg_always_inline void
 plllvm_check_stack(void)
 {
 	check_stack_depth();
+}
+
+/*
+ * The call of a site of plpgsql_jit, as EEOP_FUNCEXPR_STRICT: the arguments
+ * are in fcinfo, and the result is NULL if the function is strict and one of
+ * them is.  The null flag of the result is fcinfo's.
+ */
+pg_always_inline Datum
+plllvm_pj_invoke(PjSite *site)
+{
+	FunctionCallInfo fcinfo = site->fcinfo;
+
+	if (unlikely(site->track))
+		return plllvm_pj_invoke_track(site);
+
+	if (fcinfo->flinfo->fn_strict)
+	{
+		for (int i = 0; i < fcinfo->nargs; i++)
+		{
+			if (fcinfo->args[i].isnull)
+			{
+				fcinfo->isnull = true;
+				return (Datum) 0;
+			}
+		}
+	}
+	fcinfo->isnull = false;
+	return FunctionCallInvoke(fcinfo);
 }
 
 /* a busy site is never called again: an FmgrInfo carries one call at a time */
@@ -603,6 +632,10 @@ void	   *referenced_functions[] =
 	plllvm_pj_params,
 	plllvm_pj_boxed_eval,
 	plllvm_pj_boxed_reset,
+	plllvm_pj_site,
+	plllvm_pj_invoke_track,
+	plllvm_pj_io,
+	plllvm_pj_site_done,
 	plllvm_keep,
 	plllvm_scratch_reset,
 	plllvm_array_arg,

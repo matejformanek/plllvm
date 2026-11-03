@@ -8,7 +8,7 @@
   \set pj_lang plpgsql
 \endif
 
--- fib: every call is an expression the executor runs, and calls itself
+-- fib: every call is a call of the function through a site, and calls itself
 CREATE FUNCTION pbx_fib(n int) RETURNS int LANGUAGE :pj_lang IMMUTABLE AS $$
 BEGIN
   IF n < 2 THEN RETURN n; END IF;
@@ -18,7 +18,7 @@ SELECT pbx_fib(5);
 SELECT pj_mark() \gset
 SELECT pbx_fib(15);
 -- 1,973 calls, 986 of them not leaves; the first of them translated
-SELECT pj_delta(1973, 0, 986, 0, 1) \gset
+SELECT pj_delta(1973, 0, 0, 0, 1) \gset
 SELECT pj_expect('pbx_fib(int)', 'compiled') \gset
 
 -- what the executor keeps for a call goes with the transaction that made it
@@ -67,7 +67,7 @@ END $$;
 SELECT pbx_mandel(16);
 SELECT pj_mark() \gset
 SELECT pbx_mandel(16), pbx_mandel(30), pbx_mandel(1), pbx_mandel(0);
-SELECT pj_delta(4, 0, 4, 0, 1) \gset
+SELECT pj_delta(4, 0, 0, 0, 1) \gset
 SELECT pj_expect('pbx_mandel(int)', 'compiled') \gset
 
 -- other values the executor returns: a text, a number, NULL
@@ -145,7 +145,7 @@ SELECT pbx_l1(5);
 SELECT pbx_l1(6), pbx_l1(7), pbx_l1(8);
 COMMIT;
 -- 2 calls, a guard miss, one translation, 3 calls
-SELECT pj_delta(5, 1, 5, 0, 1) \gset
+SELECT pj_delta(5, 1, 0, 0, 1) \gset
 SELECT pj_expect('pbx_l1(int)', 'compiled') \gset
 SELECT pj_mark() \gset
 BEGIN;
@@ -154,7 +154,7 @@ ALTER FUNCTION pbx_h(int) COST 7;
 SELECT pbx_l1(3);
 SELECT pbx_l1(4), pbx_l1(5), pbx_l1(6);
 COMMIT;
-SELECT pj_delta(5, 1, 5, 0, 1) \gset
+SELECT pj_delta(5, 1, 0, 0, 1) \gset
 -- replaced with another first expression
 BEGIN;
 SELECT pbx_l1(1), pbx_l1(2);

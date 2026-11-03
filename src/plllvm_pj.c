@@ -786,6 +786,7 @@ run(PLpgSQL_function *func, FunctionCallInfo fcinfo, PjEntry *e, PjVariant *v)
 			elog(ERROR, "plpgsql_jit: deopt after the executor ran");
 
 		/* the result lives in memory of the code's own */
+		MemoryContextSwitchTo(entry_cxt);
 		if (ctx.deopt == 0 && !fcinfo->isnull && !func->fn_retbyval)
 			retval = datumCopy(retval, false, func->fn_rettyplen);
 	}
