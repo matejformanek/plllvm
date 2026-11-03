@@ -854,8 +854,9 @@ SELECT pbx_gj(5, 0) AS no_earlier_error;  -- fail
 ERROR:  division by zero
 ROLLBACK TO s;
 COMMIT;
--- a compiled frame fails in the expression an outer compiled frame runs, and a
--- function in between catches it: the outer frame owns the mark
+-- the same where the owner of the expression is two frames below the failing
+-- one, with a frame between them that runs another expression: a walk of the
+-- nearest frame only would not find it
 CREATE FUNCTION pbx_wrl(n int, m int) RETURNS int LANGUAGE plpgsql STABLE AS $$
 BEGIN RETURN pbx_gl(n, m); EXCEPTION WHEN division_by_zero THEN RETURN 0; END $$;
 CREATE FUNCTION pbx_gl(n int, m int) RETURNS int LANGUAGE :pj_lang STABLE AS $$

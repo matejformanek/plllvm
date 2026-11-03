@@ -3,8 +3,9 @@
 --
 -- PL/pgSQL checks it when it builds the ExprState, the first time in a
 -- transaction, and again after an error in that expression.  Compiled code
--- must never be more permissive; where it is stricter the sequence is in
--- pj_execute_diff.  Not run under debug_discard_caches, where every
+-- runs no function that PL/pgSQL would refuse; where it is stricter the
+-- sequence is in pj_execute_diff.  In a recursion through an expression one
+-- call's answer can differ, see there.  Not run under debug_discard_caches, where every
 -- evaluation builds an ExprState.
 --
 \getenv pj_lang PJ_LANG

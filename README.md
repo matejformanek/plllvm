@@ -254,7 +254,7 @@ PL/pgSQL function and a `plpgsql_jit` one call each other freely.
 | `plllvm.expr_opt_level` | int 0–3 | 2 | superuser | LLVM optimization level of compiled expressions |
 | `plllvm.plpgsql_jit` | bool | on | superuser | the handler of `LANGUAGE plpgsql_jit` (above); off sends every call to PL/pgSQL |
 | `plllvm.pj_opt_level` | int 0–3 | 2 | superuser | LLVM optimization level of translated `plpgsql_jit` functions; another value builds another variant of the same translation at the next call |
-| `plllvm.pj_codegen` | `native`, `nopos`, `boxed` | native | superuser | not in `SHOW ALL`; `nopos` leaves out the stores of the statement position, so that an error says no line; `boxed` gives every expression to the executor |
+| `plllvm.pj_codegen` | `native`, `nopos`, `boxed` | native | superuser | not in `SHOW ALL`; `nopos` leaves out the stores of the statement position, so that an error says no line, and after an error marks every expression of the function, so it can return a wrong value or run a function PL/pgSQL would refuse (it is for measurements only); `boxed` gives every expression to the executor |
 | `plllvm.expr_max_programs` | int 1–1000000 | 1000 | superuser | compiled expressions (and failed builds) kept in a session; beyond it, new expressions are interpreted |
 | `plllvm.expr_eager` | bool | off | superuser | tests only: take an expression at its first evaluation instead of the second |
 | `plllvm.regress_test_mode` | bool | off | any user | reduce volatile output (times, addresses) in regression tests |

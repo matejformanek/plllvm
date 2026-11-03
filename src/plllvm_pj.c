@@ -149,7 +149,7 @@ static bool guards_ok(PjHarvest *h);
 static bool execute_allowed(PjEntry *e);
 static void pj_mark_busy(PjEntry *e);
 static Datum interp(FunctionCallInfo fcinfo, PjEntry *e);
-static void pj_mark_running(PjEntry *e, PjCtx *ctx);
+static void pj_mark_running(PjCtx *ctx);
 static PLpgSQL_expr *pj_frame_expr(PjCtx *ctx);
 static bool pj_outer_runs(PjCtx *ctx, PLpgSQL_expr *expr);
 static bool pj_any_in_use(PjEntry *e);
@@ -808,7 +808,7 @@ run(PLpgSQL_function *func, FunctionCallInfo fcinfo, PjEntry *e, PjVariant *v)
 		if (v->codegen == PLLLVM_PJ_NOPOS)
 			pj_mark_busy(e);
 		else
-			pj_mark_running(e, &ctx);
+			pj_mark_running(&ctx);
 		activation_end(func, e, entry_cxt);
 		PG_RE_THROW();
 	}
@@ -911,9 +911,10 @@ guards_ok(PjHarvest *h)
  * May the user execute the functions in the code?  PL/pgSQL checks them when
  * it builds the ExprState of an expression, and again at every evaluation of
  * one that failed.  We check all of them whenever the transaction, the user
- * or the privileges changed since the last check, so we are never more
- * permissive.  A failure here sends the call to PL/pgSQL, which raises it
- * at the right expression, or not at all.
+ * or the privileges changed since the last check, so no function runs that
+ * PL/pgSQL would refuse, but for a privilege lost inside a transaction.  A
+ * failure here sends the call to PL/pgSQL, which raises it at the right
+ * expression, or not at all.
  */
 static bool
 execute_allowed(PjEntry *e)
@@ -996,7 +997,7 @@ pj_mark_busy(PjEntry *e)
  * (exec_eval_simple_expr)
  */
 static void
-pj_mark_running(PjEntry *e, PjCtx *ctx)
+pj_mark_running(PjCtx *ctx)
 {
 	PLpgSQL_expr *expr = pj_frame_expr(ctx);
 
@@ -1089,7 +1090,7 @@ interp(FunctionCallInfo fcinfo, PjEntry *e)
 	{
 		PLpgSQL_expr *expr = pj_frame_expr(c);
 
-		if (expr == NULL || pj_outer_runs(c, expr))
+		if (expr == NULL)
 			continue;
 		saved[n].expr = expr;
 		saved[n].lxid = expr->expr_simple_lxid;

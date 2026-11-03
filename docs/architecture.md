@@ -214,8 +214,8 @@ Only `plllvm_jit.c` and `plllvm_error.cpp` include LLVM headers.
   (transaction, user, epoch of the catalogs it depends on), read before the
   check; when the key differs all functions are checked again, and a denial
   sends the call to PL/pgSQL, which raises it. After a compiled error the
-  expressions of the function are marked as an interpreted failure leaves
-  them, so PL/pgSQL checks again too. A guard that misses sends the call to
+  expression it stopped is marked as an interpreted failure leaves it (see
+  Marks below). A guard that misses sends the call to
   PL/pgSQL and the next call translates again; eight misses with fewer than
   1,000 compiled calls between decline the function (`thrash`).
 * An expression the expression compiler refuses, such as a call of a
@@ -244,11 +244,16 @@ Only `plllvm_jit.c` and `plllvm_error.cpp` include LLVM headers.
   frames are on the stack marks the expression each of them runs for its
   duration, and gives them back afterwards if no one has changed them. A call
   finding any expression of the function busy goes to PL/pgSQL
-  (`interpreted:in use`), so compiled code runs only where PL/pgSQL takes its
-  simple path.
+  (`interpreted:in use`), so a compiled call starts only where PL/pgSQL
+  takes its simple path.
 * Differences from PL/pgSQL, kept: a compiled inner frame of a recursion
   through an expression evaluates it on the simple path, where PL/pgSQL's
   takes SPI, so values can follow the generic plan rather than the custom ones
-  of its first runs. Compiled frames use less stack than PL/pgSQL's: a
+  of its first runs. A later SPI run of such an expression lags on the plan
+  count, so it can take a custom plan where PL/pgSQL takes the generic one;
+  the call then returns, or raises 22012, where PL/pgSQL raises 42501, and the
+  denied function does not run. A mark set in the middle of a call on an
+  expression no outer frame runs is seen by the compiled frame as well.
+  Compiled frames use less stack than PL/pgSQL's: a
   recursion deep enough for `stack depth limit exceeded` in PL/pgSQL may
   return a value, and a deeper one still raises.
