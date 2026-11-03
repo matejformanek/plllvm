@@ -116,6 +116,9 @@ static void scope_pos(PjScopeWalk *w, PLpgSQL_stmt *stmt);
 static void scope_expr(PjScopeWalk *w, const void *owner, PLpgSQL_expr *expr,
 					   Oid dsttype, int32 dsttypmod);
 static bool stmt_terminal(PLpgSQL_stmt *stmt);
+static PjFrame *frame_push(List **frames, const char *label, bool loop,
+						   bool fori);
+static void frame_pop(List **frames);
 static PjFrame *frame_find(List *frames, const char *label, bool loop_only,
 						   bool *crossed_for);
 static bool signature_polymorphic(PLpgSQL_function *func);
@@ -141,8 +144,7 @@ static void emit_stmt(PjEmit *em, PLpgSQL_stmt *stmt);
 static void emit_block(PjEmit *em, PLpgSQL_stmt_block *block);
 static void emit_assign(PjEmit *em, PLpgSQL_stmt_assign *stmt);
 static void emit_if(PjEmit *em, PLpgSQL_stmt_if *stmt);
-static void emit_loop(PjEmit *em, PLpgSQL_stmt_loop *stmt);
-static void emit_while(PjEmit *em, PLpgSQL_stmt_while *stmt);
+static void emit_loop(PjEmit *em, PLpgSQL_stmt *stmt);
 static void emit_fori(PjEmit *em, PLpgSQL_stmt_fori *stmt);
 static void emit_exit(PjEmit *em, PLpgSQL_stmt_exit *stmt);
 static void emit_return(PjEmit *em, PLpgSQL_stmt_return *stmt);
@@ -155,7 +157,7 @@ static const char *expr_taken(PjEmit *em, const void *owner);
 static void store_var(PjEmit *em, int dno, const char *datum,
 					  const char *isnull);
 static void check_not_null(PjEmit *em, PLpgSQL_var *var, const char *isnull);
-static void for_check(PjEmit *em, const char *failed, int what);
+static void for_check(PjEmit *em, const char *failed, PjForError what);
 static void set_found(PjEmit *em, bool value);
 static void set_pos(PjEmit *em, int index);
 static void stmt_enter(PjEmit *em, PLpgSQL_stmt *stmt);
@@ -240,7 +242,6 @@ walk_stmt(PjScopeWalk *w, PLpgSQL_stmt *stmt)
 {
 	PLpgSQL_function *func = w->func;
 	const char *reason;
-	PjFrame    *frame;
 
 	scope_pos(w, stmt);
 
@@ -287,9 +288,8 @@ walk_stmt(PjScopeWalk *w, PLpgSQL_stmt *stmt)
 			{
 				const char *label;
 				List	   *body;
+				bool		fori = false;
 
-				frame = palloc0_object(PjFrame);
-				frame->loop = true;
 				if (stmt->cmd_type == PLPGSQL_STMT_LOOP)
 				{
 					label = ((PLpgSQL_stmt_loop *) stmt)->label;
@@ -309,30 +309,27 @@ walk_stmt(PjScopeWalk *w, PLpgSQL_stmt *stmt)
 
 					label = loop->label;
 					body = loop->body;
-					frame->fori = true;
+					fori = true;
 					w->scope->fori = lappend_int(w->scope->fori, stmt->stmtid);
 					scope_expr(w, loop->lower, loop->lower, INT4OID, -1);
 					scope_expr(w, loop->upper, loop->upper, INT4OID, -1);
 					if (loop->step != NULL)
 						scope_expr(w, loop->step, loop->step, INT4OID, -1);
 				}
-				frame->label = label;
 
-				w->frames = lcons(frame, w->frames);
+				frame_push(&w->frames, label, true, fori);
 				reason = walk_stmts(w, body);
-				w->frames = list_delete_first(w->frames);
+				frame_pop(&w->frames);
 				return reason;
 			}
 
 		case PLPGSQL_STMT_EXIT:
 			{
 				PLpgSQL_stmt_exit *ex = (PLpgSQL_stmt_exit *) stmt;
-				bool		crossed;
 
 				if (ex->cond != NULL)
 					scope_expr(w, ex->cond, ex->cond, BOOLOID, -1);
-				if (frame_find(w->frames, ex->label, !ex->is_exit,
-							   &crossed) == NULL)
+				if (frame_find(w->frames, ex->label, !ex->is_exit, NULL) == NULL)
 					return "label";
 				return NULL;
 			}
@@ -388,15 +385,10 @@ walk_block(PjScopeWalk *w, PLpgSQL_stmt_block *block)
 	}
 
 	if (block->label != NULL)
-	{
-		PjFrame    *frame = palloc0_object(PjFrame);
-
-		frame->label = block->label;
-		w->frames = lcons(frame, w->frames);
-	}
+		frame_push(&w->frames, block->label, false, false);
 	reason = walk_stmts(w, block->body);
 	if (block->label != NULL)
-		w->frames = list_delete_first(w->frames);
+		frame_pop(&w->frames);
 
 	return reason;
 }
@@ -460,13 +452,32 @@ stmt_terminal(PLpgSQL_stmt *stmt)
  * The frame an EXIT or CONTINUE names, as the loops and blocks of PL/pgSQL
  * find it: an unlabeled one belongs to the innermost loop, a labeled one to
  * the innermost with that label, but CONTINUE never stops at a block.
- * *crossed_for says whether a FOR over integers lies between, which sets
- * FOUND on the way out.
+ * *crossed_for, if given, says whether a FOR over integers lies between,
+ * which sets FOUND on the way out.
  */
+static PjFrame *
+frame_push(List **frames, const char *label, bool loop, bool fori)
+{
+	PjFrame    *frame = palloc0_object(PjFrame);
+
+	frame->label = label;
+	frame->loop = loop;
+	frame->fori = fori;
+	*frames = lcons(frame, *frames);
+	return frame;
+}
+
+static void
+frame_pop(List **frames)
+{
+	*frames = list_delete_first(*frames);
+}
+
 static PjFrame *
 frame_find(List *frames, const char *label, bool loop_only, bool *crossed_for)
 {
-	*crossed_for = false;
+	if (crossed_for != NULL)
+		*crossed_for = false;
 
 	foreach_ptr(PjFrame, frame, frames)
 	{
@@ -474,7 +485,7 @@ frame_find(List *frames, const char *label, bool loop_only, bool *crossed_for)
 			(frame->label != NULL && strcmp(frame->label, label) == 0 &&
 			 (frame->loop || !loop_only)))
 			return frame;
-		if (frame->fori)
+		if (frame->fori && crossed_for != NULL)
 			*crossed_for = true;
 	}
 
@@ -634,6 +645,7 @@ harvest_expr(PLpgSQL_function *func, PjHarvest *h, PjEnv *env, PjExpr *pe,
 	bool		move = false;
 	bool		null_const = false;
 	bool		dst_domain;
+	bool		pinned;
 	Expr	   *cast_tree;
 	plllvm_repr repr;
 	StringInfoData key;
@@ -676,10 +688,8 @@ harvest_expr(PLpgSQL_function *func, PjHarvest *h, PjEnv *env, PjExpr *pe,
 		return NULL;
 
 	dst_domain = get_typtype(pe->dsttype) == TYPTYPE_DOMAIN;
-	if (null_const && !dst_domain)
-		return NULL;
-	if (dst_domain || pe->dsttypmod != -1 ||
-		!cast_pinned(pe->type, pe->dsttype))
+	pinned = cast_pinned(pe->type, pe->dsttype);
+	if (dst_domain || pe->dsttypmod != -1 || (!pinned && !null_const))
 		return "cast";
 
 	pe->cast = cast_get(pe->type, pe->typmod, pe->dsttype, &cast_tree);
@@ -688,6 +698,22 @@ harvest_expr(PLpgSQL_function *func, PjHarvest *h, PjEnv *env, PjExpr *pe,
 	/* a mere relabeling needs no code: the value is the same Datum */
 	if (cast_tree == NULL)
 		return NULL;
+
+	/*
+	 * PL/pgSQL runs the cast of a NULL too.  Without a pg_cast row it is an
+	 * I/O conversion, which does nothing for a NULL if the input function is
+	 * strict; any other cast, and a user-made one, is its to run.
+	 */
+	if (!pinned)
+	{
+		Oid			input;
+		Oid			ioparam;
+
+		if (!IsA(cast_tree, CoerceViaIO))
+			return "cast";
+		getTypeInputInfo(pe->dsttype, &input, &ioparam);
+		return func_strict(input) ? NULL : "cast";
+	}
 	funcs_walker((Node *) cast_tree, funcs);
 
 	if (IsA(tree, Const))
@@ -931,10 +957,12 @@ cast_fold(Expr *cast_tree, const Const *src, Oid dsttype)
 	if (cast_has_io((Node *) cast_tree, NULL))
 		return NULL;
 
+	/* a function that is not strict runs for a NULL, whatever it does */
 	funcs_walker((Node *) cast_tree, &funcs);
 	foreach_oid(funcid, funcs)
 	{
-		if (funcid >= FirstUnpinnedObjectId)
+		if (funcid >= FirstUnpinnedObjectId ||
+			(src->constisnull && !func_strict(funcid)))
 			return NULL;
 	}
 	if (contain_mutable_functions((Node *) cast_tree))
@@ -1003,7 +1031,8 @@ plllvm_pj_emit(PLpgSQL_function *func, PjHarvest *h, PjVariant *v)
 
 	plllvm_ir_declare(em.ir, "declare void @plllvm_cfi()");
 	if (plllvm_debug_inject == PLLLVM_INJECT_PJ_BAD_SIGNATURE)
-		plllvm_ir_emit(em.ir, "define i64 @f(ptr %%fcinfo, ptr %%ctx, ptr %%extra) {");
+		plllvm_ir_emit(em.ir,
+					   "define i64 @f(ptr %%fcinfo, ptr %%ctx, ptr %%extra) {");
 	else
 		plllvm_ir_emit(em.ir, "define i64 @f(ptr %%fcinfo, ptr %%ctx) {");
 	entry = plllvm_ir_label(em.ir);
@@ -1126,7 +1155,6 @@ emit_stmt(PjEmit *em, PLpgSQL_stmt *stmt)
 {
 	reopen(em);
 
-	/* a WHILE stores its position again at every iteration */
 	stmt_enter(em, stmt);
 
 	switch (stmt->cmd_type)
@@ -1141,10 +1169,8 @@ emit_stmt(PjEmit *em, PLpgSQL_stmt *stmt)
 			emit_if(em, (PLpgSQL_stmt_if *) stmt);
 			break;
 		case PLPGSQL_STMT_LOOP:
-			emit_loop(em, (PLpgSQL_stmt_loop *) stmt);
-			break;
 		case PLPGSQL_STMT_WHILE:
-			emit_while(em, (PLpgSQL_stmt_while *) stmt);
+			emit_loop(em, stmt);
 			break;
 		case PLPGSQL_STMT_FORI:
 			emit_fori(em, (PLpgSQL_stmt_fori *) stmt);
@@ -1190,19 +1216,15 @@ emit_block(PjEmit *em, PLpgSQL_stmt_block *block)
 
 	if (block->label != NULL)
 	{
-		PjFrame    *frame = palloc0_object(PjFrame);
-
 		end = plllvm_ir_label(em->ir);
-		frame->label = block->label;
-		frame->exit_to = end;
-		em->frames = lcons(frame, em->frames);
+		frame_push(&em->frames, block->label, false, false)->exit_to = end;
 	}
 
 	emit_stmts(em, block->body);
 
 	if (end != NULL)
 	{
-		em->frames = list_delete_first(em->frames);
+		frame_pop(&em->frames);
 		if (em->open)
 			branch(em, end);
 		begin_block(em, end);
@@ -1255,57 +1277,41 @@ emit_if(PjEmit *em, PLpgSQL_stmt_if *stmt)
 	begin_block(em, done);
 }
 
+/*
+ * LOOP and WHILE: a head that EXIT leaves and CONTINUE returns to, the
+ * condition of a WHILE at its head
+ */
 static void
-emit_loop(PjEmit *em, PLpgSQL_stmt_loop *stmt)
+emit_loop(PjEmit *em, PLpgSQL_stmt *stmt)
 {
-	const char *head = plllvm_ir_label(em->ir);
-	const char *end = plllvm_ir_label(em->ir);
-	PjFrame    *frame = palloc0_object(PjFrame);
-
-	frame->label = stmt->label;
-	frame->loop = true;
-	frame->exit_to = end;
-	frame->cont_to = head;
-	em->frames = lcons(frame, em->frames);
-
-	branch(em, head);
-	begin_block(em, head);
-	emit_body(em, stmt->body);
-	if (em->open)
-		branch(em, head);
-
-	em->frames = list_delete_first(em->frames);
-	begin_block(em, end);
-}
-
-static void
-emit_while(PjEmit *em, PLpgSQL_stmt_while *stmt)
-{
+	bool		is_while = stmt->cmd_type == PLPGSQL_STMT_WHILE;
+	PLpgSQL_stmt_while *wh = (PLpgSQL_stmt_while *) stmt;
+	PLpgSQL_stmt_loop *lp = (PLpgSQL_stmt_loop *) stmt;
 	const char *head = plllvm_ir_label(em->ir);
 	const char *body = plllvm_ir_label(em->ir);
 	const char *end = plllvm_ir_label(em->ir);
-	PjFrame    *frame = palloc0_object(PjFrame);
-	const char *taken;
+	PjFrame    *frame;
 
-	frame->label = stmt->label;
-	frame->loop = true;
+	frame = frame_push(&em->frames, is_while ? wh->label : lp->label, true,
+					   false);
 	frame->exit_to = end;
 	frame->cont_to = head;
-	em->frames = lcons(frame, em->frames);
 
 	branch(em, head);
 	begin_block(em, head);
-	if (cond_may_raise(em))
-		set_pos(em, stmt->stmtid);
-	taken = expr_taken(em, stmt->cond);
-	branch_if(em, taken, body, end);
-
-	begin_block(em, body);
-	emit_body(em, stmt->body);
+	if (is_while)
+	{
+		/* an error after the body reports the WHILE again */
+		if (cond_may_raise(em))
+			set_pos(em, stmt->stmtid);
+		branch_if(em, expr_taken(em, wh->cond), body, end);
+		begin_block(em, body);
+	}
+	emit_body(em, is_while ? wh->body : lp->body);
 	if (em->open)
 		branch(em, head);
 
-	em->frames = list_delete_first(em->frames);
+	frame_pop(&em->frames);
 	begin_block(em, end);
 }
 
@@ -1371,7 +1377,7 @@ emit_fori(PjEmit *em, PLpgSQL_stmt_fori *stmt)
 	const char *zero = plllvm_ir_label(ir);
 	const char *more = plllvm_ir_label(ir);
 	const char *done = plllvm_ir_label(ir);
-	PjFrame    *frame = palloc0_object(PjFrame);
+	PjFrame    *frame;
 	const char *datum;
 	const char *isnull;
 	const char *lo;
@@ -1384,12 +1390,12 @@ emit_fori(PjEmit *em, PLpgSQL_stmt_fori *stmt)
 	plllvm_ir_declare(ir, "declare void @plllvm_pj_for_error(i32)");
 
 	expr_value(em, stmt->lower, &datum, &isnull);
-	for_check(em, isnull, 0);
+	for_check(em, isnull, PJ_FOR_LOWER_NULL);
 	lo = plllvm_ir_tmp(ir);
 	plllvm_ir_emit(ir, "%s = trunc i64 %s to i32", lo, datum);
 
 	expr_value(em, stmt->upper, &datum, &isnull);
-	for_check(em, isnull, 1);
+	for_check(em, isnull, PJ_FOR_UPPER_NULL);
 	hi = plllvm_ir_tmp(ir);
 	plllvm_ir_emit(ir, "%s = trunc i64 %s to i32", hi, datum);
 
@@ -1398,11 +1404,11 @@ emit_fori(PjEmit *em, PLpgSQL_stmt_fori *stmt)
 		const char *bad = plllvm_ir_tmp(ir);
 
 		expr_value(em, stmt->step, &datum, &isnull);
-		for_check(em, isnull, 2);
+		for_check(em, isnull, PJ_FOR_BY_NULL);
 		step = plllvm_ir_tmp(ir);
 		plllvm_ir_emit(ir, "%s = trunc i64 %s to i32", step, datum);
 		plllvm_ir_emit(ir, "%s = icmp sle i32 %s, 0", bad, step);
-		for_check(em, bad, 3);
+		for_check(em, bad, PJ_FOR_BY_NOT_POSITIVE);
 	}
 	else
 		step = "1";
@@ -1416,12 +1422,9 @@ emit_fori(PjEmit *em, PLpgSQL_stmt_fori *stmt)
 	plllvm_ir_emit(ir, "%s = icmp %s i32 %s, %s", out, cmp, lo, hi);
 	branch_if(em, out, zero, head);
 
-	frame->label = stmt->label;
-	frame->loop = true;
-	frame->fori = true;
+	frame = frame_push(&em->frames, stmt->label, true, true);
 	frame->exit_to = more;
 	frame->cont_to = next;
-	em->frames = lcons(frame, em->frames);
 
 	begin_block(em, head);
 	c = plllvm_ir_tmp(ir);
@@ -1433,7 +1436,7 @@ emit_fori(PjEmit *em, PLpgSQL_stmt_fori *stmt)
 	if (em->open)
 		branch(em, next);
 
-	em->frames = list_delete_first(em->frames);
+	frame_pop(&em->frames);
 
 	/* step, unless it would overflow, in which case the loop ends */
 	begin_block(em, next);
@@ -1640,16 +1643,18 @@ check_not_null(PjEmit *em, PLpgSQL_var *var, const char *isnull)
 	plllvm_ir_declare(ir, "declare void @plllvm_pj_not_null(ptr)");
 	branch_if(em, isnull, bad, ok);
 	begin_block(em, bad);
-	plllvm_ir_emit(ir, "call void @plllvm_pj_not_null(ptr inttoptr (i64 " UINT64_FORMAT " to ptr))",
+	plllvm_ir_emit(ir,
+				   "call void @plllvm_pj_not_null(ptr inttoptr (i64 "
+				   UINT64_FORMAT " to ptr))",
 				   (uint64) (uintptr_t) name);
 	plllvm_ir_emit(ir, "unreachable");
 	em->open = false;
 	begin_block(em, ok);
 }
 
-/* raise the error of FOR number what, if failed is true */
+/* raise the error what of a FOR, if failed is true */
 static void
-for_check(PjEmit *em, const char *failed, int what)
+for_check(PjEmit *em, const char *failed, PjForError what)
 {
 	plllvm_ir  *ir = em->ir;
 	const char *bad = plllvm_ir_label(ir);
@@ -1657,7 +1662,7 @@ for_check(PjEmit *em, const char *failed, int what)
 
 	branch_if(em, failed, bad, ok);
 	begin_block(em, bad);
-	plllvm_ir_emit(ir, "call void @plllvm_pj_for_error(i32 %d)", what);
+	plllvm_ir_emit(ir, "call void @plllvm_pj_for_error(i32 %d)", (int) what);
 	plllvm_ir_emit(ir, "unreachable");
 	em->open = false;
 	begin_block(em, ok);

@@ -79,6 +79,15 @@ typedef struct plllvm_site
 	dlist_node	node;			/* in the list the callbacks walk */
 } plllvm_site;
 
+/* the errors of FOR over integers, for plllvm_pj_for_error() */
+typedef enum PjForError
+{
+	PJ_FOR_LOWER_NULL,
+	PJ_FOR_UPPER_NULL,
+	PJ_FOR_BY_NULL,
+	PJ_FOR_BY_NOT_POSITIVE
+} PjForError;
+
 /* host functions called from JIT-compiled code (plllvm_runtime.c) */
 pg_noreturn extern void plllvm_error(int32 sqlstate, const char *msg);
 extern void plllvm_notice(const char *msg);

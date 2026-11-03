@@ -195,15 +195,14 @@ Only `plllvm_jit.c` and `plllvm_error.cpp` include LLVM headers.
   translated (an error there declines the function). Any other cast declines
   (`cast`), so a cast error always comes from PL/pgSQL's own code. A domain
   is never a target: a variable of a domain type declines the function.
-* Statements are walked in two passes in the same order, skipping what a
-  RETURN, EXIT or CONTINUE makes unreachable: the first collects the
-  expressions and the positions, the second emits blocks, so that the n-th
-  expression of one is the n-th of the other. An expression PL/pgSQL has not
-  planned becomes a deopt point: the code stores its index in `ctx` and
-  returns, the handler runs the call in PL/pgSQL, and the function is
-  translated again once that expression is planned. FOR over integers keeps
-  its counter, end and step apart from the loop variable, and FOUND is set
-  as `exec_stmt_fori` does at every way out. The code polls for interrupts
+* Statements are walked twice in the same order, skipping what a RETURN, EXIT
+  or CONTINUE makes unreachable: the first walk collects the expressions and
+  positions, the second emits code and takes the expressions back in that
+  order. An expression PL/pgSQL has not planned becomes a deopt point: the code
+  stores its index in `ctx` and returns, the handler runs the call in PL/pgSQL,
+  and the function is translated again once that expression is planned. FOR
+  over integers keeps its counter, end and step apart from the loop variable,
+  and FOUND is set as `exec_stmt_fori` does at every way out. The code polls for interrupts
   at entry and once per loop iteration, after the position of the first
   statement of the body. A WHILE stores its position again at the head, only
   if its condition can raise.

@@ -160,32 +160,34 @@ plllvm_pj_not_null(const char *name)
 						   name)));
 }
 
-/* the checks of FOR over integers (exec_stmt_fori): 0 lower, 1 upper, 2 BY, 3 BY <= 0 */
+/* the errors of exec_stmt_fori */
 void
 plllvm_pj_for_error(int32 what)
 {
-	switch (what)
+	switch ((PjForError) what)
 	{
-		case 0:
+		case PJ_FOR_LOWER_NULL:
 			ereport_domain(ERROR, PG_TEXTDOMAIN("plpgsql"),
 						   (errcode(ERRCODE_NULL_VALUE_NOT_ALLOWED),
 							errmsg("lower bound of FOR loop cannot be null")));
 			break;
-		case 1:
+		case PJ_FOR_UPPER_NULL:
 			ereport_domain(ERROR, PG_TEXTDOMAIN("plpgsql"),
 						   (errcode(ERRCODE_NULL_VALUE_NOT_ALLOWED),
 							errmsg("upper bound of FOR loop cannot be null")));
 			break;
-		case 2:
+		case PJ_FOR_BY_NULL:
 			ereport_domain(ERROR, PG_TEXTDOMAIN("plpgsql"),
 						   (errcode(ERRCODE_NULL_VALUE_NOT_ALLOWED),
 							errmsg("BY value of FOR loop cannot be null")));
 			break;
-		default:
+		case PJ_FOR_BY_NOT_POSITIVE:
 			ereport_domain(ERROR, PG_TEXTDOMAIN("plpgsql"),
 						   (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
 							errmsg("BY value of FOR loop must be greater than zero")));
+			break;
 	}
+	pg_unreachable();
 }
 
 /*

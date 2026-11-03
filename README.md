@@ -209,25 +209,26 @@ debuggers and profilers use.
 ## LANGUAGE plpgsql_jit
 
 `CREATE EXTENSION plllvm` also creates `plpgsql_jit`: PL/pgSQL's syntax,
-compiler, validator, `DO` handler and error messages, with a call handler
-of its own. A function is created as with PL/pgSQL, with `LANGUAGE
-plpgsql_jit`. The first call of a function runs in PL/pgSQL, which plans what
-it runs. The second translates the function to LLVM IR if it is in scope,
-and later calls run the code. In scope so far: blocks with `DECLARE` (defaults,
-`NOT NULL`, `CONSTANT`), assignment to a variable, `IF`, `LOOP`, `WHILE`,
-`FOR` over integers (`REVERSE`, `BY`), `EXIT` and `CONTINUE` with labels, and
-`RETURN`, with arguments, variables and result of a type passed by value that
-is no domain. An expression is a bare variable or constant, or one of `bool`,
-`int4`, `int8` and `float8` as in the expression JIT. Its value converts to the
-type of its target only by a widening (`int4` to `int8` or `float8`, `int8` to
-`float8`), a pinned relabeling, or, for a constant, a conversion made when the
-function is translated. An expression that PL/pgSQL has not planned yet, as
-the branch that a first call did not reach, sends the call back to PL/pgSQL,
-and the function is translated again once it is planned. Anything else is declined, and `plllvm_pj_status()` says
-why; the function then runs in PL/pgSQL as before. The code runs only while
-the plans it was made from are valid, and not for a call with a NULL
-argument. Counters of `plllvm_pj_stats()` and `plllvm_pj_status()` show
-which way each call went (`docs/architecture.md`).
+compiler, validator, `DO` handler and error messages, with a call handler of
+its own. A function is created as with PL/pgSQL, with `LANGUAGE plpgsql_jit`.
+The first call of a function runs in PL/pgSQL, which plans what it runs. The
+second translates the function to LLVM IR if it is in scope, and later calls
+run the code. In scope so far: blocks with `DECLARE` (defaults, `NOT NULL`,
+`CONSTANT`), assignment to a variable, `IF`, `LOOP`, `WHILE`, `FOR` over
+integers (`REVERSE`, `BY`), `EXIT` and `CONTINUE` with labels, and `RETURN`,
+with arguments, variables and result of a type passed by value that is no
+domain. An expression is a bare variable or constant, or one of `bool`,
+`int4`, `int8` and `float8` as in the expression JIT. Its value converts to
+the type of its target only by a widening (`int4` to `int8` or `float8`,
+`int8` to `float8`), a pinned relabeling, or, for a constant, a conversion
+made when the function is translated. An expression that PL/pgSQL has not
+planned yet, as the branch that a first call did not reach, sends the call
+back to PL/pgSQL, and the function is translated again once it is planned.
+Anything else is declined, and `plllvm_pj_status()` says why; the function
+then runs in PL/pgSQL as before. The code runs only while the plans it was
+made from are valid, and not for a call with a NULL argument. Counters of
+`plllvm_pj_stats()` and `plllvm_pj_status()` show which way each call went
+(`docs/architecture.md`).
 
 The language is untrusted: only a superuser creates functions in it
 (`GRANT USAGE` on an untrusted language is refused). `SET

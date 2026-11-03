@@ -132,8 +132,8 @@ GROUPS = [
      CASES_BOOL),
 ]
 
-# cases the translator declines (a node the expression compiler refuses)
-PJ_DECLINED = ['pj_ops_i4_39']
+# cases the translator declines (a tree of more than 64 nodes): (group, index)
+PJ_DECLINED = [('i4', 39)]
 
 RESULT_VAR = {'int4': 'ri', 'int8': 'rl', 'float8': 'rf', 'bool': 'rb'}
 
@@ -242,7 +242,7 @@ def pj_main():
           f'  END LOOP;\n')
     w('END\n$$;\n\n')
     w('CALL pj_ops_run();\n\n')
-    declined = ', '.join(f"'{fn}'" for fn in PJ_DECLINED)
+    declined = ', '.join(f"'pj_ops_{g}_{i}'" for g, i in PJ_DECLINED)
     w(f'-- with plpgsql_jit active, every case ran compiled but {len(PJ_DECLINED)}\n'
       f'DO $$\n'
       f'DECLARE\n'

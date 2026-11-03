@@ -502,3 +502,35 @@ ALTER DOMAIN pb_dx2 DROP NOT NULL;
 ALTER DOMAIN pb_dx2 DROP CONSTRAINT pb_dx2_pos;
 SELECT pb_dd1(-1), pb_dd2(-5), pb_dd3(1), pb_dd4(1), pb_dd6(1), pb_dd9(-5);
 SELECT pj_expect('pb_dd9(pb_dx2)', 'compiled') \gset
+
+-- the conversion of a NULL is PL/pgSQL's to run: a cast function that is not
+-- strict gives its value, and a built-in one is checked for EXECUTE
+CREATE FUNCTION pb_nscast(b bool) RETURNS int8 LANGUAGE sql IMMUTABLE AS
+  $$ SELECT coalesce($1::int, 42)::int8 $$;
+CREATE CAST (bool AS int8) WITH FUNCTION pb_nscast(bool) AS ASSIGNMENT;
+CREATE FUNCTION pb_nullcast() RETURNS int8 LANGUAGE :pj_lang AS $$
+DECLARE x int8 := NULL::bool;
+BEGIN RETURN x; END $$;
+SELECT pb_nullcast(), pb_nullcast(), pb_nullcast();
+SELECT pj_expect('pb_nullcast()', 'declined:cast') \gset
+
+CREATE FUNCTION pb_nullwide() RETURNS int8 LANGUAGE :pj_lang AS $$
+DECLARE x int8 := NULL::int4;
+BEGIN RETURN x; END $$;
+SELECT pb_nullwide() IS NULL, pb_nullwide() IS NULL, pb_nullwide() IS NULL;
+SELECT pj_expect('pb_nullwide()', 'compiled') \gset
+
+-- a NULL bound of a FOR still goes through the cast of the bound
+CREATE FUNCTION pb_nullfor() RETURNS int LANGUAGE :pj_lang AS $$
+DECLARE n int := 0;
+BEGIN
+  FOR i IN NULL::bigint..3 LOOP n := n + 1; END LOOP;
+  RETURN n;
+END $$;
+SELECT pb_nullfor();  -- fail
+SELECT pb_nullfor();  -- fail
+SELECT pb_nullfor();  -- fail
+SELECT pj_expect('pb_nullfor()', 'compiled') \gset
+
+DROP CAST (bool AS int8);
+DROP FUNCTION pb_nscast(bool);

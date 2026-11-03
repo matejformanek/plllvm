@@ -261,6 +261,7 @@ PjEntry
 PjEnv
 PjErrArg
 PjExpr
+PjForError
 PjFrame
 PjH1
 PjHarvest
