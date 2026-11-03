@@ -786,6 +786,35 @@ SELECT pbx_qc(1, 2);  -- fail
 ERROR:  permission denied for function int4mul
 RESET ROLE;
 GRANT EXECUTE ON FUNCTION int4mul(int4, int4) TO PUBLIC;
+-- a state that cannot be built stops no expression: the call after it, in the
+-- same transaction, is compiled
+CREATE ROLE regress_pj_qs;
+CREATE FUNCTION pbx_in(n int) RETURNS bool LANGUAGE :pj_lang STABLE AS $$
+BEGIN RETURN n IN (1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11); END $$;
+SELECT pbx_in(1), pbx_in(2), pbx_in(3);
+ pbx_in | pbx_in | pbx_in 
+--------+--------+--------
+ t      | t      | t
+(1 row)
+
+REVOKE EXECUTE ON FUNCTION hashint4(int4) FROM PUBLIC;
+BEGIN;
+SET ROLE regress_pj_qs;
+SAVEPOINT s;
+SELECT pbx_in(4);  -- fail
+ERROR:  permission denied for function hashint4
+ROLLBACK TO s;
+RESET ROLE;
+SELECT pbx_in(5);
+ pbx_in 
+--------
+ t
+(1 row)
+
+SELECT pj_expect('pbx_in(int)', 'compiled') \gset
+ROLLBACK;
+GRANT EXECUTE ON FUNCTION hashint4(int4) TO PUBLIC;
+DROP ROLE regress_pj_qs;
 DROP OWNED BY regress_pj_qinv;
 DROP ROLE regress_pj_qinv, regress_pj_qg;
 DROP OWNED BY regress_pj_bx, regress_pj_bo;
