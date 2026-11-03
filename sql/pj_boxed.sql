@@ -84,8 +84,8 @@ SELECT pj_expect('pbx_num(int)', 'compiled') \gset
 SELECT pj_expect('pbx_numc(int)', 'declined:cast') \gset
 
 -- results passed by reference outlive the next call of the same function
-SELECT pbx_txt(12345) || '/' || pbx_txt(678) || '/' || pbx_txt(99) || '/' || pbx_txt(4);
-SELECT pbx_txt(s.i) || '/' || pbx_txt(s.i + 1) AS pair FROM generate_series(100, 103) s(i);
+SELECT concat_ws('/', pbx_txt(12345), pbx_txt(678), pbx_txt(99), pbx_txt(4));
+SELECT concat_ws('/', pbx_txt(s.i * 7), pbx_txt(s.i * 13)) AS pair FROM generate_series(100, 103) s(i);
 
 -- a local read after the call that recurses: each level has its own parameters
 CREATE FUNCTION pbx_rl(n int) RETURNS int LANGUAGE :pj_lang IMMUTABLE AS $$

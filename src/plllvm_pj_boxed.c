@@ -53,6 +53,7 @@ static PjLevel *level_get(PjCtx *ctx);
 static PjLevel *level_find(PjCtx *ctx);
 static void level_build(PjLevel *lv, PjHarvest *h);
 static void level_free(PjLevel *lv);
+static void level_sample(PjLevel *lv);
 static void level_reset(PjLevel *lv);
 static void slot_build(PjLevel *lv, PjSlot *slot, const PjExpr *pe, PjCtx *ctx);
 static void key_recheck(PjCtx *ctx);
@@ -226,15 +227,24 @@ level_free(PjLevel *lv)
 	lv->slots = NULL;
 }
 
-/* the biggest the per-tuple memory has been is what peak_tuple_bytes reports */
+/*
+ * The biggest the per-tuple memory has been is what peak_tuple_bytes reports,
+ * read before each reset and at the end of the transaction
+ */
 static void
-level_reset(PjLevel *lv)
+level_sample(PjLevel *lv)
 {
 	Size		size = MemoryContextMemAllocated(lv->econtext->ecxt_per_tuple_memory,
 												 false);
 
 	plllvm_pj_count.peak_tuple_bytes = Max(plllvm_pj_count.peak_tuple_bytes,
 										   (int64) size);
+}
+
+static void
+level_reset(PjLevel *lv)
+{
+	level_sample(lv);
 	ResetExprContext(lv->econtext);
 }
 
@@ -327,9 +337,18 @@ plllvm_pj_xact_callback(XactEvent event)
 		event != XACT_EVENT_PARALLEL_ABORT)
 		return;
 
-	if (xact_estate != NULL && event != XACT_EVENT_ABORT &&
-		event != XACT_EVENT_PARALLEL_ABORT)
-		FreeExecutorState(xact_estate);
+	if (event != XACT_EVENT_ABORT && event != XACT_EVENT_PARALLEL_ABORT)
+	{
+		dlist_foreach(iter, &live_levels)
+		{
+			PjLevel    *lv = dlist_container(PjLevel, node, iter.cur);
+
+			if (lv->cxt != NULL)
+				level_sample(lv);
+		}
+		if (xact_estate != NULL)
+			FreeExecutorState(xact_estate);
+	}
 	xact_estate = NULL;
 
 	dlist_foreach(iter, &live_levels)
