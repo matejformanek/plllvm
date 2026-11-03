@@ -26,3 +26,4 @@ regression.diffs
 regression.out
 /results-plpgsql-pj/
 /results-verify.log
+/results-fuzz/
