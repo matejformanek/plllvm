@@ -216,7 +216,8 @@ SELECT pb_i2mul(3::int2), pb_num(4), pb_f8k();
 SELECT pb_i2mul(3::int2), pb_num(4), pb_f8k();
 SELECT pj_expect('pb_i2mul(int2)', 'declined:node') \gset
 SELECT pj_expect('pb_num(int)', 'declined:datum:numeric') \gset
-SELECT pj_expect('pb_f8k()', 'declined:cast') \gset
+-- a constant converts when the function is translated
+SELECT pj_expect('pb_f8k()', 'compiled') \gset
 
 CREATE FUNCTION pb_if(n int) RETURNS int LANGUAGE :pj_lang AS $$
 BEGIN
@@ -254,14 +255,15 @@ SELECT pb_if(1), pb_decl(2), pb_exc(3), pb_text('a'), pb_poly(1), pb_out(5),
        pb_rec(6), pb_rnd(), pb_user(7), pb_sub(8);
 SELECT pb_if(0), pb_decl(2), pb_exc(3), pb_text('b'), pb_poly(2), pb_out(5),
        pb_rec(6), pb_rnd(), pb_user(7), pb_sub(8);
+SELECT pb_if(0), pb_if(1), pb_decl(2);
 SELECT * FROM pb_set1(9);
 SELECT * FROM pb_set1(9);
 SELECT * FROM pb_set1(9);
 CALL pb_proc(1);
 CALL pb_proc(1);
 CALL pb_proc(1);
-SELECT pj_expect('pb_if(int)', 'declined:statement:IF') \gset
-SELECT pj_expect('pb_decl(int)', 'declined:declare') \gset
+SELECT pj_expect('pb_if(int)', 'compiled') \gset
+SELECT pj_expect('pb_decl(int)', 'compiled') \gset
 SELECT pj_expect('pb_exc(int)', 'declined:exception block') \gset
 SELECT pj_expect('pb_text(text)', 'declined:datum:text') \gset
 SELECT pj_expect('pb_poly(anyelement)', 'declined:signature') \gset
@@ -307,3 +309,228 @@ SELECT pb_dm2(-5);  -- fail
 SELECT pb_dm3(5);
 ALTER DOMAIN pb_dx SET NOT NULL;
 SELECT pb_dm3(-5);  -- fail
+
+-- DECLARE: defaults, NOT NULL, CONSTANT; a default converts as PL/pgSQL does
+-- it, so only a conversion that cannot raise is compiled
+CREATE FUNCTION pb_dflt(n int) RETURNS bigint LANGUAGE :pj_lang AS $$
+DECLARE
+  a int := n + 1;
+  b bigint := a;
+  c CONSTANT int := 5;
+  d float8 := 0.5;
+  e int;
+  f int := NULL;
+BEGIN
+  IF e IS NULL AND f IS NULL AND d > 0 THEN
+    b := b + c;
+  END IF;
+  RETURN b;
+END
+$$;
+SELECT pb_dflt(1), pb_dflt(2), pb_dflt(3);
+SELECT pj_expect('pb_dflt(int)', 'compiled') \gset
+
+-- NOT NULL, at the declaration and at an assignment
+CREATE FUNCTION pb_nn1(n int) RETURNS int LANGUAGE :pj_lang AS $$
+DECLARE
+  x int NOT NULL := n;
+BEGIN
+  RETURN x;
+END
+$$;
+CREATE FUNCTION pb_nn2(n int) RETURNS int LANGUAGE :pj_lang AS $$
+DECLARE
+  x int NOT NULL := 1;
+  y int;
+BEGIN
+  x := y + n;
+  RETURN x;
+END
+$$;
+SELECT pb_nn1(1), pb_nn2(1);
+SELECT pb_nn1(2), pb_nn2(2);
+SELECT pb_nn1(3), pb_nn2(3);
+SELECT pj_expect('pb_nn1(int)', 'compiled') \gset
+SELECT pj_expect('pb_nn2(int)', 'compiled') \gset
+SELECT pb_nn1(NULL);  -- fail
+SELECT pb_nn2(4);  -- fail
+SELECT pj_expect('pb_nn2(int)', 'compiled') \gset
+
+-- a block declares its variables again at every entry
+CREATE FUNCTION pb_reinit(n int) RETURNS int LANGUAGE :pj_lang AS $$
+DECLARE
+  total int := 0;
+BEGIN
+  FOR i IN 1..n LOOP
+    DECLARE
+      x int := 10;
+    BEGIN
+      x := x + i;
+      total := total + x;
+    END;
+  END LOOP;
+  RETURN total;
+END
+$$;
+SELECT pb_reinit(3), pb_reinit(4), pb_reinit(5);
+SELECT pj_expect('pb_reinit(int)', 'compiled') \gset
+
+-- the constants folded when the function is translated, and those it leaves to PL/pgSQL, with the settings
+-- their conversion reads
+CREATE FUNCTION pb_k2() RETURNS float8 LANGUAGE :pj_lang AS $$
+DECLARE
+  two CONSTANT float8 := 2.0;
+  big bigint := 7;
+  nul int := NULL;
+BEGIN
+  RETURN two * big;
+END
+$$;
+CREATE FUNCTION pb_k2date() RETURNS int LANGUAGE :pj_lang AS $$
+DECLARE
+  d date := '01/02/2026';
+BEGIN
+  RETURN extract(month FROM d)::int;
+END
+$$;
+CREATE FUNCTION pb_k2ts() RETURNS int LANGUAGE :pj_lang AS $$
+DECLARE
+  t timestamptz := '2026-01-02 03:04:05';
+BEGIN
+  RETURN 1;
+END
+$$;
+CREATE FUNCTION pb_k2int() RETURNS int LANGUAGE :pj_lang AS $$
+DECLARE
+  x int := 3000000000;
+BEGIN
+  RETURN 1;
+END
+$$;
+SELECT pb_k2(), pb_k2date(), pb_k2ts(), pb_k2() ;
+SELECT pb_k2(), pb_k2date(), pb_k2ts();
+SET DateStyle = 'DMY';
+SELECT pb_k2(), pb_k2date(), pb_k2ts();
+SET TimeZone = 'Asia/Tokyo';
+SELECT pb_k2(), pb_k2date(), pb_k2ts();
+RESET DateStyle;
+RESET TimeZone;
+SELECT pb_k2int();  -- fail
+SELECT pb_k2int();  -- fail
+SELECT pj_expect('pb_k2()', 'compiled') \gset
+SELECT pj_expect('pb_k2date()', 'declined:cast') \gset
+SELECT pj_expect('pb_k2ts()', 'declined:cast') \gset
+-- a constant whose conversion raises declines the function; PL/pgSQL raises it
+SELECT pj_expect('pb_k2int()', 'declined:22003: integer out of range') \gset
+
+-- a conversion that can raise: FOR bounds, and an assignment of a wider type
+CREATE FUNCTION pb_forbig(b bigint) RETURNS int LANGUAGE :pj_lang AS $$
+DECLARE
+  n int := 0;
+BEGIN
+  FOR i IN b..b LOOP n := n + 1; END LOOP;
+  RETURN n;
+END
+$$;
+CREATE FUNCTION pb_narrowasg(y bigint) RETURNS int LANGUAGE :pj_lang AS $$
+DECLARE
+  x int := y;
+BEGIN
+  RETURN x;
+END
+$$;
+SELECT pb_forbig(1), pb_narrowasg(2);
+SELECT pb_forbig(1), pb_narrowasg(2);
+SELECT pb_forbig(1), pb_narrowasg(2);
+SELECT pb_forbig(3000000000);  -- fail
+SELECT pb_narrowasg(3000000000);  -- fail
+SELECT pj_expect('pb_forbig(bigint)', 'declined:cast') \gset
+SELECT pj_expect('pb_narrowasg(bigint)', 'declined:cast') \gset
+
+-- a domain is not a target: whatever it checks today, ALTER DOMAIN changes
+CREATE DOMAIN pb_dx2 AS int;
+CREATE FUNCTION pb_dd1(a int) RETURNS int LANGUAGE :pj_lang AS $$
+DECLARE d pb_dx2; BEGIN d := a + 1; RETURN 1; END $$;
+CREATE FUNCTION pb_dd2(a int) RETURNS int LANGUAGE :pj_lang AS $$
+DECLARE d pb_dx2 := a + 1; BEGIN RETURN 1; END $$;
+CREATE FUNCTION pb_dd3(a int) RETURNS int LANGUAGE :pj_lang AS $$
+DECLARE d pb_dx2 := -5; BEGIN RETURN 1; END $$;
+CREATE FUNCTION pb_dd4(a int) RETURNS int LANGUAGE :pj_lang AS $$
+DECLARE d pb_dx2; BEGIN d := -5; RETURN 1; END $$;
+CREATE FUNCTION pb_dd5(a pb_dx2) RETURNS int LANGUAGE :pj_lang AS $$
+DECLARE d pb_dx2; BEGIN d := a; RETURN 1; END $$;
+CREATE FUNCTION pb_dd6(a int) RETURNS int LANGUAGE :pj_lang AS $$
+DECLARE d pb_dx2; BEGIN RETURN 1; END $$;
+CREATE FUNCTION pb_dd7(a pb_dx2) RETURNS int LANGUAGE :pj_lang AS $$
+BEGIN a := -5; RETURN 1; END $$;
+CREATE FUNCTION pb_dd8(a pb_dx2) RETURNS int LANGUAGE :pj_lang AS $$
+DECLARE d pb_dx2 := a; BEGIN RETURN 1; END $$;
+CREATE FUNCTION pb_dd9(a pb_dx2) RETURNS pb_dx2 LANGUAGE :pj_lang AS $$
+BEGIN RETURN a; END $$;
+CREATE FUNCTION pb_dd10(a pb_dx2) RETURNS int LANGUAGE :pj_lang AS $$
+DECLARE x int; BEGIN x := a; RETURN x; END $$;
+SELECT pb_dd1(1), pb_dd2(1), pb_dd3(1), pb_dd4(1), pb_dd5(1), pb_dd6(1), pb_dd7(1),
+       pb_dd8(1), pb_dd9(1), pb_dd10(1);
+SELECT pb_dd1(1), pb_dd2(1), pb_dd3(1), pb_dd4(1), pb_dd5(1), pb_dd6(1), pb_dd7(1),
+       pb_dd8(1), pb_dd9(1), pb_dd10(1);
+SELECT pb_dd1(1), pb_dd2(1), pb_dd3(1), pb_dd4(1), pb_dd5(1), pb_dd6(1), pb_dd7(1),
+       pb_dd8(1), pb_dd9(1), pb_dd10(1);
+SELECT pj_expect('pb_dd1(int)', 'declined:datum:pb_dx2') \gset
+SELECT pj_expect('pb_dd2(int)', 'declined:datum:pb_dx2') \gset
+SELECT pj_expect('pb_dd3(int)', 'declined:datum:pb_dx2') \gset
+SELECT pj_expect('pb_dd4(int)', 'declined:datum:pb_dx2') \gset
+SELECT pj_expect('pb_dd5(pb_dx2)', 'declined:datum:pb_dx2') \gset
+SELECT pj_expect('pb_dd6(int)', 'declined:datum:pb_dx2') \gset
+SELECT pj_expect('pb_dd7(pb_dx2)', 'declined:datum:pb_dx2') \gset
+SELECT pj_expect('pb_dd8(pb_dx2)', 'declined:datum:pb_dx2') \gset
+SELECT pj_expect('pb_dd9(pb_dx2)', 'compiled') \gset
+SELECT pj_expect('pb_dd10(pb_dx2)', 'declined:node') \gset
+ALTER DOMAIN pb_dx2 ADD CONSTRAINT pb_dx2_pos CHECK (VALUE IS NULL OR VALUE > 0);
+SELECT pb_dd1(-1);  -- fail
+SELECT pb_dd2(-5);  -- fail
+SELECT pb_dd3(1);  -- fail
+SELECT pb_dd4(1);  -- fail
+SELECT pb_dd5(-5);  -- fail
+SELECT pb_dd7(1);  -- fail
+SELECT pb_dd8(-5);  -- fail
+SELECT pb_dd9(-5);  -- fail
+SELECT pb_dd6(1);
+ALTER DOMAIN pb_dx2 SET NOT NULL;
+SELECT pb_dd6(1);  -- fail
+SELECT pb_dd9(1);
+ALTER DOMAIN pb_dx2 DROP NOT NULL;
+ALTER DOMAIN pb_dx2 DROP CONSTRAINT pb_dx2_pos;
+SELECT pb_dd1(-1), pb_dd2(-5), pb_dd3(1), pb_dd4(1), pb_dd6(1), pb_dd9(-5);
+SELECT pj_expect('pb_dd9(pb_dx2)', 'compiled') \gset
+
+-- the conversion of a NULL is PL/pgSQL's to run: a cast function that is not
+-- strict gives its value, and a built-in one is checked for EXECUTE
+CREATE FUNCTION pb_nscast(b bool) RETURNS int8 LANGUAGE sql IMMUTABLE AS
+  $$ SELECT coalesce($1::int, 42)::int8 $$;
+CREATE CAST (bool AS int8) WITH FUNCTION pb_nscast(bool) AS ASSIGNMENT;
+CREATE FUNCTION pb_nullcast() RETURNS int8 LANGUAGE :pj_lang AS $$
+DECLARE x int8 := NULL::bool;
+BEGIN RETURN x; END $$;
+SELECT pb_nullcast(), pb_nullcast(), pb_nullcast();
+SELECT pj_expect('pb_nullcast()', 'declined:cast') \gset
+
+CREATE FUNCTION pb_nullwide() RETURNS int8 LANGUAGE :pj_lang AS $$
+DECLARE x int8 := NULL::int4;
+BEGIN RETURN x; END $$;
+SELECT pb_nullwide() IS NULL, pb_nullwide() IS NULL, pb_nullwide() IS NULL;
+SELECT pj_expect('pb_nullwide()', 'compiled') \gset
+
+-- a NULL bound of a FOR still goes through the cast of the bound
+CREATE FUNCTION pb_nullfor() RETURNS int LANGUAGE :pj_lang AS $$
+DECLARE n int := 0;
+BEGIN
+  FOR i IN NULL::bigint..3 LOOP n := n + 1; END LOOP;
+  RETURN n;
+END $$;
+SELECT pb_nullfor();  -- fail
+SELECT pb_nullfor();  -- fail
+SELECT pb_nullfor();  -- fail
+SELECT pj_expect('pb_nullfor()', 'compiled') \gset
+
+DROP CAST (bool AS int8);
+DROP FUNCTION pb_nscast(bool);

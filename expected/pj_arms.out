@@ -1,0 +1,122 @@
+--
+-- pj_arms: the kernels under each pj_codegen value of this build give the
+-- value of the native one; expected from plllvm, so it runs once
+--
+\getenv pj_lang PJ_LANG
+\set pj_lang plpgsql_jit
+CREATE FUNCTION pa_loop(n integer) RETURNS integer LANGUAGE :pj_lang IMMUTABLE AS $$
+DECLARE i integer := 0;
+BEGIN WHILE i < n LOOP i := i + 1; END LOOP; RETURN i; END $$;
+CREATE FUNCTION pa_prime(n integer) RETURNS boolean LANGUAGE :pj_lang IMMUTABLE AS $$
+DECLARE idx integer := 2;
+BEGIN
+  LOOP
+    IF idx > n/2 THEN RETURN TRUE; END IF;
+    IF mod(n, idx) = 0 THEN RETURN FALSE; END IF;
+    idx := idx + 1;
+  END LOOP;
+END $$;
+CREATE FUNCTION pa_sumn(n integer) RETURNS integer LANGUAGE :pj_lang IMMUTABLE AS $$
+DECLARE sum integer := 0; idx integer := 0;
+BEGIN
+  LOOP
+    IF idx > n THEN RETURN sum; END IF;
+    sum := sum + idx; idx := idx + 1;
+  END LOOP;
+END $$;
+CREATE FUNCTION pa_gt(x integer, y integer) RETURNS boolean LANGUAGE :pj_lang IMMUTABLE AS $$
+BEGIN IF x > y THEN RETURN TRUE; ELSE RETURN FALSE; END IF; END $$;
+CREATE FUNCTION pa_inc(x integer) RETURNS integer LANGUAGE :pj_lang IMMUTABLE AS $$
+BEGIN RETURN x + 1; END $$;
+-- k is 0: the arguments are not constants, which the planner would fold
+CREATE FUNCTION pa_run(label text, k int) RETURNS void LANGUAGE plpgsql AS $$
+DECLARE r text;
+BEGIN
+  SELECT format('%s %s %s %s %s', pa_loop(1000 + k), pa_prime(104729 + k), pa_sumn(1000 + k), pa_gt(2 + k, 1), pa_inc(1 + k))
+    INTO r;
+  RAISE NOTICE '% %', label, r;
+  SELECT format('%s %s %s %s %s', pa_loop(1000 + k), pa_prime(9 + k), pa_sumn(10 + k), pa_gt(1 + k, 2), pa_inc(2 + k))
+    INTO r;
+  RAISE NOTICE '% %', label, r;
+END $$;
+SET plllvm.pj_codegen = native;
+SELECT pa_run('native', 0);
+NOTICE:  native 1000 t 500500 t 2
+NOTICE:  native 1000 f 55 f 3
+ pa_run 
+--------
+ 
+(1 row)
+
+SELECT pa_run('native', 0);
+NOTICE:  native 1000 t 500500 t 2
+NOTICE:  native 1000 f 55 f 3
+ pa_run 
+--------
+ 
+(1 row)
+
+SELECT pa_run('native', 0);
+NOTICE:  native 1000 t 500500 t 2
+NOTICE:  native 1000 f 55 f 3
+ pa_run 
+--------
+ 
+(1 row)
+
+SELECT bool_and(last_path IN ('compiled', 'deopt')) AS native_ran
+  FROM (SELECT last_path FROM plllvm_pj_status('pa_loop(int)')
+        UNION ALL SELECT last_path FROM plllvm_pj_status('pa_prime(int)')
+        UNION ALL SELECT last_path FROM plllvm_pj_status('pa_sumn(int)')
+        UNION ALL SELECT last_path FROM plllvm_pj_status('pa_gt(int,int)')
+        UNION ALL SELECT last_path FROM plllvm_pj_status('pa_inc(int)')) s;
+ native_ran 
+------------
+ t
+(1 row)
+
+SET plllvm.pj_codegen = nopos;
+SELECT pa_run('nopos', 0);
+NOTICE:  nopos 1000 t 500500 t 2
+NOTICE:  nopos 1000 f 55 f 3
+ pa_run 
+--------
+ 
+(1 row)
+
+SELECT pa_run('nopos', 0);
+NOTICE:  nopos 1000 t 500500 t 2
+NOTICE:  nopos 1000 f 55 f 3
+ pa_run 
+--------
+ 
+(1 row)
+
+SELECT pa_run('nopos', 0);
+NOTICE:  nopos 1000 t 500500 t 2
+NOTICE:  nopos 1000 f 55 f 3
+ pa_run 
+--------
+ 
+(1 row)
+
+SELECT bool_and(variants = 2 AND last_path = 'compiled') AS two_variants
+  FROM (SELECT * FROM plllvm_pj_status('pa_loop(int)')
+        UNION ALL SELECT * FROM plllvm_pj_status('pa_sumn(int)')
+        UNION ALL SELECT * FROM plllvm_pj_status('pa_inc(int)')) s;
+ two_variants 
+--------------
+ t
+(1 row)
+
+-- nopos loses the line of a CONTEXT, nothing else
+SELECT pa_sumn(100000);
+ERROR:  integer out of range
+CONTEXT:  PL/pgSQL function pa_sumn(integer)
+SELECT pa_sumn(100000);
+ERROR:  integer out of range
+CONTEXT:  PL/pgSQL function pa_sumn(integer)
+RESET plllvm.pj_codegen;
+SELECT pa_sumn(100000);
+ERROR:  integer out of range
+CONTEXT:  PL/pgSQL function pa_sumn(integer) line 6 at assignment

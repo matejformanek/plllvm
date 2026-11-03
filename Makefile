@@ -48,9 +48,10 @@ REGRESS = plllvm_setup $(REGRESS_FEATURES) $(REGRESS_KERNELS) expr_plugin \
 # LANGUAGE plpgsql_jit, with PJ_LANG=plpgsql_jit (make installcheck-pj); the
 # files run against stock PL/pgSQL's output.  REGRESS_PJ_ONCE runs in one
 # variant only, REGRESS_PJ_OPT at opt level 3.
-REGRESS_PJ = pj_language pj_basic pj_errors pj_guards pj_execute pj_casts pj_sessions
-REGRESS_PJ_ONCE = pj_states pj_discard pj_execute_diff
-REGRESS_PJ_OPT =
+REGRESS_PJ = pj_language pj_basic pj_errors pj_guards pj_execute pj_casts pj_sessions \
+		pj_control pj_kernels pj_ops pj_bounds pj_memory
+REGRESS_PJ_ONCE = pj_states pj_discard pj_execute_diff pj_arms
+REGRESS_PJ_OPT = pj_kernels pj_ops
 
 REGRESS_OPTS = --dbname=$(PL_TESTDB)
 
@@ -181,7 +182,7 @@ endif
 .PHONY: port-ok doctor stage cluster-init cluster-start cluster-stop pgindent \
 	installcheck-discard installcheck-opt installcheck-hazard installcheck-plpgsql \
 	installcheck-expr installcheck-pj installcheck-pj-once installcheck-pj-opt \
-	installcheck-plpgsql-pj verify check-host-api kernels check-kernels
+	installcheck-plpgsql-pj check-pj-ir verify check-host-api kernels check-kernels
 
 # 5432, 5433 belong to pg-claude, 5444 to the perf cluster
 port-ok:
@@ -429,6 +430,13 @@ installcheck-plpgsql-pj: port-ok
 	    { echo "installcheck-plpgsql-pj: $$m differs from base, see $(PJPL)/$$m.diff" >&2; rc=1; }; \
 	done; exit $$rc
 
+# The optimized IR of plpgsql_jit loop and is_prime against the hand-written
+# kernels: no local slot, no call but the poll, at most 1.5 times the
+# instructions of the loop
+check-pj-ir: port-ok
+	python3 -I tools/pj_ircheck.py --psql '$(bindir)/psql' --host /tmp \
+	  --port $(PLLLVM_PORT) --opt '$(LLVM)/bin/opt' --kernels examples/kernels
+
 #
 # Every suite of a PR in order; the commit and each exit code go to
 # results-verify.log, and a failure does not stop the rest.
@@ -444,7 +452,8 @@ verify: port-ok
 	'$(bindir)/pg_ctl' -D '$(PLLLVM_DATA)' status > /dev/null || step $(MAKE) cluster-start; \
 	for t in installcheck installcheck-opt installcheck-discard installcheck-hazard \
 	  check-host-api pgindent doctor installcheck-expr installcheck-plpgsql \
-	  installcheck-pj installcheck-pj-once installcheck-pj-opt installcheck-plpgsql-pj; do \
+	  installcheck-pj installcheck-pj-once installcheck-pj-opt installcheck-plpgsql-pj \
+	  check-pj-ir; do \
 	  step $(MAKE) $$t; \
 	  [ $$t != pgindent ] || step git diff --exit-code; \
 	done; \

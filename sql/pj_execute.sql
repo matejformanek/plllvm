@@ -311,5 +311,58 @@ SELECT pjx_many();
 SELECT pj_expect('pjx_inn(int)', 'compiled') \gset
 DROP SCHEMA pjx_s CASCADE;
 
+-- a branch the call did not reach, then a role without its function: the
+-- call is PL/pgSQL's, which raises only if it reaches the branch
+CREATE FUNCTION pg_if(n int) RETURNS int LANGUAGE :pj_lang AS $$
+BEGIN
+  IF n > 0 THEN RETURN n + 1; ELSE RETURN n * 2; END IF;
+END $$;
+SELECT pg_if(1), pg_if(2), pg_if(-1), pg_if(-2), pg_if(3), pg_if(-3);
+REVOKE EXECUTE ON FUNCTION int4mul(int4, int4) FROM PUBLIC;
+BEGIN; SELECT pg_if(1); SET ROLE regress_pj_r1; SELECT pg_if(-1) AS pg_if_expect_denied; ROLLBACK;
+BEGIN; SET ROLE regress_pj_r1; SELECT pg_if(1) AS pg_if_unreached; SELECT pg_if(-1) AS pg_if_expect_denied; ROLLBACK;
+GRANT EXECUTE ON FUNCTION int4mul(int4, int4) TO PUBLIC;
+SELECT pg_if(1), pg_if(-1);
+SELECT pj_expect('pg_if(int)', 'compiled') \gset
+
+-- an error in the branch, caught, then a role without the function
+CREATE FUNCTION ph_f(a int, b int) RETURNS int LANGUAGE :pj_lang AS $$
+BEGIN
+  IF a > 100 THEN RETURN a / b; END IF;
+  RETURN a * b;
+END $$;
+SELECT ph_f(200, 2), ph_f(1, 2), ph_f(200, 2), ph_f(1, 2);
+BEGIN; SELECT ph_f(200, 2); SAVEPOINT s; SELECT ph_f(200, 0) AS ph_22012; ROLLBACK TO s; SELECT ph_f(200, 2); ROLLBACK;
+REVOKE EXECUTE ON FUNCTION int4div(int4, int4) FROM PUBLIC;
+BEGIN; SELECT ph_f(200, 2); SAVEPOINT s; SELECT ph_f(200, 0) AS ph_22012; ROLLBACK TO s;
+SET ROLE regress_pj_r1; SELECT ph_f(200, 2) AS ph_expect_denied; ROLLBACK;
+BEGIN; SET ROLE regress_pj_r1; SELECT ph_f(1, 2) AS ph_unreached; ROLLBACK;
+GRANT EXECUTE ON FUNCTION int4div(int4, int4) TO PUBLIC;
+
+-- the cast of a NULL is checked as any other: the conversion of a NULL
+-- constant in a declaration, and of a NULL bound of a FOR
+CREATE FUNCTION pn_decl() RETURNS int8 LANGUAGE :pj_lang AS $$
+DECLARE x int8 := NULL::int4;
+BEGIN RETURN x; END $$;
+SELECT pn_decl() IS NULL, pn_decl() IS NULL, pn_decl() IS NULL;
+REVOKE EXECUTE ON FUNCTION int8(int4) FROM PUBLIC;
+BEGIN; SET ROLE regress_pj_r1; SELECT pn_decl() AS pn_decl_expect_denied; ROLLBACK;
+GRANT EXECUTE ON FUNCTION int8(int4) TO PUBLIC;
+SELECT pn_decl() IS NULL;
+SELECT pj_expect('pn_decl()', 'compiled') \gset
+CREATE FUNCTION pn_for() RETURNS int LANGUAGE :pj_lang AS $$
+DECLARE n int := 0;
+BEGIN
+  FOR i IN NULL::bigint..3 LOOP n := n + 1; END LOOP;
+  RETURN n;
+END $$;
+SELECT pn_for();  -- fail
+SELECT pn_for();  -- fail
+SELECT pn_for();  -- fail
+REVOKE EXECUTE ON FUNCTION int4(int8) FROM PUBLIC;
+BEGIN; SET ROLE regress_pj_r1; SELECT pn_for() AS pn_for_expect_denied; ROLLBACK;
+GRANT EXECUTE ON FUNCTION int4(int8) TO PUBLIC;
+SELECT pn_for();  -- fail
+
 DROP OWNED BY regress_pj_r1, regress_pj_r2, regress_pj_def, regress_pj_grp;
 DROP ROLE regress_pj_r1, regress_pj_r2, regress_pj_def, regress_pj_grp;

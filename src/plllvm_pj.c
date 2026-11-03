@@ -779,7 +779,13 @@ exec_error_callback(void *arg)
 
 	set_errcontext_domain(PG_TEXTDOMAIN("plpgsql"));
 
-	if (pos->stmt != NULL && pos->lineno > 0)
+	if (pos->text != NULL && pos->lineno > 0)
+		errcontext("PL/pgSQL function %s line %d %s", signature, pos->lineno,
+				   dgettext(PG_TEXTDOMAIN("plpgsql"), pos->text));
+	else if (pos->text != NULL)
+		errcontext("PL/pgSQL function %s %s", signature,
+				   dgettext(PG_TEXTDOMAIN("plpgsql"), pos->text));
+	else if (pos->stmt != NULL && pos->lineno > 0)
 		errcontext("PL/pgSQL function %s line %d at %s", signature,
 				   pos->lineno, pos->stmt);
 	else
@@ -798,15 +804,15 @@ guards_ok(PjHarvest *h)
 	{
 		if (pe->h1 != PJ_H1_READY)
 			continue;
-		if (!CachedPlanIsSimplyValid(pe->plansource, pe->plan, NULL) ||
-			pe->plan->generation != pe->generation)
+		if (pe->expr != NULL &&
+			(!CachedPlanIsSimplyValid(pe->plansource, pe->plan, NULL) ||
+			 pe->plan->generation != pe->generation))
+			return false;
+		if (pe->cast != NULL &&
+			(pe->cast->gen != pe->cast_gen || pe->cast->cexpr == NULL ||
+			 !pe->cast->cexpr->is_valid))
 			return false;
 	}
-
-	if (h->cast != NULL &&
-		(h->cast->gen != h->cast_gen || h->cast->cexpr == NULL ||
-		 !h->cast->cexpr->is_valid))
-		return false;
 
 	return true;
 }
@@ -856,7 +862,7 @@ pj_mark_busy(PjEntry *e)
 {
 	foreach_ptr(PjExpr, pe, e->harvest->exprs)
 	{
-		if (pe->h1 != PJ_H1_READY)
+		if (pe->h1 != PJ_H1_READY || pe->expr == NULL)
 			continue;
 		pe->expr->expr_simple_lxid = MyProc->vxid.lxid;
 		pe->expr->expr_simple_in_use = true;
@@ -959,7 +965,8 @@ plllvm_pj_infos(Oid fn, plllvm_pj_info **infos)
 			PjVariant  *v = variant_find(h);
 
 			info->has_harvest = true;
-			info->exprs = list_length(h->exprs);
+			foreach_ptr(PjExpr, pe, h->exprs)
+				info->exprs += (pe->expr != NULL);
 			info->unplanned = h->nunplanned;
 			for (PjVariant *w = h->variants; w != NULL; w = w->next)
 				info->variants++;

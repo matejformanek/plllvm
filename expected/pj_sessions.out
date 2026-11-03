@@ -354,6 +354,57 @@ SELECT dblink_exec('other', 'GRANT EXECUTE ON FUNCTION int8(int4) TO PUBLIC');
 
 DROP OWNED BY regress_pj_rm, regress_pj_rg;
 DROP ROLE regress_pj_rm, regress_pj_rg;
+-- an IF whose other branch needs a right the other session takes away
+CREATE ROLE regress_pj_ifr;
+CREATE FUNCTION pjs_if(n int) RETURNS int LANGUAGE :pj_lang AS $$
+BEGIN
+  IF n > 0 THEN RETURN n + 1; ELSE RETURN n * 2; END IF;
+END $$;
+SELECT pjs_if(1), pjs_if(2), pjs_if(-1), pjs_if(-2), pjs_if(3), pjs_if(-3);
+ pjs_if | pjs_if | pjs_if | pjs_if | pjs_if | pjs_if 
+--------+--------+--------+--------+--------+--------
+      2 |      3 |     -2 |     -4 |      4 |     -6
+(1 row)
+
+SELECT dblink_exec('other', 'REVOKE EXECUTE ON FUNCTION int4mul(int4, int4) FROM PUBLIC');
+ dblink_exec 
+-------------
+ REVOKE
+(1 row)
+
+BEGIN;
+SET ROLE regress_pj_ifr;
+SELECT pjs_if(1);
+ pjs_if 
+--------
+      2
+(1 row)
+
+SAVEPOINT s;
+SELECT pjs_if(-1);  -- fail
+ERROR:  permission denied for function int4mul
+CONTEXT:  PL/pgSQL function pjs_if(integer) line 3 at RETURN
+ROLLBACK TO s;
+ROLLBACK;
+BEGIN;
+SET ROLE regress_pj_ifr;
+SELECT pjs_if(-1);  -- fail
+ERROR:  permission denied for function int4mul
+CONTEXT:  PL/pgSQL function pjs_if(integer) line 3 at RETURN
+ROLLBACK;
+SELECT dblink_exec('other', 'GRANT EXECUTE ON FUNCTION int4mul(int4, int4) TO PUBLIC');
+ dblink_exec 
+-------------
+ GRANT
+(1 row)
+
+SELECT pjs_if(1), pjs_if(-1);
+ pjs_if | pjs_if 
+--------+--------
+      2 |     -2
+(1 row)
+
+DROP ROLE regress_pj_ifr;
 SELECT dblink_disconnect('other');
  dblink_disconnect 
 -------------------

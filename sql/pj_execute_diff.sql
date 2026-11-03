@@ -124,5 +124,23 @@ SELECT pj_expect('pdd_mod(int,int)', 'interpreted:execute') \gset
 ROLLBACK;
 GRANT EXECUTE ON FUNCTION int4mod(int4, int4) TO PUBLIC;
 
+-- an IF whose branch is reached again after the privilege went (PL/pgSQL: -2)
+CREATE FUNCTION pdd_if(n int) RETURNS int LANGUAGE plpgsql_jit AS $$
+BEGIN
+  IF n > 0 THEN RETURN n + 1; ELSE RETURN n * 2; END IF;
+END $$;
+SELECT pdd_if(1), pdd_if(2), pdd_if(-1), pdd_if(-2), pdd_if(3), pdd_if(-3);
+REVOKE EXECUTE ON FUNCTION int4mul(int4, int4) FROM PUBLIC;
+BEGIN;
+SELECT pdd_if(-1);
+SET ROLE regress_pj_r1;
+SAVEPOINT s;
+SELECT pdd_if(-1);  -- fail
+ROLLBACK TO s;
+RESET ROLE;
+SELECT pj_expect('pdd_if(int)', 'interpreted:execute') \gset
+ROLLBACK;
+GRANT EXECUTE ON FUNCTION int4mul(int4, int4) TO PUBLIC;
+
 DROP OWNED BY regress_pj_r1, regress_pj_grp;
 DROP ROLE regress_pj_r1, regress_pj_grp;

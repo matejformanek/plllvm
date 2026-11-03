@@ -21,7 +21,7 @@ plpgsql_jit` (v0.3).
 | `src/plllvm_sites.c` | call sites and constants: resolution, rebuild, EXECUTE checks, invalidation callbacks (`plllvm_rt_site_*` host functions) |
 | `src/plllvm_plpgsql.c` | the PL/pgSQL plugin: slot and chaining, `paramCompile` wrapper, trampolines on simple expressions, the Params of compiled code (`param_check`, `param_emit`); with `plllvm_pj.c`, the only file that includes `plpgsql.h` |
 | `src/plllvm_pj.c`, `src/plllvm_pj.h` | `LANGUAGE plpgsql_jit`: the call handler, the side entry of each PL/pgSQL function, translation in a subtransaction, guards, the error context, the counters of `plllvm_pj_stats()`; includes `plpgsql.h` |
-| `src/plllvm_pj_translate.c` | `plpgsql_jit`: scope of a function, the planned trees of its RETURN, the cast to the result type, the IR of a function; includes `plpgsql.h` |
+| `src/plllvm_pj_translate.c` | `plpgsql_jit`: scope of a function, the planned trees of its expressions, the casts to their targets, the IR of a function (statements, loops, labels, positions); includes `plpgsql.h` |
 | `src/plllvm_ir.c` | IR text builder: temporaries, blocks, declarations |
 | `src/plllvm_expr.c` | planned expression tree to IR: the check (whole tree or nothing) and the emitter; knows neither LLVM nor PL/pgSQL |
 | `src/plllvm_exprjit.c` | compiled expressions: key, stored tree and facts, cache, cap, the `ExprStateEvalFunc` wrapper, install |
@@ -190,8 +190,22 @@ Only `plllvm_jit.c` and `plllvm_error.cpp` include LLVM headers.
   `plpgsql_exec_error_callback`. A value is converted to the result type by
   the cast tree PL/pgSQL would build, cached per pair of types, but only by
   a cast that cannot raise: widening int4 to int8 or float8, int8 to float8,
-  or a relabeling through a pinned `pg_cast` row. Any other cast declines
-  (`cast`), so a cast error always comes from PL/pgSQL's own code.
+  or a relabeling through a pinned `pg_cast` row; or, for a constant, a
+  conversion of built-in immutable functions that runs when the function is
+  translated (an error there declines the function). Any other cast declines
+  (`cast`), so a cast error always comes from PL/pgSQL's own code. A domain
+  is never a target: a variable of a domain type declines the function.
+* Statements are walked twice in the same order, skipping what a RETURN, EXIT
+  or CONTINUE makes unreachable: the first walk collects the expressions and
+  positions, the second emits code and takes the expressions back in that
+  order. An expression PL/pgSQL has not planned becomes a deopt point: the code
+  stores its index in `ctx` and returns, the handler runs the call in PL/pgSQL,
+  and the function is translated again once that expression is planned. FOR
+  over integers keeps its counter, end and step apart from the loop variable,
+  and FOUND is set as `exec_stmt_fori` does at every way out. The code polls for interrupts
+  at entry and once per loop iteration, after the position of the first
+  statement of the body. A WHILE stores its position again at the head, only
+  if its condition can raise.
 * A compiled call checks, in this order: no NULL argument (PL/pgSQL runs
   it), every plan still simply valid with the generation it had, a variant
   for the session's `plllvm.pj_opt_level`, and the EXECUTE right on every

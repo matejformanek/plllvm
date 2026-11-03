@@ -138,5 +138,28 @@ SELECT dblink_exec('other', 'GRANT EXECUTE ON FUNCTION int8(int4) TO PUBLIC');
 DROP OWNED BY regress_pj_rm, regress_pj_rg;
 DROP ROLE regress_pj_rm, regress_pj_rg;
 
+-- an IF whose other branch needs a right the other session takes away
+CREATE ROLE regress_pj_ifr;
+CREATE FUNCTION pjs_if(n int) RETURNS int LANGUAGE :pj_lang AS $$
+BEGIN
+  IF n > 0 THEN RETURN n + 1; ELSE RETURN n * 2; END IF;
+END $$;
+SELECT pjs_if(1), pjs_if(2), pjs_if(-1), pjs_if(-2), pjs_if(3), pjs_if(-3);
+SELECT dblink_exec('other', 'REVOKE EXECUTE ON FUNCTION int4mul(int4, int4) FROM PUBLIC');
+BEGIN;
+SET ROLE regress_pj_ifr;
+SELECT pjs_if(1);
+SAVEPOINT s;
+SELECT pjs_if(-1);  -- fail
+ROLLBACK TO s;
+ROLLBACK;
+BEGIN;
+SET ROLE regress_pj_ifr;
+SELECT pjs_if(-1);  -- fail
+ROLLBACK;
+SELECT dblink_exec('other', 'GRANT EXECUTE ON FUNCTION int4mul(int4, int4) TO PUBLIC');
+SELECT pjs_if(1), pjs_if(-1);
+DROP ROLE regress_pj_ifr;
+
 SELECT dblink_disconnect('other');
 DROP ROLE regress_pj_sess;

@@ -82,6 +82,7 @@ static const struct config_enum_entry debug_inject_options[] = {
 
 static const struct config_enum_entry pj_codegen_options[] = {
 	{"native", PLLLVM_PJ_NATIVE, false},
+	{"nopos", PLLLVM_PJ_NOPOS, false},
 	{NULL, 0, false}
 };
 
