@@ -8,17 +8,17 @@ SET plllvm.regress_test_mode = on;
 CREATE FUNCTION ps_inc(n int) RETURNS int LANGUAGE plpgsql_jit AS $$
 BEGIN RETURN n + 1; END $$;
 CREATE FUNCTION ps_if(n int) RETURNS int LANGUAGE plpgsql_jit AS $$
-BEGIN IF n > 0 THEN RETURN 1; END IF; RETURN 2; END $$;
+BEGIN CASE WHEN n > 0 THEN RETURN 1; ELSE RETURN 2; END CASE; END $$;
 CREATE FUNCTION ps_decl(n int) RETURNS int LANGUAGE plpgsql_jit AS $$
-DECLARE x int := n; BEGIN RETURN x; END $$;
+DECLARE x numeric := n; BEGIN RETURN x; END $$;
 CREATE FUNCTION ps_exc(n int) RETURNS int LANGUAGE plpgsql_jit AS $$
 BEGIN RETURN n; EXCEPTION WHEN others THEN RETURN 0; END $$;
 CREATE FUNCTION ps_text(t text) RETURNS int LANGUAGE plpgsql_jit AS $$
 BEGIN RETURN 1; END $$;
 CREATE FUNCTION ps_poly(a anyelement) RETURNS int LANGUAGE plpgsql_jit AS $$
 BEGIN RETURN 1; END $$;
-CREATE FUNCTION ps_cast() RETURNS float8 LANGUAGE plpgsql_jit AS $$
-BEGIN RETURN 2.5; END $$;
+CREATE FUNCTION ps_cast() RETURNS int LANGUAGE plpgsql_jit AS $$
+BEGIN RETURN '12'::text; END $$;
 CREATE FUNCTION ps_rnd() RETURNS float8 LANGUAGE plpgsql_jit AS $$
 BEGIN RETURN random() * 0; END $$;
 CREATE FUNCTION ps_sub(n int) RETURNS int LANGUAGE plpgsql_jit AS $$
@@ -31,7 +31,7 @@ SELECT ps_inc(1), ps_if(1), ps_decl(1), ps_exc(1), ps_text('a'), ps_poly(1),
        ps_cast(), ps_rnd(), ps_sub(1), ps_user(1);
  ps_inc | ps_if | ps_decl | ps_exc | ps_text | ps_poly | ps_cast | ps_rnd | ps_sub | ps_user 
 --------+-------+---------+--------+---------+---------+---------+--------+--------+---------
-      2 |     1 |       1 |      1 |       1 |       1 |     2.5 |      0 |      2 |       2
+      2 |     1 |       1 |      1 |       1 |       1 |      12 |      0 |      2 |       2
 (1 row)
 
 SELECT p.proname, s.state, s.reason, s.last_path
@@ -56,7 +56,7 @@ SELECT ps_inc(1), ps_if(1), ps_decl(1), ps_exc(1), ps_text('a'), ps_poly(1),
        ps_cast(), ps_rnd(), ps_sub(1), ps_user(1);
  ps_inc | ps_if | ps_decl | ps_exc | ps_text | ps_poly | ps_cast | ps_rnd | ps_sub | ps_user 
 --------+-------+---------+--------+---------+---------+---------+--------+--------+---------
-      2 |     1 |       1 |      1 |       1 |       1 |     2.5 |      0 |      2 |       2
+      2 |     1 |       1 |      1 |       1 |       1 |      12 |      0 |      2 |       2
 (1 row)
 
 SELECT p.proname, s.state, s.reason, s.last_path, s.calls, s.compiled_calls,
@@ -67,9 +67,9 @@ SELECT p.proname, s.state, s.reason, s.last_path, s.calls, s.compiled_calls,
  proname |  state   |     reason      |        last_path         | calls | compiled_calls | translations 
 ---------+----------+-----------------+--------------------------+-------+----------------+--------------
  ps_cast | declined | cast            | declined:cast            |     2 |              0 |            0
- ps_decl | declined | declare         | declined:declare         |     2 |              0 |            0
+ ps_decl | declined | datum:numeric   | declined:datum:numeric   |     2 |              0 |            0
  ps_exc  | declined | exception block | declined:exception block |     2 |              0 |            0
- ps_if   | declined | statement:IF    | declined:statement:IF    |     2 |              0 |            0
+ ps_if   | declined | statement:CASE  | declined:statement:CASE  |     2 |              0 |            0
  ps_inc  | compiled |                 | compiled                 |     2 |              1 |            1
  ps_poly | declined | signature       | declined:signature       |     2 |              0 |            0
  ps_rnd  | declined | volatile callee | declined:volatile callee |     2 |              0 |            0

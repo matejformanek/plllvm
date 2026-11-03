@@ -114,3 +114,93 @@ SELECT sum(pe_wait(i)) FROM generate_series(1, 1000000000) i;  -- fail
 RESET statement_timeout;
 \set VERBOSITY default
 SELECT pj_expect('pe_wait(int)', 'compiled') \gset
+
+-- a WHILE condition that fails after the body reads "at WHILE", and its
+-- CONTINUE form
+CREATE FUNCTION pe_while(n int) RETURNS int LANGUAGE :pj_lang AS $$
+DECLARE i int := 0;
+BEGIN
+  WHILE 10 / (n - i) > 0 LOOP
+    i := i + 1;
+  END LOOP;
+  RETURN i;
+END $$;
+CREATE FUNCTION pe_whilec(n int) RETURNS int LANGUAGE :pj_lang AS $$
+DECLARE i int := 0;
+BEGIN
+  WHILE 10 / (n - i) > 0 LOOP
+    i := i + 1;
+    CONTINUE WHEN i < n;
+    EXIT;
+  END LOOP;
+  RETURN i;
+END $$;
+SELECT pe_while(0), pe_whilec(3);
+SELECT pe_while(-1), pe_whilec(4);
+SELECT pe_while(3);  -- fail
+SELECT pe_while(3);  -- fail
+SELECT pe_whilec(0);  -- fail
+SELECT pe_whilec(0);  -- fail
+SELECT pj_expect('pe_while(int)', 'compiled') \gset
+SELECT pj_expect('pe_whilec(int)', 'compiled') \gset
+
+-- the statements of the position: IF, assignment, FOR bounds, declaration
+CREATE FUNCTION pe_pos(k int, d int) RETURNS int LANGUAGE :pj_lang AS $$
+DECLARE
+  x int := 1;
+  y int := CASE WHEN k = 9 THEN 1 / d ELSE 2 END;
+BEGIN
+  IF k = 1 AND 1 / d > 0 THEN RETURN 1; END IF;
+  IF k = 2 THEN x := 1 / d; END IF;
+  IF k = 3 THEN
+    FOR i IN 1..10 / d LOOP x := x + 1; END LOOP;
+  END IF;
+  IF k = 4 THEN
+    FOR i IN 1..3 LOOP x := x + 10 / d; END LOOP;
+  END IF;
+  RETURN x + y;
+END $$;
+SELECT pe_pos(0, 1);
+SELECT pe_pos(1, 1), pe_pos(2, 1), pe_pos(3, 1), pe_pos(4, 1), pe_pos(9, 1);
+SELECT pe_pos(1, 1), pe_pos(2, 1), pe_pos(3, 1), pe_pos(4, 1), pe_pos(9, 1);
+SELECT pe_pos(1, 0);  -- fail
+SELECT pe_pos(2, 0);  -- fail
+SELECT pe_pos(3, 0);  -- fail
+SELECT pe_pos(4, 0);  -- fail
+SELECT pe_pos(9, 0);  -- fail
+SELECT pj_expect('pe_pos(int,int)', 'compiled') \gset
+
+-- NOT NULL and FOR bounds
+CREATE FUNCTION pe_nn(n int) RETURNS int LANGUAGE :pj_lang AS $$
+DECLARE x int NOT NULL := 1; y int;
+BEGIN
+  IF n = 1 THEN x := y; END IF;
+  IF n = 2 THEN FOR i IN y..3 LOOP x := x + 1; END LOOP; END IF;
+  RETURN x;
+END $$;
+SELECT pe_nn(0), pe_nn(0);
+SELECT pe_nn(1);  -- fail
+SELECT pe_nn(2);  -- fail
+SELECT pe_nn(1);  -- fail
+SELECT pe_nn(2);  -- fail
+SELECT pj_expect('pe_nn(int)', 'compiled') \gset
+
+-- a cancel in a loop reports the statement it interrupted
+CREATE FUNCTION pe_spin(n int) RETURNS int LANGUAGE :pj_lang AS $$
+DECLARE i int := 0;
+BEGIN
+  WHILE i < n LOOP i := i + 1; END LOOP;
+  RETURN i;
+END $$;
+CREATE FUNCTION pe_spin0(n int) RETURNS int LANGUAGE :pj_lang AS $$
+BEGIN
+  WHILE n > 0 LOOP END LOOP;
+  RETURN n;
+END $$;
+SELECT pe_spin(3), pe_spin(4), pe_spin0(0), pe_spin0(-1);
+SET statement_timeout = '100ms';
+SELECT pe_spin(2147483647);  -- fail
+SELECT pe_spin0(1);  -- fail
+RESET statement_timeout;
+SELECT pj_expect('pe_spin(int)', 'compiled') \gset
+SELECT pj_expect('pe_spin0(int)', 'compiled') \gset

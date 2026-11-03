@@ -9,17 +9,17 @@ SET plllvm.regress_test_mode = on;
 CREATE FUNCTION ps_inc(n int) RETURNS int LANGUAGE plpgsql_jit AS $$
 BEGIN RETURN n + 1; END $$;
 CREATE FUNCTION ps_if(n int) RETURNS int LANGUAGE plpgsql_jit AS $$
-BEGIN IF n > 0 THEN RETURN 1; END IF; RETURN 2; END $$;
+BEGIN CASE WHEN n > 0 THEN RETURN 1; ELSE RETURN 2; END CASE; END $$;
 CREATE FUNCTION ps_decl(n int) RETURNS int LANGUAGE plpgsql_jit AS $$
-DECLARE x int := n; BEGIN RETURN x; END $$;
+DECLARE x numeric := n; BEGIN RETURN x; END $$;
 CREATE FUNCTION ps_exc(n int) RETURNS int LANGUAGE plpgsql_jit AS $$
 BEGIN RETURN n; EXCEPTION WHEN others THEN RETURN 0; END $$;
 CREATE FUNCTION ps_text(t text) RETURNS int LANGUAGE plpgsql_jit AS $$
 BEGIN RETURN 1; END $$;
 CREATE FUNCTION ps_poly(a anyelement) RETURNS int LANGUAGE plpgsql_jit AS $$
 BEGIN RETURN 1; END $$;
-CREATE FUNCTION ps_cast() RETURNS float8 LANGUAGE plpgsql_jit AS $$
-BEGIN RETURN 2.5; END $$;
+CREATE FUNCTION ps_cast() RETURNS int LANGUAGE plpgsql_jit AS $$
+BEGIN RETURN '12'::text; END $$;
 CREATE FUNCTION ps_rnd() RETURNS float8 LANGUAGE plpgsql_jit AS $$
 BEGIN RETURN random() * 0; END $$;
 CREATE FUNCTION ps_sub(n int) RETURNS int LANGUAGE plpgsql_jit AS $$

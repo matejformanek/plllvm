@@ -627,7 +627,7 @@ SELECT pb_reinit(3), pb_reinit(4), pb_reinit(5);
 (1 row)
 
 SELECT pj_expect('pb_reinit(int)', 'compiled') \gset
--- the constants K2 folds, and those it leaves to PL/pgSQL, with the settings
+-- the constants folded when the function is translated, and those it leaves to PL/pgSQL, with the settings
 -- their conversion reads
 CREATE FUNCTION pb_k2() RETURNS float8 LANGUAGE :pj_lang AS $$
 DECLARE

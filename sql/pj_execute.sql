@@ -311,5 +311,33 @@ SELECT pjx_many();
 SELECT pj_expect('pjx_inn(int)', 'compiled') \gset
 DROP SCHEMA pjx_s CASCADE;
 
+-- a branch the call did not reach, then a role without its function: the
+-- call is PL/pgSQL's, which raises only if it reaches the branch
+CREATE FUNCTION pg_if(n int) RETURNS int LANGUAGE :pj_lang AS $$
+BEGIN
+  IF n > 0 THEN RETURN n + 1; ELSE RETURN n * 2; END IF;
+END $$;
+SELECT pg_if(1), pg_if(2), pg_if(-1), pg_if(-2), pg_if(3), pg_if(-3);
+REVOKE EXECUTE ON FUNCTION int4mul(int4, int4) FROM PUBLIC;
+BEGIN; SELECT pg_if(1); SET ROLE regress_pj_r1; SELECT pg_if(-1) AS pg_if_expect_denied; ROLLBACK;
+BEGIN; SET ROLE regress_pj_r1; SELECT pg_if(1) AS pg_if_unreached; SELECT pg_if(-1) AS pg_if_expect_denied; ROLLBACK;
+GRANT EXECUTE ON FUNCTION int4mul(int4, int4) TO PUBLIC;
+SELECT pg_if(1), pg_if(-1);
+SELECT pj_expect('pg_if(int)', 'compiled') \gset
+
+-- an error in the branch, caught, then a role without the function
+CREATE FUNCTION ph_f(a int, b int) RETURNS int LANGUAGE :pj_lang AS $$
+BEGIN
+  IF a > 100 THEN RETURN a / b; END IF;
+  RETURN a * b;
+END $$;
+SELECT ph_f(200, 2), ph_f(1, 2), ph_f(200, 2), ph_f(1, 2);
+BEGIN; SELECT ph_f(200, 2); SAVEPOINT s; SELECT ph_f(200, 0) AS ph_22012; ROLLBACK TO s; SELECT ph_f(200, 2); ROLLBACK;
+REVOKE EXECUTE ON FUNCTION int4div(int4, int4) FROM PUBLIC;
+BEGIN; SELECT ph_f(200, 2); SAVEPOINT s; SELECT ph_f(200, 0) AS ph_22012; ROLLBACK TO s;
+SET ROLE regress_pj_r1; SELECT ph_f(200, 2) AS ph_expect_denied; ROLLBACK;
+BEGIN; SET ROLE regress_pj_r1; SELECT ph_f(1, 2) AS ph_unreached; ROLLBACK;
+GRANT EXECUTE ON FUNCTION int4div(int4, int4) TO PUBLIC;
+
 DROP OWNED BY regress_pj_r1, regress_pj_r2, regress_pj_def, regress_pj_grp;
 DROP ROLE regress_pj_r1, regress_pj_r2, regress_pj_def, regress_pj_grp;
