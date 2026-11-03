@@ -83,6 +83,10 @@ SELECT pj_expect('pbx_num(int)', 'compiled') \gset
 -- numeric into float8 is a cast that can raise: stock's own
 SELECT pj_expect('pbx_numc(int)', 'declined:cast') \gset
 
+-- results passed by reference outlive the next call of the same function
+SELECT pbx_txt(12345) || '/' || pbx_txt(678) || '/' || pbx_txt(99) || '/' || pbx_txt(4);
+SELECT pbx_txt(s.i) || '/' || pbx_txt(s.i + 1) AS pair FROM generate_series(100, 103) s(i);
+
 -- a local read after the call that recurses: each level has its own parameters
 CREATE FUNCTION pbx_rl(n int) RETURNS int LANGUAGE :pj_lang IMMUTABLE AS $$
 DECLARE x int := n * 10;
@@ -202,13 +206,25 @@ BEGIN
   IF n > 0 THEN RETURN x + 1; END IF;
   RETURN x * 2 + 100;
 END $$;
+CREATE FUNCTION pbx_attempts() RETURNS bigint LANGUAGE plpgsql AS $$
+DECLARE n bigint := 0;
+BEGIN
+  IF current_setting('plllvm.plpgsql_jit', true) IS NOT NULL
+     AND current_setting('debug_discard_caches')::int = 0 THEN
+    EXECUTE 'SELECT attempts FROM plllvm_pj_stats()' INTO n;
+  END IF;
+  RETURN n;
+END $$;
 SET track_functions = 'pl';
 SELECT pbx_late(1);
 SELECT pbx_late(2);
 SELECT pj_expect('pbx_late(int)', 'waiting') \gset
+-- waiting costs the pre-check of each call, and no translation attempt
+SELECT pbx_attempts() AS a1 \gset
 SELECT pbx_late(3);
 SELECT pbx_late(-1);
 SELECT pj_expect('pbx_late(int)', 'waiting') \gset
+SELECT pbx_attempts() = :a1 AS no_attempts;
 BEGIN;
 SELECT pbx_late(-2);
 SELECT pg_stat_get_xact_function_calls('pbx_noisy(int)'::regprocedure) AS noisy_calls;

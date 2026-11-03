@@ -376,5 +376,18 @@ GRANT EXECUTE ON FUNCTION hashint4(int4) TO PUBLIC;
 SELECT pxs_in(1), pxs_in(20);
 SELECT pj_expect('pxs_in(int)', 'compiled') \gset
 
+-- the I/O functions of a conversion are not checked by PL/pgSQL, so a role
+-- without them runs the call too
+CREATE FUNCTION pxs_io(n int) RETURNS int LANGUAGE :pj_lang AS $$
+BEGIN RETURN length(n::text) + n; END $$;
+SELECT pxs_io(1), pxs_io(22), pxs_io(333);
+REVOKE EXECUTE ON FUNCTION int4out(int4) FROM PUBLIC;
+BEGIN; SET ROLE regress_pj_r1; SELECT pxs_io(4444) AS pxs_io_ok; ROLLBACK;
+GRANT EXECUTE ON FUNCTION int4out(int4) TO PUBLIC;
+SET ROLE regress_pj_r1;
+SELECT pxs_io(5), pxs_io(66);
+RESET ROLE;
+SELECT pj_expect('pxs_io(int)', 'compiled') \gset
+
 DROP OWNED BY regress_pj_r1, regress_pj_r2, regress_pj_def, regress_pj_grp;
 DROP ROLE regress_pj_r1, regress_pj_r2, regress_pj_def, regress_pj_grp;
