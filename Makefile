@@ -439,7 +439,7 @@ check-pj-ir: port-ok
 
 # The differential fuzzer: N programs from SEED, as plpgsql and as plpgsql_jit
 # at opt level 0 and 2, in the throwaway database pj_fuzz.  A difference is
-# written to results-fuzz/ as a script that reproduces it.  Not part of
+# reported by seed, with the program and both outputs in results-fuzz/.  Not part of
 # installcheck or verify.
 N ?= 2000
 SEED ?= 1

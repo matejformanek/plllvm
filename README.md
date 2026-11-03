@@ -359,7 +359,7 @@ make stage cluster-start installcheck doctor cluster-stop
 | `installcheck-pj` | the `pj_` tests, written for stock PL/pgSQL's output and run with `LANGUAGE plpgsql_jit` (`PJ_LANG`): the handler off and on, with `plllvm.expr_jit` and `plllvm.expr_eager`, and `pj_stats` under cache flushes |
 | `installcheck-pj-once`, `installcheck-pj-opt` | the `pj_` tests whose output comes from plllvm, in one variant, and at the highest opt level |
 | `installcheck-plpgsql-pj PLLLVM_PORT=<port>` | the tests of `installcheck-plpgsql` without plllvm, then with `LANGUAGE plpgsql` changed to `plpgsql_jit` and the handler off and on; the results must match the first, but for the hunks of `tools/plpgsql_pj_allowed.diff` |
-| `fuzz-pj PLLLVM_PORT=<port> N=<n> SEED=<s>` | `tools/pj_fuzz.py`: `N` generated functions run as `plpgsql` and as `plpgsql_jit` at opt level 0 and 2, values, SQLSTATEs, messages and CONTEXT compared, with role switches and `REVOKE` inside transactions; a difference is minimised into `results-fuzz/`; not part of `verify` |
+| `fuzz-pj PLLLVM_PORT=<port> N=<n> SEED=<s>` | `tools/pj_fuzz.py`: `N` generated functions run as `plpgsql` and as `plpgsql_jit` at opt level 0 and 2, values, SQLSTATEs, messages and CONTEXT compared, with role switches and `REVOKE` inside transactions; a difference is reported by seed with its program in `results-fuzz/`; not part of `verify` |
 | `verify PLLLVM_PORT=<port>` | every suite of a PR in order, with the commit and the exit code of each in `results-verify.log` |
 | `kernels`, `check-kernels` | compile `examples/kernels/src/*.c` to IR with the install-perf headers; check the committed `.ll` files are current |
 | `pgindent` | format the C sources (`docs/style.md`) |
