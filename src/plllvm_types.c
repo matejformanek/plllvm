@@ -62,6 +62,7 @@ extern bool plllvm_arg_bool(FunctionCallInfo fcinfo, int n);
 extern int32 plllvm_nargs(FunctionCallInfo fcinfo);
 extern Datum plllvm_return_null(FunctionCallInfo fcinfo);
 extern void plllvm_cfi(void);
+extern void plllvm_pj_cfi(int32 *pos, int32 at);
 extern void plllvm_check_stack(void);
 extern Datum plllvm_call0(plllvm_site *site, bool *isnull);
 extern Datum plllvm_call1(plllvm_site *site, Datum a0, bool n0, bool *isnull);
@@ -171,6 +172,19 @@ pg_always_inline void
 plllvm_cfi(void)
 {
 	CHECK_FOR_INTERRUPTS();
+}
+
+pg_always_inline void
+plllvm_pj_cfi(int32 *pos, int32 at)
+{
+	if (unlikely(InterruptPending))
+	{
+		int32		saved = *pos;
+
+		*pos = at;
+		ProcessInterrupts();
+		*pos = saved;
+	}
 }
 
 pg_always_inline void

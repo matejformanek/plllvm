@@ -935,5 +935,310 @@ SELECT pxs_io(5), pxs_io(66);
 RESET ROLE;
 SELECT pj_expect('pxs_io(int)', 'compiled') \gset
 GRANT EXECUTE ON FUNCTION int4out(int4) TO PUBLIC;
+-- an error marks the expression it stops, and no other: PL/pgSQL builds the
+-- rest as if there had been none.  A function with a marked expression is
+-- PL/pgSQL's until the transaction ends, because its SPI path plans
+-- differently
+CREATE FUNCTION pq_a(p1 bigint, p2 int) RETURNS bigint LANGUAGE :pj_lang AS $$
+BEGIN
+  IF (- (NULL::smallint)) <> mod(p2, p2) THEN RETURN 0; END IF;
+  p1 := p1 + 9223372036854775807;
+  RETURN p1;
+END $$;
+SELECT pq_a(0, 1), pq_a(-1, 2), pq_a(0, 3);
+        pq_a         |        pq_a         |        pq_a         
+---------------------+---------------------+---------------------
+ 9223372036854775807 | 9223372036854775806 | 9223372036854775807
+(1 row)
+
+SELECT pj_expect('pq_a(bigint,int)', 'compiled') \gset
+BEGIN;
+SAVEPOINT s;
+SELECT pq_a(3, 5);  -- fail
+ERROR:  bigint out of range
+ROLLBACK TO s;
+SELECT pq_a(NULL, 0) AS pq_a_null;
+ pq_a_null 
+-----------
+          
+(1 row)
+
+SELECT pj_expect('pq_a(bigint,int)', 'interpreted:null arg') \gset
+SELECT pq_a(1, 1) AS pq_a_one;  -- fail
+ERROR:  bigint out of range
+ROLLBACK;
+-- a DECLARE default that failed, then a role without the function of the RETURN
+CREATE FUNCTION pq_b(p1 int, p2 bigint) RETURNS int LANGUAGE :pj_lang AS $$
+DECLARE
+  v1 bigint := 9223372036854775807 * p2;
+BEGIN
+  RETURN (10 - p1) + (p1 + p1);
+END $$;
+SELECT pq_b(1, 1), pq_b(2, 1), pq_b(3, 1);
+ pq_b | pq_b | pq_b 
+------+------+------
+   11 |   12 |   13
+(1 row)
+
+SELECT pj_expect('pq_b(int,bigint)', 'compiled') \gset
+BEGIN;
+REVOKE EXECUTE ON FUNCTION int4pl(int4, int4) FROM PUBLIC;
+SAVEPOINT s;
+SELECT pq_b(5, 3);  -- fail
+ERROR:  bigint out of range
+ROLLBACK TO s;
+SET ROLE regress_pj_r1;
+SAVEPOINT s;
+SELECT pq_b(-2147483648, 1) AS pq_b_expect_denied;  -- fail
+ERROR:  permission denied for function int4pl
+ROLLBACK TO s;
+SELECT pq_b(NULL, 1) AS pq_b_null_expect_denied;  -- fail
+ERROR:  permission denied for function int4pl
+ROLLBACK;
+-- an error in the first RETURN, then a role without the function of the second
+CREATE FUNCTION pq_c(n int) RETURNS int LANGUAGE :pj_lang STABLE AS $$
+DECLARE v int;
+BEGIN
+  IF n > 100 THEN RETURN v % 7; END IF;
+  RETURN 10 / n;
+END $$;
+SELECT pq_c(200), pq_c(1), pq_c(2), pq_c(3);
+ pq_c | pq_c | pq_c | pq_c 
+------+------+------+------
+      |   10 |    5 |    3
+(1 row)
+
+SELECT pj_expect('pq_c(int)', 'compiled') \gset
+REVOKE EXECUTE ON FUNCTION int4mod(int4, int4) FROM PUBLIC;
+BEGIN;
+SAVEPOINT s;
+SELECT pq_c(0);  -- fail
+ERROR:  division by zero
+ROLLBACK TO s;
+SET ROLE regress_pj_r1;
+SAVEPOINT s;
+SELECT pq_c(200) AS pq_c_expect_denied;  -- fail
+ERROR:  permission denied for function int4mod
+ROLLBACK TO s;
+RESET ROLE;
+SELECT pj_expect('pq_c(int)', 'interpreted:in use') \gset
+ROLLBACK;
+GRANT EXECUTE ON FUNCTION int4mod(int4, int4) TO PUBLIC;
+-- a function PL/pgSQL folded away at planning is checked by its SPI path
+CREATE FUNCTION pq_d(p1 bigint, p2 int) RETURNS int LANGUAGE :pj_lang AS $$
+BEGIN
+  IF (- (2147483647)::bigint) < (p2 + p1) THEN RETURN 1; END IF;
+  RETURN p2;
+END $$;
+SELECT pq_d(1, 2), pq_d(3, 4), pq_d(5, 6);
+ pq_d | pq_d | pq_d 
+------+------+------
+    1 |    1 |    1
+(1 row)
+
+SELECT pj_expect('pq_d(bigint,int)', 'compiled') \gset
+REVOKE EXECUTE ON FUNCTION int8um(bigint) FROM PUBLIC;
+BEGIN;
+SAVEPOINT s;
+SELECT pq_d(9223372036854775807, 1);  -- fail
+ERROR:  bigint out of range
+ROLLBACK TO s;
+SAVEPOINT s;
+SELECT pq_d(9223372036854775807, NULL) IS NULL;
+ ?column? 
+----------
+ t
+(1 row)
+
+ROLLBACK TO s;
+SAVEPOINT s;
+SELECT pq_d(9223372036854775807, 2);  -- fail
+ERROR:  bigint out of range
+ROLLBACK TO s;
+SET ROLE regress_pj_r1;
+SELECT pq_d(0, 5) AS pq_d_expect_denied;  -- fail
+ERROR:  permission denied for function int8um
+ROLLBACK;
+GRANT EXECUTE ON FUNCTION int8um(bigint) TO PUBLIC;
+CREATE FUNCTION pq_e(p1 double precision) RETURNS boolean LANGUAGE :pj_lang AS $$
+BEGIN
+  RETURN (1e308::float8 + p1) <> 9223372036854775807::float8;
+END $$;
+SELECT pq_e(2), pq_e(3), pq_e(4);
+ pq_e | pq_e | pq_e 
+------+------+------
+ t    | t    | t
+(1 row)
+
+SELECT pj_expect('pq_e(float8)', 'compiled') \gset
+BEGIN;
+REVOKE EXECUTE ON FUNCTION float8(bigint) FROM PUBLIC;
+SAVEPOINT s;
+SELECT pq_e(1e308);  -- fail
+ERROR:  value out of range: overflow
+ROLLBACK TO s;
+SET ROLE regress_pj_r1;
+SELECT pq_e(1.5) AS pq_e_expect_denied;  -- fail
+ERROR:  permission denied for function float8
+ROLLBACK;
+-- PL/pgSQL's SPI path plans the assignment at every call: the first five
+-- are custom plans, which a compiled call would not have counted
+CREATE FUNCTION pq_f(p1 bigint) RETURNS bigint LANGUAGE :pj_lang AS $$
+BEGIN
+  p1 := (p1 - p1) + mod(3037000500, p1);
+  RETURN p1;
+END $$;
+SELECT pq_f(2), pq_f(3), pq_f(4);
+ pq_f | pq_f | pq_f 
+------+------+------
+    0 |    0 |    0
+(1 row)
+
+SELECT pj_expect('pq_f(bigint)', 'compiled') \gset
+BEGIN;
+REVOKE EXECUTE ON FUNCTION int8mi(bigint, bigint) FROM PUBLIC;
+SAVEPOINT s;
+SELECT pq_f(0);  -- fail
+ERROR:  division by zero
+ROLLBACK TO s;
+SELECT pq_f(1), pq_f(2), pq_f(3), pq_f(4), pq_f(5), pq_f(6);
+ pq_f | pq_f | pq_f | pq_f | pq_f | pq_f 
+------+------+------+------+------+------
+    0 |    0 |    0 |    0 |    0 |    0
+(1 row)
+
+SELECT pj_expect('pq_f(bigint)', 'interpreted:in use') \gset
+SET ROLE regress_pj_r1;
+SAVEPOINT s;
+SELECT pq_f(NULL) AS pq_f_expect_denied;  -- fail
+ERROR:  permission denied for function int8mi
+ROLLBACK TO s;
+RESET ROLE;
+ROLLBACK;
+-- an error outside any expression marks none: NOT NULL, and the bounds of a FOR
+CREATE FUNCTION pq_nn(n int) RETURNS int LANGUAGE :pj_lang AS $$
+DECLARE v int NOT NULL := 0;
+BEGIN
+  v := NULLIF(n, 1) + 0;
+  RETURN v;
+END $$;
+CREATE FUNCTION pq_fu(n int) RETURNS int LANGUAGE :pj_lang AS $$
+DECLARE s int := 0;
+BEGIN
+  FOR i IN 1..NULLIF(n, 1) + 0 LOOP s := s + i; END LOOP;
+  RETURN s;
+END $$;
+CREATE FUNCTION pq_fb(n int) RETURNS int LANGUAGE :pj_lang AS $$
+DECLARE s int := 0;
+BEGIN
+  FOR i IN 1..3 BY n - 1 LOOP s := s + i; END LOOP;
+  RETURN s;
+END $$;
+SELECT pq_nn(2), pq_nn(3), pq_nn(4), pq_fu(2), pq_fu(3), pq_fu(4), pq_fb(2), pq_fb(3), pq_fb(4);
+ pq_nn | pq_nn | pq_nn | pq_fu | pq_fu | pq_fu | pq_fb | pq_fb | pq_fb 
+-------+-------+-------+-------+-------+-------+-------+-------+-------
+     2 |     3 |     4 |     3 |     6 |    10 |     6 |     4 |     1
+(1 row)
+
+SELECT pj_expect('pq_nn(int)', 'compiled') \gset
+SELECT pj_expect('pq_fu(int)', 'compiled') \gset
+SELECT pj_expect('pq_fb(int)', 'compiled') \gset
+BEGIN;
+SAVEPOINT s;
+SELECT pq_nn(1);  -- fail
+ERROR:  null value cannot be assigned to variable "v" declared NOT NULL
+ROLLBACK TO s;
+SELECT pq_nn(5);
+ pq_nn 
+-------
+     5
+(1 row)
+
+SELECT pj_expect('pq_nn(int)', 'compiled') \gset
+SAVEPOINT s;
+SELECT pq_fu(1);  -- fail
+ERROR:  upper bound of FOR loop cannot be null
+ROLLBACK TO s;
+SELECT pq_fu(5);
+ pq_fu 
+-------
+    15
+(1 row)
+
+SELECT pj_expect('pq_fu(int)', 'compiled') \gset
+SAVEPOINT s;
+SELECT pq_fb(1);  -- fail
+ERROR:  BY value of FOR loop must be greater than zero
+ROLLBACK TO s;
+SELECT pq_fb(5);
+ pq_fb 
+-------
+     1
+(1 row)
+
+SELECT pj_expect('pq_fb(int)', 'compiled') \gset
+ROLLBACK;
+-- a second expression of a statement names itself: an ELSIF condition that
+-- failed, while the IF condition never did
+CREATE FUNCTION pq_ei(p int, q int) RETURNS int LANGUAGE :pj_lang AS $$
+BEGIN
+  IF (- (NULL::smallint)) <> mod(p, p) THEN RETURN -1;
+  ELSIF 10 % q > 100 THEN RETURN -2;
+  END IF;
+  RETURN 1;
+END $$;
+SELECT pq_ei(1, 1), pq_ei(2, 1), pq_ei(3, 1);
+ pq_ei | pq_ei | pq_ei 
+-------+-------+-------
+     1 |     1 |     1
+(1 row)
+
+SELECT pj_expect('pq_ei(int,int)', 'compiled') \gset
+BEGIN;
+SAVEPOINT s;
+\set VERBOSITY default
+SELECT pq_ei(1, 0);  -- fail
+ERROR:  division by zero
+CONTEXT:  PL/pgSQL function pq_ei(integer,integer) line 3 at IF
+\set VERBOSITY terse
+ROLLBACK TO s;
+SELECT pq_ei(0, 1) AS pq_ei_one;
+ pq_ei_one 
+-----------
+         1
+(1 row)
+
+SELECT pj_expect('pq_ei(int,int)', 'interpreted:in use') \gset
+ROLLBACK;
+-- a cancel is the statement's, not an expression's: the function stays compiled
+CREATE FUNCTION pq_to(n bigint) RETURNS bigint LANGUAGE :pj_lang AS $$
+BEGIN
+  LOOP EXIT WHEN n % 2 = 1; END LOOP;
+  RETURN n;
+END $$;
+SELECT pq_to(1), pq_to(3), pq_to(5);
+ pq_to | pq_to | pq_to 
+-------+-------+-------
+     1 |     3 |     5
+(1 row)
+
+SELECT pj_expect('pq_to(bigint)', 'compiled') \gset
+BEGIN;
+SAVEPOINT s;
+SET LOCAL statement_timeout = 100;
+\set VERBOSITY default
+SELECT pq_to(2);  -- fail
+ERROR:  canceling statement due to statement timeout
+CONTEXT:  PL/pgSQL function pq_to(bigint) line 3 at EXIT
+\set VERBOSITY terse
+ROLLBACK TO s;
+SELECT pq_to(7);
+ pq_to 
+-------
+     7
+(1 row)
+
+SELECT pj_expect('pq_to(bigint)', 'compiled') \gset
+ROLLBACK;
 DROP OWNED BY regress_pj_r1, regress_pj_r2, regress_pj_def, regress_pj_grp;
 DROP ROLE regress_pj_r1, regress_pj_r2, regress_pj_def, regress_pj_grp;

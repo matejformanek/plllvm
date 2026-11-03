@@ -51,7 +51,7 @@ static void level_free(PjLevel *lv);
 static void level_sample(PjLevel *lv);
 static void level_reset(PjLevel *lv);
 static void slot_build(PjLevel *lv, PjSlot *slot, const PjExpr *pe, PjCtx *ctx);
-static void key_recheck(PjCtx *ctx);
+static void key_recheck(PjCtx *ctx, const PjExpr *pe);
 
 /*
  * The parameters of the level, for the compiled code to fill
@@ -80,7 +80,14 @@ plllvm_pj_boxed_eval(PjCtx *ctx, int32 idx)
 
 	if (slot->state == NULL || slot->user != ctx->user ||
 		slot->epoch != ctx->epoch)
+	{
+		/* a build that fails stops no expression: PL/pgSQL stamps nothing */
+		int			expr_pos = ctx->pos;
+
+		ctx->pos = pe->pos;
 		slot_build(lv, slot, pe, ctx);
+		ctx->pos = expr_pos;
+	}
 
 	plllvm_pj_count.boxed_evals++;
 	ctx->evaluated = true;
@@ -99,7 +106,7 @@ plllvm_pj_boxed_eval(PjCtx *ctx, int32 idx)
 		PopActiveSnapshot();
 	MemoryContextSwitchTo(oldcxt);
 
-	key_recheck(ctx);
+	key_recheck(ctx, pe);
 
 	ctx->isnull = isnull;
 	return result;
@@ -276,19 +283,24 @@ slot_build(PjLevel *lv, PjSlot *slot, const PjExpr *pe, PjCtx *ctx)
  * No call can fall back now, so a function that is no longer allowed raises.
  */
 static void
-key_recheck(PjCtx *ctx)
+key_recheck(PjCtx *ctx, const PjExpr *pe)
 {
 	uint64		epoch = plllvm_pj_exec_epoch();
 	Oid			user = GetUserId();
 	Oid			denied;
+	int			saved;
 
 	if (user == ctx->user && epoch == ctx->epoch)
 		return;
 
+	/* the evaluation is done: the denial is the statement's */
+	saved = ctx->pos;
+	ctx->pos = pe->pos;
 	if (!plllvm_pj_execute_check(ctx->harvest, user, epoch, &denied))
 		aclcheck_error(ACLCHECK_NO_PRIV, OBJECT_FUNCTION,
 					   get_func_name(denied));
 
+	ctx->pos = saved;
 	ctx->user = user;
 	ctx->epoch = epoch;
 }

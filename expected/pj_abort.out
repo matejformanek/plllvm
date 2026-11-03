@@ -156,7 +156,7 @@ FETCH ALL FROM pba_c;
 (3 rows)
 
 COMMIT;
-SELECT pj_expect('pba_f(int)', 'compiled') \gset
+SELECT pj_expect('pba_f(int)', 'interpreted:in use') \gset
 -- an error inside a function that is not inlined, called by a boxed
 -- expression, caught a hundred times in one transaction
 CREATE FUNCTION pba_sqlerr(n int) RETURNS int LANGUAGE sql STABLE AS
@@ -220,7 +220,7 @@ SELECT pba_total() - :before < 1048576 AS flat;
  t
 (1 row)
 
-SELECT pj_expect('pba_f(int)', 'compiled') \gset
+SELECT pj_expect('pba_f(int)', 'interpreted:in use') \gset
 -- the stack of context lines of an error four calls deep: one per call, and
 -- the extra "PL/pgSQL expression" line of the interpreter's recursion is the
 -- only difference allowed
@@ -253,7 +253,7 @@ SELECT pba_ctx_n(3), pba_ctx_n(3), pba_ctx_n(0);
          6 |         6 |         3
 (1 row)
 
-SELECT pj_expect('pba_ctx(int)', 'compiled') \gset
+SELECT pj_expect('pba_ctx(int)', 'interpreted:in use') \gset
 -- an error in a boxed branch after the privilege was lost
 \set VERBOSITY terse
 CREATE ROLE regress_pj_ab;
@@ -355,7 +355,7 @@ SELECT pba_fh(77);
 (1 row)
 
 COMMIT;
-SELECT pj_expect('pba_fh(int)', 'compiled') \gset
+SELECT pj_expect('pba_fh(int)', 'interpreted:in use') \gset
 RESET pba.fail;
 DROP FUNCTION pba_fh(int);
 DROP OPERATOR FAMILY pba_fam USING hash CASCADE;

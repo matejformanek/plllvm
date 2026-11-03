@@ -340,5 +340,54 @@ SELECT pbx_rcm(3, 2), pbx_rc(3);
 SELECT pj_expect('pbx_rcm(int,int)', 'compiled') \gset
 SELECT pj_expect('pbx_rc(int)', 'compiled') \gset
 
+-- a recursion whose inner frame runs in PL/pgSQL (a NULL argument): the outer
+-- frame's expression is busy there, and what that call builds is its own
+CREATE ROLE regress_pj_qg;
+CREATE FUNCTION pbx_fb(n int, m int) RETURNS int LANGUAGE :pj_lang STABLE AS $$
+DECLARE v int;
+BEGIN
+  IF m IS NULL THEN RETURN 0; END IF;
+  IF n > 100 THEN RETURN v % 7; END IF;
+  RETURN pbx_fb(n, NULL) + 1;
+END $$;
+SELECT pbx_fb(200, 1);
+SELECT pbx_fb(1, 1), pbx_fb(1, 1), pbx_fb(1, 1), pbx_fb(1, 1);
+REVOKE EXECUTE ON FUNCTION int4mod(int4, int4) FROM PUBLIC;
+BEGIN;
+SELECT pbx_fb(1, 1);
+SET ROLE regress_pj_qg;
+SAVEPOINT s;
+SELECT pbx_fb(200, 1) AS pbx_fb_expect_denied;
+ROLLBACK TO s;
+ROLLBACK;
+GRANT EXECUTE ON FUNCTION int4mod(int4, int4) TO PUBLIC;
+-- and the flags of the outer expression are given back afterwards
+BEGIN;
+SELECT pbx_fb(1, 1);
+SELECT pbx_fb(1, 1);
+SELECT pj_expect('pbx_fb(int,int)', 'compiled') \gset
+COMMIT;
+
+-- the same through a SECURITY DEFINER owner without the right: the inner
+-- frame, run in PL/pgSQL, reaches the outer frame's expression busy
+CREATE ROLE regress_pj_qinv;
+CREATE FUNCTION pbx_qc(n int, m int) RETURNS int LANGUAGE :pj_lang STABLE AS $$
+BEGIN
+  IF m <= 0 THEN RETURN 1; END IF;
+  RETURN pbx_qc_sd(n, m - 1) * 2;
+END $$;
+CREATE FUNCTION pbx_qc_sd(n int, m int) RETURNS int LANGUAGE :pj_lang STABLE SECURITY DEFINER AS $$
+BEGIN RETURN pbx_qc(NULL, m); END $$;
+ALTER FUNCTION pbx_qc_sd(int, int) OWNER TO regress_pj_bo;
+GRANT EXECUTE ON FUNCTION int4mul(int4, int4) TO regress_pj_qinv;
+REVOKE EXECUTE ON FUNCTION int4mul(int4, int4) FROM PUBLIC;
+SET ROLE regress_pj_qinv;
+SELECT pbx_qc(NULL, 1), pbx_qc(1, 1), pbx_qc(1, 1);
+SELECT pbx_qc(1, 2);  -- fail
+RESET ROLE;
+GRANT EXECUTE ON FUNCTION int4mul(int4, int4) TO PUBLIC;
+DROP OWNED BY regress_pj_qinv;
+DROP ROLE regress_pj_qinv, regress_pj_qg;
+
 DROP OWNED BY regress_pj_bx, regress_pj_bo;
 DROP ROLE regress_pj_bx, regress_pj_bo;

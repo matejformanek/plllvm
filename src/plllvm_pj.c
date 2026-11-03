@@ -75,6 +75,7 @@ typedef enum PjState
 typedef struct PjEntry
 {
 	PLpgSQL_function *func;		/* hash key */
+	PjCtx	   *top;			/* innermost compiled frame */
 	bool		stale;			/* true, when fn_cxt is gone */
 	PjState		state;
 	const char *reason;			/* when declined */
@@ -147,6 +148,9 @@ static void exec_error_callback(void *arg);
 static bool guards_ok(PjHarvest *h);
 static bool execute_allowed(PjEntry *e);
 static void pj_mark_busy(PjEntry *e);
+static Datum interp(FunctionCallInfo fcinfo, PjEntry *e);
+static void pj_mark_running(PjEntry *e, PjCtx *ctx);
+static bool pj_any_in_use(PjEntry *e);
 static PjVariant *variant_find(PjHarvest *h);
 static void decline(PjEntry *e, const char *reason);
 static void decline_idle(PjEntry *e, const char *reason);
@@ -224,13 +228,9 @@ fall_back(FunctionCallInfo fcinfo, PjEntry *e, const char *path)
 	{
 		e->calls++;
 		e->last_path = path;
-
-		/* the interpreter finds the expressions busy, as under its own frame */
-		if (e->frames > 0)
-			pj_mark_busy(e);
 	}
 
-	return call_handler_p(fcinfo);
+	return interp(fcinfo, e);
 }
 
 static void
@@ -713,6 +713,12 @@ run_compiled(PLpgSQL_function *func, FunctionCallInfo fcinfo, PjEntry *e)
 	if (v->waiting)
 		return wait_step(func, fcinfo, e);
 
+	/*
+	 * an expression in use takes PL/pgSQL's SPI path, which plans differently
+	 */
+	if (pj_any_in_use(e))
+		return fall_back(fcinfo, e, "interpreted:in use");
+
 	if (!execute_allowed(e))
 		return fall_back(fcinfo, e, "interpreted:execute");
 
@@ -756,6 +762,8 @@ run(PLpgSQL_function *func, FunctionCallInfo fcinfo, PjEntry *e, PjVariant *v)
 
 	func->cfunc.use_count++;
 	e->frames++;
+	ctx.outer = e->top;
+	e->top = &ctx;
 	ctx.level = func->cfunc.use_count - 1;
 	ctx.serial = ++call_serial;
 	ctx.user = e->harvest->key_user;
@@ -781,25 +789,31 @@ run(PLpgSQL_function *func, FunctionCallInfo fcinfo, PjEntry *e, PjVariant *v)
 	}
 	PG_CATCH();
 	{
+		e->top = ctx.outer;
 		plllvm_pj_count.compiled_calls++;
 		e->compiled_calls++;
 		e->calls++;
 		e->last_path = "compiled";
 
 		/*
-		 * Leave PL/pgSQL's expressions as an interpreted failure would: the
-		 * next evaluation takes the path that checks EXECUTE.  The cast of
-		 * the code cannot fail, so PL/pgSQL's cast state needs no mark.
+		 * Leave the expression the error stopped as an interpreted failure
+		 * would: its next evaluation takes the path that checks EXECUTE.
+		 * Without positions, mark them all.  The cast of the code cannot
+		 * fail, so PL/pgSQL's cast state needs no mark.
 		 */
 		MemoryContextSwitchTo(entry_cxt);
 		plllvm_pj_level_abort(&ctx);
-		pj_mark_busy(e);
+		if (v->codegen == PLLLVM_PJ_NOPOS)
+			pj_mark_busy(e);
+		else
+			pj_mark_running(e, &ctx);
 		activation_end(func, e, entry_cxt);
 		PG_RE_THROW();
 	}
 	PG_END_TRY();
 
 	error_context_stack = errcallback.previous;
+	e->top = ctx.outer;
 
 	if (ctx.deopt != 0)
 	{
@@ -810,7 +824,7 @@ run(PLpgSQL_function *func, FunctionCallInfo fcinfo, PjEntry *e, PjVariant *v)
 		e->state = PJ_SEEN;
 		e->calls++;
 		activation_end(func, e, entry_cxt);
-		return call_handler_p(fcinfo);
+		return interp(fcinfo, e);
 	}
 
 	plllvm_pj_count.compiled_calls++;
@@ -972,6 +986,116 @@ pj_mark_busy(PjEntry *e)
 		pe->expr->expr_simple_lxid = MyProc->vxid.lxid;
 		pe->expr->expr_simple_in_use = true;
 	}
+}
+
+/*
+ * pj_mark_busy() for the expression ctx->pos names, if it names one: PL/pgSQL
+ * leaves the others as they were, and so does an error outside an expression
+ * (exec_eval_simple_expr)
+ */
+static void
+pj_mark_running(PjEntry *e, PjCtx *ctx)
+{
+	PjHarvest  *h = e->harvest;
+	PjExpr	   *pe;
+	int			idx;
+
+	if (ctx->pos < 0 || ctx->pos >= h->npos)
+		return;
+	idx = h->pos[ctx->pos].expr;
+	if (idx < 0)
+		return;
+	pe = list_nth(h->exprs, idx);
+	if (pe->h1 != PJ_H1_READY || pe->expr == NULL)
+		return;
+	pe->expr->expr_simple_lxid = MyProc->vxid.lxid;
+	pe->expr->expr_simple_in_use = true;
+}
+
+/*
+ * Does an expression stand where PL/pgSQL would evaluate it through SPI?
+ */
+static bool
+pj_any_in_use(PjEntry *e)
+{
+	LocalTransactionId lxid = MyProc->vxid.lxid;
+
+	foreach_ptr(PjExpr, pe, e->harvest->exprs)
+	{
+		if (pe->h1 == PJ_H1_READY && pe->expr != NULL &&
+			pe->expr->expr_simple_in_use && pe->expr->expr_simple_lxid == lxid)
+			return true;
+	}
+	return false;
+}
+
+/*
+ * What a compiled frame of the entry has saved of an expression while the
+ * interpreter runs
+ */
+typedef struct PjSaved
+{
+	PLpgSQL_expr *expr;
+	LocalTransactionId lxid;
+	bool		in_use;
+} PjSaved;
+
+/*
+ * The interpreter, with the expression each compiled frame of the entry is
+ * running marked busy, as PL/pgSQL's own frames leave them while a nested call
+ * runs.  They are given back afterwards, but only if no one has changed them.
+ */
+static Datum
+interp(FunctionCallInfo fcinfo, PjEntry *e)
+{
+	PjSaved    *saved;
+	volatile int n = 0;
+	volatile Datum result = (Datum) 0;
+	LocalTransactionId lxid = MyProc->vxid.lxid;
+
+	if (e == NULL || e->top == NULL)
+		return call_handler_p(fcinfo);
+
+	saved = palloc_array(PjSaved, e->frames);
+	for (PjCtx *c = e->top; c != NULL; c = c->outer)
+	{
+		PjHarvest  *h = c->harvest;
+		int			idx;
+		PjExpr	   *pe;
+
+		if (c->pos < 0 || c->pos >= h->npos || (idx = h->pos[c->pos].expr) < 0)
+			continue;
+		pe = list_nth(h->exprs, idx);
+		if (pe->h1 != PJ_H1_READY || pe->expr == NULL)
+			continue;
+		saved[n].expr = pe->expr;
+		saved[n].lxid = pe->expr->expr_simple_lxid;
+		saved[n].in_use = pe->expr->expr_simple_in_use;
+		n++;
+		pe->expr->expr_simple_lxid = lxid;
+		pe->expr->expr_simple_in_use = true;
+	}
+
+	PG_TRY();
+	{
+		result = call_handler_p(fcinfo);
+	}
+	PG_FINALLY();
+	{
+		for (int i = n - 1; i >= 0; i--)
+		{
+			PLpgSQL_expr *x = saved[i].expr;
+
+			if (x->expr_simple_lxid == lxid && x->expr_simple_in_use)
+			{
+				x->expr_simple_lxid = saved[i].lxid;
+				x->expr_simple_in_use = saved[i].in_use;
+			}
+		}
+	}
+	PG_END_TRY();
+
+	return result;
 }
 
 static PjVariant *

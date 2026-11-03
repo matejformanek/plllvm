@@ -90,6 +90,7 @@ typedef struct PjCtx
 	struct PjVariant *variant;
 	struct PjHarvest *harvest;
 	struct PjLevel *lv;
+	struct PjCtx *outer;		/* the frame of the same entry below */
 } PjCtx;
 
 typedef Datum (*PjCode) (FunctionCallInfo fcinfo, PjCtx *ctx);
@@ -103,6 +104,7 @@ typedef struct PjPos
 	int			lineno;			/* 0: none */
 	const char *stmt;			/* statement type name, or NULL */
 	const char *text;			/* err_text, or NULL */
+	int			expr;			/* the expression running there, or -1 */
 } PjPos;
 
 #define PJ_POS_NONE		0
@@ -141,6 +143,7 @@ typedef struct PjExpr
 	Oid			dsttype;
 	int32		dsttypmod;
 	PjH1		h1;
+	int			pos;			/* of its statement or variable */
 	/* READY only, copies in the harvest context */
 	Expr	   *tree;
 	Oid			type;
@@ -220,6 +223,7 @@ typedef struct PjHarvest
 	int			nunplanned;
 	PjPos	   *pos;
 	int			npos;
+	int			nbase;			/* then one per expression */
 	List	   *fori;
 	int			ndatums;
 	Oid		   *ptypes;			/* of the datums a boxed tree may read */
