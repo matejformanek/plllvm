@@ -150,6 +150,8 @@ static bool execute_allowed(PjEntry *e);
 static void pj_mark_busy(PjEntry *e);
 static Datum interp(FunctionCallInfo fcinfo, PjEntry *e);
 static void pj_mark_running(PjEntry *e, PjCtx *ctx);
+static PLpgSQL_expr *pj_frame_expr(PjCtx *ctx);
+static bool pj_outer_runs(PjCtx *ctx, PLpgSQL_expr *expr);
 static bool pj_any_in_use(PjEntry *e);
 static PjVariant *variant_find(PjHarvest *h);
 static void decline(PjEntry *e, const char *reason);
@@ -996,20 +998,46 @@ pj_mark_busy(PjEntry *e)
 static void
 pj_mark_running(PjEntry *e, PjCtx *ctx)
 {
-	PjHarvest  *h = e->harvest;
-	PjExpr	   *pe;
+	PLpgSQL_expr *expr = pj_frame_expr(ctx);
+
+	if (expr == NULL || pj_outer_runs(ctx, expr))
+		return;
+	expr->expr_simple_lxid = MyProc->vxid.lxid;
+	expr->expr_simple_in_use = true;
+}
+
+/* the expression the position of a compiled frame names, or NULL */
+static PLpgSQL_expr *
+pj_frame_expr(PjCtx *ctx)
+{
+	PjHarvest  *h = ctx->harvest;
 	int			idx;
+	PjExpr	   *pe;
 
 	if (ctx->pos < 0 || ctx->pos >= h->npos)
-		return;
+		return NULL;
 	idx = h->pos[ctx->pos].expr;
 	if (idx < 0)
-		return;
+		return NULL;
 	pe = list_nth(h->exprs, idx);
-	if (pe->h1 != PJ_H1_READY || pe->expr == NULL)
-		return;
-	pe->expr->expr_simple_lxid = MyProc->vxid.lxid;
-	pe->expr->expr_simple_in_use = true;
+	if (pe->h1 != PJ_H1_READY)
+		return NULL;
+	return pe->expr;
+}
+
+/*
+ * Does a frame below this one run the expression?  Then that frame owns the
+ * flag, as PL/pgSQL's outer frame does: a nested one writes nothing.
+ */
+static bool
+pj_outer_runs(PjCtx *ctx, PLpgSQL_expr *expr)
+{
+	for (PjCtx *c = ctx->outer; c != NULL; c = c->outer)
+	{
+		if (pj_frame_expr(c) == expr)
+			return true;
+	}
+	return false;
 }
 
 /*
@@ -1059,21 +1087,16 @@ interp(FunctionCallInfo fcinfo, PjEntry *e)
 	saved = palloc_array(PjSaved, e->frames);
 	for (PjCtx *c = e->top; c != NULL; c = c->outer)
 	{
-		PjHarvest  *h = c->harvest;
-		int			idx;
-		PjExpr	   *pe;
+		PLpgSQL_expr *expr = pj_frame_expr(c);
 
-		if (c->pos < 0 || c->pos >= h->npos || (idx = h->pos[c->pos].expr) < 0)
+		if (expr == NULL || pj_outer_runs(c, expr))
 			continue;
-		pe = list_nth(h->exprs, idx);
-		if (pe->h1 != PJ_H1_READY || pe->expr == NULL)
-			continue;
-		saved[n].expr = pe->expr;
-		saved[n].lxid = pe->expr->expr_simple_lxid;
-		saved[n].in_use = pe->expr->expr_simple_in_use;
+		saved[n].expr = expr;
+		saved[n].lxid = expr->expr_simple_lxid;
+		saved[n].in_use = expr->expr_simple_in_use;
 		n++;
-		pe->expr->expr_simple_lxid = lxid;
-		pe->expr->expr_simple_in_use = true;
+		expr->expr_simple_lxid = lxid;
+		expr->expr_simple_in_use = true;
 	}
 
 	PG_TRY();
