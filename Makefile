@@ -49,8 +49,9 @@ REGRESS = plllvm_setup $(REGRESS_FEATURES) $(REGRESS_KERNELS) expr_plugin \
 # files run against stock PL/pgSQL's output.  REGRESS_PJ_ONCE runs in one
 # variant only, REGRESS_PJ_OPT at opt level 3.
 REGRESS_PJ = pj_language pj_basic pj_errors pj_guards pj_execute pj_casts pj_sessions \
-		pj_control pj_kernels pj_ops pj_bounds pj_memory
-REGRESS_PJ_ONCE = pj_states pj_discard pj_execute_diff pj_arms
+		pj_control pj_kernels pj_ops pj_bounds pj_memory pj_boxed pj_abort
+REGRESS_PJ_ONCE = pj_states pj_discard pj_execute_diff pj_arms pj_ctxraw \
+		pj_sessions_midcall
 REGRESS_PJ_OPT = pj_kernels pj_ops
 
 REGRESS_OPTS = --dbname=$(PL_TESTDB)
@@ -270,6 +271,8 @@ installcheck-hazard: port-ok
 	  echo "installcheck-hazard needs the PLLLVM_PORT of a throwaway cluster" >&2; \
 	  exit 1;; esac
 	$(MAKE) installcheck REGRESS='plllvm_setup plllvm_hazard'
+	PJ_LANG=plpgsql_jit $(MAKE) installcheck REGRESS='plllvm_setup pj_setup pj_hazard' \
+		PGOPTIONS='-c session_preload_libraries=plllvm'
 
 #
 # PostgreSQL's PL/pgSQL tests (src/pl/plpgsql and the core plpgsql test),

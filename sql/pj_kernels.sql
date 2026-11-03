@@ -68,3 +68,43 @@ SELECT pj_expect('is_prime_k(int)', 'compiled') \gset
 SELECT count(*) FILTER (WHERE is_prime_k(i)), sum(inc_k(i)), count(*) FILTER (WHERE gt_k(i, 50))
   FROM generate_series(2, 200) i;
 SELECT pj_expect('is_prime_k(int)', 'compiled') \gset
+
+-- mandelbrot at full size: the loops compiled, the result a text from the executor
+CREATE FUNCTION mandelbrot_k(sz integer) RETURNS text LANGUAGE :pj_lang IMMUTABLE AS $$
+DECLARE
+  two CONSTANT float8 := 2.0;
+  four CONSTANT float8 := 4.0;
+  one CONSTANT float8 := 1.0;
+  onehalf CONSTANT float8 := 1.5;
+  fsz float8;
+  x integer; y integer; k integer;
+  cr float8; ci float8; zr float8; zi float8; tr float8; ti float8;
+  cnt integer := 0;
+  h bigint := 0;
+BEGIN
+  fsz := sz;
+  FOR y IN 0..sz-1 LOOP
+    ci := two * y / fsz - one;
+    FOR x IN 0..sz-1 LOOP
+      cr := two * x / fsz - onehalf;
+      zr := 0; zi := 0; tr := 0; ti := 0; k := 0;
+      WHILE k < 50 AND tr + ti <= four LOOP
+        zi := two * zr * zi + ci;
+        zr := tr - ti + cr;
+        tr := zr * zr;
+        ti := zi * zi;
+        k := k + 1;
+      END LOOP;
+      IF tr + ti <= four THEN
+        cnt := cnt + 1;
+        h := (h * 31 + x * 7 + y) % 1000000007;
+      END IF;
+    END LOOP;
+  END LOOP;
+  RETURN cnt::text || '/' || h::text;
+END $$;
+SELECT mandelbrot_k(20), mandelbrot_k(21);
+SELECT pj_mark() \gset
+SELECT mandelbrot_k(440);
+SELECT pj_delta(1, 0, 1, 0, 0) \gset
+SELECT pj_expect('mandelbrot_k(int)', 'compiled') \gset

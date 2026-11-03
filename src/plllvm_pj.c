@@ -817,8 +817,6 @@ run(PLpgSQL_function *func, FunctionCallInfo fcinfo, PjEntry *e, PjVariant *v)
 		e->state = PJ_SEEN;
 		e->calls++;
 		activation_end(func, e, entry_cxt);
-		if (e->frames > 0)
-			pj_mark_busy(e);
 		return call_handler_p(fcinfo);
 	}
 

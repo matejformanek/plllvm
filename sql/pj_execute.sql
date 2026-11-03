@@ -364,5 +364,17 @@ BEGIN; SET ROLE regress_pj_r1; SELECT pn_for() AS pn_for_expect_denied; ROLLBACK
 GRANT EXECUTE ON FUNCTION int4(int8) TO PUBLIC;
 SELECT pn_for();  -- fail
 
+-- the hash function of a hashed IN list is checked when PL/pgSQL builds the
+-- expression, in the first transaction that reaches it
+CREATE FUNCTION pxs_in(n int) RETURNS bool LANGUAGE :pj_lang AS $$
+BEGIN RETURN n IN (1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11); END $$;
+SELECT pxs_in(1), pxs_in(2), pxs_in(3);
+REVOKE EXECUTE ON FUNCTION hashint4(int4) FROM PUBLIC;
+BEGIN; SET ROLE regress_pj_r1; SELECT pxs_in(1) AS pxs_in_expect_denied; ROLLBACK;
+BEGIN; SELECT pxs_in(1) AS pxs_in_su; ROLLBACK;
+GRANT EXECUTE ON FUNCTION hashint4(int4) TO PUBLIC;
+SELECT pxs_in(1), pxs_in(20);
+SELECT pj_expect('pxs_in(int)', 'compiled') \gset
+
 DROP OWNED BY regress_pj_r1, regress_pj_r2, regress_pj_def, regress_pj_grp;
 DROP ROLE regress_pj_r1, regress_pj_r2, regress_pj_def, regress_pj_grp;
