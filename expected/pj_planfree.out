@@ -16,11 +16,13 @@
   \set pj_lang plpgsql
 \endif
 \set VERBOSITY terse
-CREATE EXTENSION dblink;
+SET client_min_messages = warning;
+CREATE EXTENSION IF NOT EXISTS dblink;
+RESET client_min_messages;
 SELECT format('host=%s port=%s dbname=%s user=%s',
               current_setting('unix_socket_directories'),
               current_setting('port'), current_database(), current_user) AS conn \gset
-SELECT dblink_connect('other', :'conn');
+SELECT dblink_connect('pf_other', :'conn');
  dblink_connect 
 ----------------
  OK
@@ -46,7 +48,7 @@ SELECT k * 100 + s AS ord, c AS cmd FROM generate_series(0, 149) k,
     (3, format('SELECT pf%s(1)', k)), (4, 'BEGIN'),
     (5, format('SELECT pf_try(%s)', k)),
     (6, format('SELECT pf%s(1), pf%s(1), pf%s(1), pf%s(1), pf%s(1), pf%s(1)', k, k, k, k, k, k)),
-    (7, $$SELECT dblink_exec('other', 'CREATE SCHEMA pf_other; DROP SCHEMA pf_other')$$),
+    (7, $$SELECT dblink_exec('pf_other', 'CREATE SCHEMA pf_other; DROP SCHEMA pf_other')$$),
     (8, 'SELECT count(*) >= 0 FROM pg_class'),
     (9, format('SELECT pf%s(1)', k)), (10, 'COMMIT'),
     (11, format('INSERT INTO pf_res SELECT %s, 1, pf%s(1)', k, k)),
@@ -118,3 +120,9 @@ SELECT pf_g(1);
 
 RESET plan_cache_mode;
 SELECT pj_expect('pf_g(int)', 'compiled') \gset
+SELECT dblink_disconnect('pf_other');
+ dblink_disconnect 
+-------------------
+ OK
+(1 row)
+
