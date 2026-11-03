@@ -152,6 +152,43 @@ SELECT pj_expect('pm_while(int)', 'compiled') \gset
 SELECT pj_expect('pm_cond(int)', 'compiled') \gset
 SELECT pj_expect('pm_cont(int)', 'compiled') \gset
 SELECT pj_expect('pm_if(int)', 'compiled') \gset
+-- text built by conversions, a concatenation and a variadic function in a
+-- loop: what one evaluation allocated is freed when its value is out
+CREATE FUNCTION pm_cat(n int) RETURNS int LANGUAGE :pj_lang AS $$
+DECLARE i int := 0; s int := 0;
+BEGIN
+  WHILE i < n LOOP
+    s := s + length(i::text || '/' || (i * 2)::text || format('%s', i));
+    i := i + 1;
+  END LOOP;
+  RETURN s;
+END $$;
+SELECT pm_cat(10), pm_cat(10);
+ pm_cat | pm_cat 
+--------+--------
+     45 |     45
+(1 row)
+
+SELECT pm_cat(1000);
+ pm_cat 
+--------
+  10225
+(1 row)
+
+SELECT pm_peak() AS p1 \gset
+SELECT pm_cat(100000);
+ pm_cat  
+---------
+ 1622225
+(1 row)
+
+SELECT pm_peak() - :p1 < 1048576 AS peak_flat_cat;
+ peak_flat_cat 
+---------------
+ t
+(1 row)
+
+SELECT pj_expect('pm_cat(int)', 'compiled') \gset
 -- recursion: a call allocates once per activation; nothing accumulates
 CREATE FUNCTION pm_fib(n int) RETURNS int LANGUAGE :pj_lang IMMUTABLE AS $$
 BEGIN
