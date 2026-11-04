@@ -42,9 +42,16 @@ SPI plans a custom plan for its first five runs, which plpgsql_jit's
 compiled frames do not.  So a step may differ from PL/pgSQL, and is the stated
 difference only if plpgsql_jit gives what PL/pgSQL gives under
 plan_cache_mode = force_generic_plan or force_custom_plan, each step by
-itself, so that a history of one then the other is allowed.  A step that is
-neither, and not a 42501 of plpgsql_jit where PL/pgSQL has a value, is a
-MISMATCH.  Every statement of a script is a step.
+itself, so that a history of one then the other is allowed, or a 42501 for
+the function the program revoked (stricter).  Any other step is searched for
+a history: each call run by PL/pgSQL under auto, generic or custom, or not at
+all (only a call plpgsql_jit answered with a compiled call or that 42501).
+One that is found is class "history" and printed.  Not found: PERMISSIVE if
+PL/pgSQL raised 42501, else MISMATCH, except that a PERMISSIVE after a 42501
+of plpgsql_jit in a SECURITY DEFINER program is class L2, the stated
+stale-privilege difference.  XX000 or a lost connection is always a MISMATCH.
+A third of the programs call f directly instead of through the wrapper.  The
+schema name is normalised.  Every statement of a script is a step.
 
 Usage: pj_fuzz.py --psql <psql> --host <dir> --port <port> [--n N] [--start I]
                   [--seed S] [--opt-level 0|2|3] [--out dir] [--floor 0.5]
@@ -799,6 +806,11 @@ class RecProgram:
                 "  %s\n  %s\nEND" % (guard, r.choice(REC_BASE), r.choice(REC_ASG),
                                       rec_shape(r, e)))
         sd = self.priv and r.random() < 0.5
+        self.direct = r.random() < 0.3
+        if self.direct:
+            # f calls itself; wr is still there for the steps that name it
+            body = body.replace("wr2(", "f(").replace("wr(", "f(")
+        self.sd = sd
         pre, helpers, x = "", [], r.random()
         if x < 0.1:
             pre = "IF n = 2 THEN PERFORM dp(); END IF;"
@@ -882,17 +894,97 @@ LANGDENIED = "permission denied for language plpgsql_jit"
 
 def rec_split(out, schema):
     steps = split(out, schema)
-    return {k: [l.replace(LANGDENIED, "must be owner of function f") for l in v]
-            for k, v in steps.items()}
+    return {k: [l.replace(LANGDENIED, "must be owner of function f")
+                .replace("schema fzs", "schema fzX").replace("schema fzj", "schema fzX")
+                for l in v] for k, v in steps.items()}
+
+
+FATAL = ("XX000", "server closed the connection", "terminated abnormally",
+         "unrecognized node type")
+MODES = ("auto", "generic", "custom", "drop")
+SETMODE = {"auto": "SET plan_cache_mode = auto; ",
+           "generic": "SET plan_cache_mode = force_generic_plan; ",
+           "custom": "SET plan_cache_mode = force_custom_plan; "}
+HISTORY_RUNS = 600
+
+
+def denied_fn(prog, lines):
+    """Is it the 42501 for the function the program revoked?"""
+    if not prog.priv:
+        return False
+    name = prog.fn.split("(")[0]
+    return any(("permission denied for function %s" % name) in l for l in lines)
+
+
+def history(args, prog, want):
+    """Does a history of PL/pgSQL explain the outputs of plpgsql_jit?  A
+    history says for each call: run under auto, generic or custom, or not
+    run, which only a call that plpgsql_jit answered with its 42501 may be.
+    Depth first, a bounded number of replays.  Returns the non-auto choices
+    or None."""
+    base = list(prog.steps)
+    runs = [0]
+
+    def replay(hist):
+        runs[0] += 1
+        st = []
+        for i, s in enumerate(base):
+            if i < len(hist) and hist[i] == "drop":
+                st.append("SELECT 'dropped';")
+            elif i < len(hist) and hist[i] is not None and s.startswith("SELECT f("):
+                st.append(SETMODE[hist[i]] + s)
+            else:
+                st.append(s)
+        prog.steps = st
+        try:
+            out = run_psql(args, rec_script(prog, "plpgsql"))
+        finally:
+            prog.steps = base
+        return rec_split(out, SCHEMAS["plpgsql"])
+
+    def strip(lines):
+        return [l for l in (lines or []) if not l.startswith("SET")]
+
+    def dfs(hist):
+        i = len(hist)
+        if i >= len(base):
+            return hist
+        if not base[i].startswith("SELECT f("):
+            return dfs(hist + [None])
+        w = want.get(str(i), [])
+        matched = False
+        for md in MODES:
+            if runs[0] > HISTORY_RUNS:
+                return None
+            if md == "drop":
+                ok = denied_fn(prog, w) or matched
+            else:
+                ok = strip(replay(hist + [md]).get(str(i))) == w
+                matched = matched or ok
+            if ok:
+                r = dfs(hist + [md])
+                if r is not None:
+                    return r
+        return None
+
+    r = dfs([])
+    return None if r is None else [(i, base[i][:16], m) for i, m in enumerate(r)
+                                   if m not in (None, "auto")]
 
 
 def rec_compare(args, prog, a, b, tally):
-    """The verdict of a program and its first step that is not equal.  A step
-    that differs is the stated difference if plpgsql_jit gave what PL/pgSQL
-    gives under force_generic_plan or force_custom_plan, or is a 42501 where
-    PL/pgSQL has something else, in a program that revoked a function; any
-    other is a MISMATCH."""
+    """The verdict of a program and the step of it that decides.  equal;
+    plan-choice, when every step that differs is what PL/pgSQL gives under
+    force_generic_plan or force_custom_plan or a 42501 for the revoked
+    function; history, when a history of PL/pgSQL gives all of them; L2;
+    otherwise PERMISSIVE or MISMATCH.  XX000 and a lost connection are
+    MISMATCH at once."""
     sa, sb = rec_split(a, SCHEMAS["plpgsql"]), rec_split(b, SCHEMAS["plpgsql_jit"])
+    for k, v in sb.items():
+        if any(f in l for l in v for f in FATAL):
+            return "MISMATCH", int(k) if k.isdigit() else None
+    if any(f in b for f in FATAL):
+        return "MISMATCH", None
     diff = [i for i in range(len(prog.steps)) if sa.get(str(i)) != sb.get(str(i))]
     if not diff:
         return "equal", None
@@ -901,18 +993,31 @@ def rec_compare(args, prog, a, b, tally):
         out = run_psql(args, rec_script(prog, "plpgsql"),
                        extra=" -c plan_cache_mode=force_%s_plan" % mode)
         forced[mode] = rec_split(out, SCHEMAS["plpgsql"])
-    verdict = "plan-choice"
+    bad = None
     for i in diff:
         x, y = sa.get(str(i), []), sb.get(str(i), [])
         if y == forced["generic"].get(str(i)):
             tally["generic-steps"] += 1
         elif y == forced["custom"].get(str(i)):
             tally["custom-steps"] += 1
-        elif prog.priv and any(l.startswith(DENIED) for l in y):
+        elif denied_fn(prog, y):
             tally["stricter-steps"] += 1
         else:
-            return ("PERMISSIVE" if any(l.startswith(DENIED) for l in x) else "MISMATCH"), i
-    return verdict, diff[0]
+            bad = i
+            break
+    if bad is None:
+        return "plan-choice", diff[0]
+    h = history(args, prog, sb)
+    if h is not None:
+        print("  history of seed %s: %s" % (prog.seed, h))
+        return "history", bad
+    x = sa.get(str(bad), [])
+    earlier = any(denied_fn(prog, sb.get(str(j), [])) for j in range(bad))
+    if any(l.startswith(DENIED) for l in x):
+        if prog.sd and not prog.direct and earlier:
+            return "L2", bad
+        return "PERMISSIVE", bad
+    return "MISMATCH", bad
 
 
 def main_rec(args):
@@ -932,7 +1037,7 @@ def main_rec(args):
         m = re.search(r"@@ status\n(.*)", b, re.S)
         st = m.group(1).strip().split("\n")[0].split("|") if m else []
         tally["compiled"] += len(st) == 4 and int(st[2]) > 0
-        if args.v or verdict not in ("equal", "plan-choice"):
+        if args.v or verdict not in ("equal", "plan-choice", "history", "L2"):
             print("seed %s: %s%s" % (seed, verdict, "" if step is None else " at step %d" % step))
         if verdict in ("MISMATCH", "PERMISSIVE"):
             failed = True
@@ -945,9 +1050,10 @@ def main_rec(args):
                             rec_script(prog, "plpgsql_jit", True), a, b))
             print("  program and outputs: %s" % f)
     print("pj_fuzz rec: seed=%d programs=%d opt_level=%s equal=%d plan-choice=%d mismatch=%d "
-          "permissive=%d compiled=%d (%.1f%%)"
+          "history=%d L2=%d permissive=%d compiled=%d (%.1f%%)"
           % (args.seed, args.n, args.opt_level, tally["equal"], tally["plan-choice"],
-             tally["MISMATCH"], tally["PERMISSIVE"], tally["compiled"],
+             tally["MISMATCH"], tally["history"], tally["L2"], tally["PERMISSIVE"],
+             tally["compiled"],
              100.0 * tally["compiled"] / max(args.n, 1)))
     print("pj_fuzz rec: steps that differ, as plpgsql_jit gives under force_generic_plan %d, "
           "force_custom_plan %d, 42501 where plpgsql has a value %d"
