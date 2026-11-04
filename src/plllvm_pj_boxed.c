@@ -122,7 +122,7 @@ plllvm_pj_boxed_reset(PjCtx *ctx)
 
 /*
  * After an expression with sites ran, as the executor of an evaluation does:
- * check EXECUTE again if user code ran, and free what the evaluation
+ * check EXECUTE again, since the callee may have run user code, and free what the evaluation
  * allocated once its value is out.  The result of a RETURN is not reset: the
  * handler copies it out.
  */

@@ -1,8 +1,8 @@
 --
 -- pj_calls: functions called from compiled code through sites, which are
 -- built as the executor builds an ExprState, and the conversions through
--- the I/O functions.  The expected output is stock PL/pgSQL's, so each
--- comment below says what stock does.
+-- the I/O functions.  The expected output is stock PL/pgSQL's; a comment
+-- that says "stock:" gives a count or an answer worth reading.
 --
 \getenv pj_lang PJ_LANG
 \if :{?pj_lang}

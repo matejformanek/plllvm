@@ -129,9 +129,6 @@ site_enter(PjCtx *ctx, int32 idx)
 	if (!slot->built)
 		site_build(lv, desc, slot);
 
-	/* the callee may have sent a message or run SQL: no deopt after it */
-	ctx->evaluated = true;
-
 	MemoryContextSwitchTo(lv->econtext->ecxt_per_tuple_memory);
 
 	return slot;
@@ -165,9 +162,9 @@ site_build(PjLevel *lv, const PjSiteDesc *desc, PjSiteSlot *slot)
 		FmgrInfo   *flinfo_in = palloc0_object(FmgrInfo);
 		Oid			iofunc;
 		Oid			ioparam;
-		bool varlena;
+		bool		typisvarlena;
 
-		getTypeOutputInfo(exprType((Node *) io->arg), &iofunc, &varlena);
+		getTypeOutputInfo(exprType((Node *) io->arg), &iofunc, &typisvarlena);
 		fmgr_info_cxt(iofunc, flinfo, lv->cxt);
 		fmgr_info_set_expr((Node *) io, flinfo);
 		fcinfo = palloc0(SizeForFunctionCallInfo(1));

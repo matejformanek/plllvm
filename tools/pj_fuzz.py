@@ -49,7 +49,8 @@ all (only a call plpgsql_jit answered with that 42501).
 One that is found is class "history" and printed.  Not found: PERMISSIVE if
 PL/pgSQL raised 42501, else MISMATCH, except that a step where PL/pgSQL raises
 42501 and plpgsql_jit returns without an error, in a SECURITY DEFINER program
-after an earlier 42501 of plpgsql_jit, is class stale-privilege.  XX000 or a lost connection is always a MISMATCH.
+after an earlier 42501 of plpgsql_jit in the same transaction, in a call
+that reaches a nested frame, is class stale-privilege.  XX000 or a lost connection is always a MISMATCH.
 A third of the programs call f directly instead of through the wrapper.  The
 schema name is normalised.  Every statement of a script is a step.
 
@@ -970,6 +971,19 @@ def history(args, prog, want):
                                    if m not in (None, "auto")]
 
 
+def stale_shape(prog, sb, bad):
+    """A call that reaches a nested frame (f(n, ...) with n >= 1), in the
+    transaction of an earlier 42501 of plpgsql_jit."""
+    m = re.match(r"SELECT f\((\d+),", prog.steps[bad])
+    if not m or int(m.group(1)) < 1:
+        return False
+    for j in range(bad - 1, -1, -1):
+        if prog.steps[j] in ("BEGIN;", "COMMIT;", "ROLLBACK;"):
+            return prog.steps[j] == "BEGIN;" and any(
+                denied_fn(prog, sb.get(str(k), [])) for k in range(j, bad))
+    return False
+
+
 def rec_compare(args, prog, a, b, tally):
     """The verdict of a program and the step of it that decides.  equal;
     plan-choice, when every step that differs is what PL/pgSQL gives under
@@ -1010,10 +1024,9 @@ def rec_compare(args, prog, a, b, tally):
         print("  history of seed %s: %s" % (prog.seed, h))
         return "history", bad
     x = sa.get(str(bad), [])
-    earlier = any(denied_fn(prog, sb.get(str(j), [])) for j in range(bad))
     y = sb.get(str(bad), [])
     if any(l.startswith(DENIED) for l in x):
-        if (prog.sd and not prog.direct and earlier
+        if (prog.sd and not prog.direct and stale_shape(prog, sb, bad)
                 and not any("ERROR" in l for l in y)):
             return "stale-privilege", bad
         return "PERMISSIVE", bad

@@ -83,7 +83,9 @@ typedef struct PjCtx
 	int32		pos;			/* index into the harvest's position table */
 	int32		deopt;			/* 1 + the expression to re-run interpreted */
 	int32		level;			/* use_count - 1: unique among live frames */
-	bool		evaluated;		/* the executor has run: no deopt any more */
+	bool		evaluated;		/* the executor has run: no deopt any more; a
+								 * site needs none, its variant has no deopt
+								 * point */
 	bool		isnull;			/* of the last boxed evaluation */
 	uint64		serial;			/* of the call; tells a level's next call */
 	Oid			user;			/* the user and the state of the catalogs the */
