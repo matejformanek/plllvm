@@ -32,8 +32,31 @@ and both outputs.  The compiled fraction is the share of programs whose
 function ran compiled at least once (plllvm_pj_status()).  No timing.
 Standard library only, run by make fuzz-pj against a running cluster.
 
+--mode rec writes recursive programs instead: a function that calls itself
+through a wrapper that catches, or through a SECURITY DEFINER one whose owner
+lacks a function, with the recursive expression in an IF, ELSIF, WHILE, LOOP,
+FOR, DECLARE, assignment or RETURN, and sometimes DISCARD PLANS or
+CREATE OR REPLACE of the function in the middle of a call.  PL/pgSQL's inner
+frames evaluate the expression an outer frame is running through SPI, and
+SPI plans a custom plan for its first five runs, which plpgsql_jit's
+compiled frames do not.  So a step may differ from PL/pgSQL, and is the stated
+difference only if plpgsql_jit gives what PL/pgSQL gives under
+plan_cache_mode = force_generic_plan or force_custom_plan, each step by
+itself, so that a history of one then the other is allowed, or a 42501 for
+the function the program revoked (stricter).  Any other step is searched for
+a history: each call run by PL/pgSQL under auto, generic or custom, or not at
+all (only a call plpgsql_jit answered with that 42501).
+One that is found is class "history" and printed.  Not found: PERMISSIVE if
+PL/pgSQL raised 42501, else MISMATCH, except that a step where PL/pgSQL raises
+42501 and plpgsql_jit returns without an error, in a SECURITY DEFINER program
+after an earlier 42501 of plpgsql_jit in the same transaction, in a call
+that reaches a nested frame, is class stale-privilege.  XX000 or a lost connection is always a MISMATCH.
+A third of the programs call f directly instead of through the wrapper.  The
+schema name is normalised.  Every statement of a script is a step.
+
 Usage: pj_fuzz.py --psql <psql> --host <dir> --port <port> [--n N] [--start I]
                   [--seed S] [--opt-level 0|2|3] [--out dir] [--floor 0.5]
+                  [--mode flat|rec]
 """
 import argparse
 import os
@@ -53,6 +76,7 @@ DB = "pj_fuzz"
 SCHEMAS = {"plpgsql": "fzs", "plpgsql_jit": "fzj"}
 ROLE = "fz_r1"
 GROUP = "fz_grp"
+OWNER = "fz_own"
 
 # int4, int8, float8 and boolean are what the compilers handle; the other
 # types are declined, kept rare so that they do not drown the rest
@@ -729,13 +753,337 @@ class Program:
         add("ROLLBACK;")
 
 
+# ---- recursive programs (--mode rec)
+
+# the recursive expression, a base case, and what f assigns before it
+REC_E = ["wr(n - 1, m - 1) / m + v", "wr(n - 1, m) + v", "wr(n - 1, m - 1) + 100 / m",
+         "(10 / m) + wr(n - 1, m - 1) + v", "wr(n - 1, nullif(m, 2)) + 10 / m",
+         "mod(wr(n - 1, m - 1), m) + v", "wr(n - 1, m) * 2 + abs(m) / (n + m)",
+         "wr2(n - 1, m - 1) / m + v"]
+REC_BASE = ["10 / m", "10 / m + v", "abs(m) / m", "mod(n, m)", "v % 7", "1"]
+REC_ASG = ["v := 1;", "v := NULL;", "IF n = 3 THEN v := NULL; ELSE v := 1; END IF;",
+           "v := abs(m);", "v := 5 / m;", "IF n = 2 THEN v := NULL; ELSE v := 1; END IF;"]
+REC_PRIV = ["int4mod(int4,int4)", "int4div(int4,int4)", "int4mul(int4,int4)",
+            "int4pl(int4,int4)", "int4abs(int4)"]
+
+
+def rec_shape(r, e):
+    """The statement that holds the recursive expression e."""
+    k = r.randrange(9)
+    if k == 0:
+        return "RETURN %s;" % e
+    if k == 1:
+        return "v := %s; RETURN v;" % e
+    if k == 2:
+        return "IF n = 99 THEN RETURN 0; ELSIF %s > 100 THEN RETURN 7; END IF; RETURN v;" % e
+    if k == 3:
+        return "WHILE i < 2 AND (%s) IS NOT NULL LOOP i := i + 1; END LOOP; RETURN i;" % e
+    if k == 4:
+        return "FOR j IN 1..%s LOOP i := i + 1; EXIT WHEN i > 2; END LOOP; RETURN i;" % e
+    if k == 5:
+        return "FOR j IN %s..2 LOOP i := i + 1; EXIT WHEN i > 2; END LOOP; RETURN i;" % e
+    if k == 6:
+        return "DECLARE d int := %s; BEGIN RETURN d + coalesce(v, 0); END;" % e
+    if k == 7:
+        return "LOOP EXIT WHEN (%s) IS NULL OR i > 1; i := i + 1; END LOOP; RETURN i;" % e
+    return "IF n = 2 THEN v := wr(n - 1, m - 1); RETURN v; END IF; RETURN %s;" % e
+
+
+class RecProgram:
+    """f(n, m) calls itself through wr(), which catches an error or is
+    SECURITY DEFINER with an owner that lacks the function f needs.  Every
+    statement of the script is a step."""
+
+    def __init__(self, seed, cat=None):
+        r = random.Random(seed)
+        self.seed = seed
+        self.priv = r.random() < 0.5
+        self.real = {}
+        self.fn = r.choice(REC_PRIV) if self.priv else None
+        e = r.choice(REC_E)
+        guard = ("IF m IS NULL THEN RETURN 3; END IF;" if r.random() < 0.6
+                 else "IF m IS NULL THEN m := 1; END IF;")
+        body = ("DECLARE v int; i int := 0;\nBEGIN\n  %s\n  IF n <= 0 THEN RETURN %s; END IF;\n"
+                "  %s\n  %s\nEND" % (guard, r.choice(REC_BASE), r.choice(REC_ASG),
+                                      rec_shape(r, e)))
+        sd = self.priv and r.random() < 0.5
+        self.direct = r.random() < 0.3
+        if self.direct:
+            # f calls itself; wr is still there for the steps that name it
+            body = body.replace("wr2(", "f(").replace("wr(", "f(")
+        self.sd = sd
+        pre, helpers, x = "", [], r.random()
+        if x < 0.1:
+            pre = "IF n = 2 THEN PERFORM dp(); END IF;"
+            helpers.append("CREATE FUNCTION dp() RETURNS void LANGUAGE plpgsql VOLATILE AS $d$ "
+                           "BEGIN DISCARD PLANS; END $d$;")
+        elif x < 0.2:
+            pre = "IF n = 2 THEN PERFORM rp(); END IF;"
+            helpers.append(
+                "CREATE FUNCTION rp() RETURNS void LANGUAGE plpgsql VOLATILE AS $d$ BEGIN EXECUTE "
+                "$q$CREATE OR REPLACE FUNCTION f(n int, m int) RETURNS int LANGUAGE XLANGX STABLE "
+                "AS $f$ %s $f$ $q$; END $d$;" % body.replace("v int;", "v int; /* new */", 1))
+        catch = r.random() < 0.85
+        wbody = ("BEGIN %s RETURN f(n, m); EXCEPTION WHEN division_by_zero THEN RETURN %d; END"
+                 % (pre, r.choice([0, 1, -1])) if catch else
+                 "BEGIN %s RETURN f(n, m); END" % pre)
+        st = helpers
+        st.append("CREATE FUNCTION f(n int, m int) RETURNS int LANGUAGE XLANGX STABLE AS $f$\n%s $f$;"
+                  % body)
+        st.append("CREATE FUNCTION wr(n int, m int) RETURNS int LANGUAGE plpgsql STABLE %s AS $w$ %s $w$;"
+                  % ("SECURITY DEFINER" if sd else "", wbody))
+        # a catch further from the failing frame
+        st.append("CREATE FUNCTION wr2(n int, m int) RETURNS int LANGUAGE plpgsql STABLE AS $w$ "
+                  "BEGIN RETURN wr(n, m); EXCEPTION WHEN numeric_value_out_of_range THEN RETURN 2; "
+                  "END $w$;")
+        if sd:
+            st.append("ALTER FUNCTION wr(int,int) OWNER TO %s;" % OWNER)
+
+        def call():
+            return "SELECT f(%d, %s);" % (r.randint(0, 4),
+                                          r.choice([1, 1, 2, 3, 0, -1, -2, 5, "NULL"]))
+        for _ in range(4):
+            st.append("SELECT f(%d, %d);" % (r.randint(0, 3), r.choice([1, 2, 3, 5, 9])))
+        # the sequence that left PL/pgSQL with a SPI plan source and no flags
+        st += ["SELECT f(0,NULL);", "SELECT f(4,NULL);", "SELECT f(0,1);", "SELECT f(4,5);",
+               "SELECT f(0,1);", "SELECT f(3,3);", "SELECT f(0,1);", "SELECT f(3,4);",
+               "SELECT f(0,1);", "SELECT f(3,4);"]
+        if self.priv:
+            st.append("REVOKE EXECUTE ON FUNCTION %s FROM PUBLIC; GRANT EXECUTE ON FUNCTION %s TO %s;"
+                      % (self.fn, self.fn, ROLE))
+        for _ in range(r.randint(1, 3)):
+            st.append("BEGIN;")
+            for _ in range(r.randint(2, 7)):
+                k = r.random()
+                if self.priv and k < 0.15:
+                    st.append("SET ROLE %s;" % ROLE)
+                elif self.priv and k < 0.3:
+                    st.append("RESET ROLE;")
+                elif self.priv and k < 0.4:
+                    st.append("SET ROLE %s;" % OWNER)
+                else:
+                    st += ["SAVEPOINT s;", call(), "ROLLBACK TO s;"]
+            st += [r.choice(["COMMIT;", "ROLLBACK;"]), "RESET ROLE;"]
+        self.steps = st
+
+    def restore(self):
+        if not self.priv:
+            return ""
+        # the default ACL again, which GRANT and REVOKE cannot give
+        return ("RESET ROLE;\nUPDATE pg_proc SET proacl = NULL WHERE oid = '%s'::regprocedure;\n"
+                % self.fn)
+
+
+def rec_script(prog, lang, status=False):
+    sch = SCHEMAS[lang]
+    o = CLEAN + ("\\set VERBOSITY verbose\n\\set SHOW_CONTEXT never\n"
+                 "SET search_path = %s, public;\nSET statement_timeout = '10s';\n" % sch)
+    for i, s in enumerate(prog.steps):
+        o += "\\echo @@ %d\n%s\n" % (i, s.replace("XLANGX", lang))
+    o += "\\echo @@ end\nROLLBACK;\nRESET ROLE;\n" + prog.restore() + "\\echo @@ leak\n" + LEAK
+    if status:
+        o += ("\\echo @@ status\n"
+              "SELECT state, coalesce(reason, ''), compiled_calls, calls FROM "
+              "plllvm_pj_status('%s.f(int,int)'::regprocedure);\n" % sch)
+    return o + CLEAN
+
+
+# the replacing role cannot use an untrusted language: the same refusal in
+# another text
+LANGDENIED = "permission denied for language plpgsql_jit"
+
+
+def rec_split(out, schema):
+    steps = split(out, schema)
+    return {k: [l.replace(LANGDENIED, "must be owner of function f")
+                .replace("schema fzs", "schema fzX").replace("schema fzj", "schema fzX")
+                for l in v] for k, v in steps.items()}
+
+
+FATAL = ("XX000", "server closed the connection", "terminated abnormally",
+         "unrecognized node type")
+MODES = ("auto", "generic", "custom", "drop")
+SETMODE = {"auto": "SET plan_cache_mode = auto; ",
+           "generic": "SET plan_cache_mode = force_generic_plan; ",
+           "custom": "SET plan_cache_mode = force_custom_plan; "}
+HISTORY_RUNS = 600
+
+
+def denied_fn(prog, lines):
+    """Is it the 42501 for the function the program revoked?"""
+    if not prog.priv:
+        return False
+    name = prog.fn.split("(")[0]
+    return any(("permission denied for function %s" % name) in l for l in lines)
+
+
+def history(args, prog, want):
+    """Does a history of PL/pgSQL explain the outputs of plpgsql_jit?  A
+    history says for each call: run under auto, generic or custom, or not
+    run, which only a call that plpgsql_jit answered with its 42501 may be.
+    Depth first, a bounded number of replays.  Returns the non-auto choices
+    or None."""
+    base = list(prog.steps)
+    runs = [0]
+
+    def replay(hist):
+        runs[0] += 1
+        st = []
+        for i, s in enumerate(base):
+            if i < len(hist) and hist[i] == "drop":
+                st.append("SELECT 'dropped';")
+            elif i < len(hist) and hist[i] is not None and s.startswith("SELECT f("):
+                st.append(SETMODE[hist[i]] + s)
+            else:
+                st.append(s)
+        prog.steps = st
+        try:
+            out = run_psql(args, rec_script(prog, "plpgsql"))
+        finally:
+            prog.steps = base
+        return rec_split(out, SCHEMAS["plpgsql"])
+
+    def strip(lines):
+        return [l for l in (lines or []) if not l.startswith("SET")]
+
+    def dfs(hist):
+        i = len(hist)
+        if i >= len(base):
+            return hist
+        if not base[i].startswith("SELECT f("):
+            return dfs(hist + [None])
+        w = want.get(str(i), [])
+        for md in MODES:
+            if runs[0] > HISTORY_RUNS:
+                return None
+            if md == "drop":
+                ok = denied_fn(prog, w)
+            else:
+                ok = strip(replay(hist + [md]).get(str(i))) == w
+            if ok:
+                r = dfs(hist + [md])
+                if r is not None:
+                    return r
+        return None
+
+    r = dfs([])
+    return None if r is None else [(i, base[i][:16], m) for i, m in enumerate(r)
+                                   if m not in (None, "auto")]
+
+
+def stale_shape(prog, sb, bad):
+    """A call that reaches a nested frame (f(n, ...) with n >= 1), in the
+    transaction of an earlier 42501 of plpgsql_jit."""
+    m = re.match(r"SELECT f\((\d+),", prog.steps[bad])
+    if not m or int(m.group(1)) < 1:
+        return False
+    for j in range(bad - 1, -1, -1):
+        if prog.steps[j] in ("BEGIN;", "COMMIT;", "ROLLBACK;"):
+            return prog.steps[j] == "BEGIN;" and any(
+                denied_fn(prog, sb.get(str(k), [])) for k in range(j, bad))
+    return False
+
+
+def rec_compare(args, prog, a, b, tally):
+    """The verdict of a program and the step of it that decides.  equal;
+    plan-choice, when every step that differs is what PL/pgSQL gives under
+    force_generic_plan or force_custom_plan or a 42501 for the revoked
+    function; history, when a history of PL/pgSQL gives all of them; stale-privilege;
+    otherwise PERMISSIVE or MISMATCH.  XX000 and a lost connection are
+    MISMATCH at once."""
+    sa, sb = rec_split(a, SCHEMAS["plpgsql"]), rec_split(b, SCHEMAS["plpgsql_jit"])
+    for k, v in sb.items():
+        if any(f in l for l in v for f in FATAL):
+            return "MISMATCH", int(k) if k.isdigit() else None
+    if any(f in b for f in FATAL):
+        return "MISMATCH", None
+    diff = [i for i in range(len(prog.steps)) if sa.get(str(i)) != sb.get(str(i))]
+    if not diff:
+        return "equal", None
+    forced = {}
+    for mode in ("generic", "custom"):
+        out = run_psql(args, rec_script(prog, "plpgsql"),
+                       extra=" -c plan_cache_mode=force_%s_plan" % mode)
+        forced[mode] = rec_split(out, SCHEMAS["plpgsql"])
+    bad = None
+    for i in diff:
+        x, y = sa.get(str(i), []), sb.get(str(i), [])
+        if y == forced["generic"].get(str(i)):
+            tally["generic-steps"] += 1
+        elif y == forced["custom"].get(str(i)):
+            tally["custom-steps"] += 1
+        elif denied_fn(prog, y):
+            tally["stricter-steps"] += 1
+        else:
+            bad = i
+            break
+    if bad is None:
+        return "plan-choice", diff[0]
+    h = history(args, prog, sb)
+    if h is not None:
+        print("  history of seed %s: %s" % (prog.seed, h))
+        return "history", bad
+    x = sa.get(str(bad), [])
+    y = sb.get(str(bad), [])
+    if any(l.startswith(DENIED) for l in x):
+        if (prog.sd and not prog.direct and stale_shape(prog, sb, bad)
+                and not any("ERROR" in l for l in y)):
+            return "stale-privilege", bad
+        return "PERMISSIVE", bad
+    return "MISMATCH", bad
+
+
+def main_rec(args):
+    tally = Counter()
+    failed = False
+    for i in range(args.start, args.start + args.n):
+        seed = "%d:%d" % (args.seed, i)
+        prog = RecProgram(seed)
+        a = run_psql(args, rec_script(prog, "plpgsql"))
+        b = run_psql(args, rec_script(prog, "plpgsql_jit", True), args.opt_level)
+        for out in (a, b):
+            if "@@ leak\n%s\n" % args.leak not in out:
+                sys.exit("pj_fuzz: seed %s left a privilege change in the database:\n%s"
+                         % (seed, out[-400:]))
+        verdict, step = rec_compare(args, prog, a, b, tally)
+        tally[verdict] += 1
+        m = re.search(r"@@ status\n(.*)", b, re.S)
+        st = m.group(1).strip().split("\n")[0].split("|") if m else []
+        tally["compiled"] += len(st) == 4 and int(st[2]) > 0
+        if args.v or verdict not in ("equal", "plan-choice", "history", "stale-privilege"):
+            print("seed %s: %s%s" % (seed, verdict, "" if step is None else " at step %d" % step))
+        if verdict in ("MISMATCH", "PERMISSIVE"):
+            failed = True
+            f = os.path.join(args.out, "fuzz-%s.txt" % seed.replace(":", "-"))
+            with open(f, "w") as fh:
+                fh.write("-- %s at step %s, seed %s, opt level %s\n== plpgsql script\n%s"
+                         "== plpgsql_jit script\n%s== plpgsql output\n%s\n"
+                         "== plpgsql_jit output\n%s\n"
+                         % (verdict, step, seed, args.opt_level, rec_script(prog, "plpgsql"),
+                            rec_script(prog, "plpgsql_jit", True), a, b))
+            print("  program and outputs: %s" % f)
+    print("pj_fuzz rec: seed=%d programs=%d opt_level=%s equal=%d plan-choice=%d mismatch=%d "
+          "history=%d stale-privilege=%d permissive=%d compiled=%d (%.1f%%)"
+          % (args.seed, args.n, args.opt_level, tally["equal"], tally["plan-choice"],
+             tally["MISMATCH"], tally["history"], tally["stale-privilege"], tally["PERMISSIVE"],
+             tally["compiled"],
+             100.0 * tally["compiled"] / max(args.n, 1)))
+    print("pj_fuzz rec: steps that differ, as plpgsql_jit gives under force_generic_plan %d, "
+          "force_custom_plan %d, 42501 where plpgsql has a value %d"
+          % (tally["generic-steps"], tally["custom-steps"], tally["stricter-steps"]))
+    if tally["compiled"] < args.floor * args.n:
+        print("pj_fuzz: compiled fraction below the floor of %.0f%%" % (100 * args.floor))
+        failed = True
+    return 1 if failed else 0
+
+
 # ---- running
 
 CLEAN = ("SET client_min_messages = warning;\n"
          "DROP SCHEMA IF EXISTS fzs, fzj CASCADE;\n"
          "CREATE SCHEMA fzs; CREATE SCHEMA fzj;\n"
-         "GRANT USAGE ON SCHEMA fzs, fzj TO %s;\n"
-         "RESET client_min_messages;\n" % ROLE)
+         "GRANT USAGE ON SCHEMA fzs, fzj TO %s, %s;\n"
+         "RESET client_min_messages;\n" % (ROLE, OWNER))
 
 # what a leaked privilege change would change: the ACLs of the functions of
 # pg_catalog (some have one from initdb), the membership of the group
@@ -766,9 +1114,9 @@ def script(prog, lang, status=False):
     return o + CLEAN
 
 
-def run_psql(args, sql, opt=None):
+def run_psql(args, sql, opt=None, extra=""):
     env = dict(os.environ)
-    env["PGOPTIONS"] = "-c session_preload_libraries=plllvm"
+    env["PGOPTIONS"] = "-c session_preload_libraries=plllvm" + extra
     if opt is not None:
         env["PGOPTIONS"] += " -c plllvm.pj_opt_level=%d" % opt
     p = subprocess.run([args.psql, "-X", "-q", "-At", "-h", args.host, "-p", str(args.port),
@@ -790,12 +1138,12 @@ def admin(args, sql, db="postgres"):
 def setup(args):
     admin(args, "DROP DATABASE IF EXISTS %s" % DB)
     admin(args, "CREATE DATABASE %s" % DB)
-    for r in (ROLE, GROUP):
+    for r in (ROLE, GROUP, OWNER):
         admin(args, "DO $$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = '%s') "
                     "THEN CREATE ROLE %s; END IF; END $$" % (r, r))
     admin(args, "GRANT %s TO %s" % (GROUP, ROLE))
     admin(args, "CREATE EXTENSION plllvm; CREATE SCHEMA fzs; CREATE SCHEMA fzj;"
-                "GRANT USAGE ON SCHEMA fzs, fzj TO %s;" % ROLE, DB)
+                "GRANT USAGE ON SCHEMA fzs, fzj TO %s, %s;" % (ROLE, OWNER), DB)
     args.leak = admin(args, LEAK, DB)[0]
 
 
@@ -870,11 +1218,14 @@ def main():
     ap.add_argument("--opt-level", type=int, default=None)
     ap.add_argument("--out", default="results-fuzz")
     ap.add_argument("--floor", type=float, default=0.5)
+    ap.add_argument("--mode", choices=["flat", "rec"], default="flat")
     ap.add_argument("-v", action="store_true")
     args = ap.parse_args()
 
     os.makedirs(args.out, exist_ok=True)
     setup(args)
+    if args.mode == "rec":
+        sys.exit(main_rec(args))
     cat = load_catalog(lambda q: admin(args, q))
     tally = Counter()
     reasons = Counter()

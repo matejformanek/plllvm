@@ -30,11 +30,18 @@
  *    an argument the interpreter skips is not evaluated here either; it
  *    might raise an error.
  *
+ * 5) A call that is no operator of the table, and a CoerceViaIO, is the
+ *    caller's: env->call_check and call_emit, if it has them.  Its
+ *    arguments may be of any type, as PLLLVM_DATUM, but only a call takes
+ *    one; the operators and the other nodes see only the four native
+ *    representations, so a tree with another type elsewhere is refused.
+ *
  */
 #include "postgres.h"
 
 #include "catalog/pg_type_d.h"
 #include "fmgr.h"
+#include "nodes/nodeFuncs.h"
 #include "utils/fmgroids.h"
 
 #include "plllvm_expr.h"
@@ -203,6 +210,14 @@ static void join_end(plllvm_ir *ir, PhiJoin *j, const char *label,
 					 plllvm_repr repr, plllvm_value *out);
 
 
+static bool check_call_arg(const Expr *e, CheckState *cs, plllvm_repr *repr);
+static void emit_call(plllvm_ir *ir, const Expr *e, List *args, EmitState *es,
+					  plllvm_value *out);
+static const char *emit_bare(plllvm_ir *ir, EmitState *es, const OpInfo *op,
+							 const plllvm_value *av);
+static void unbox_datum(plllvm_ir *ir, const char *datum, plllvm_repr repr,
+						plllvm_value *out);
+
 static const OpInfo *
 find_op(Oid funcid)
 {
@@ -239,7 +254,7 @@ plllvm_expr_type_repr(Oid type, plllvm_repr *repr)
 static Oid
 repr_sql_type(plllvm_repr repr)
 {
-	static const Oid types[] = {BOOLOID, INT4OID, INT8OID, FLOAT8OID};
+	static const Oid types[] = {BOOLOID, INT4OID, INT8OID, FLOAT8OID, InvalidOid};
 
 	return types[repr];
 }
@@ -247,7 +262,7 @@ repr_sql_type(plllvm_repr repr)
 static const char *
 repr_zero(plllvm_repr repr)
 {
-	static const char *const zeros[] = {"false", "0", "0", "0.0"};
+	static const char *const zeros[] = {"false", "0", "0", "0.0", "0"};
 
 	return zeros[repr];
 }
@@ -258,19 +273,15 @@ repr_zero(plllvm_repr repr)
 const char *
 plllvm_repr_type(plllvm_repr repr)
 {
-	static const char *const types[] = {"i1", "i32", "i64", "double"};
+	static const char *const types[] = {"i1", "i32", "i64", "double", "i64"};
 
 	return types[repr];
 }
 
-/*
- * The value as a Datum, 0 when it is NULL
- */
-const char *
-plllvm_expr_box(plllvm_ir *ir, const plllvm_value *val)
+static const char *
+datum_of(plllvm_ir *ir, const plllvm_value *val)
 {
 	const char *datum;
-	const char *result = plllvm_ir_tmp(ir);
 
 	switch (val->repr)
 	{
@@ -284,6 +295,7 @@ plllvm_expr_box(plllvm_ir *ir, const plllvm_value *val)
 			plllvm_ir_emit(ir, "%s = sext i32 %s to i64", datum, val->v);
 			break;
 		case PLLLVM_I64:
+		case PLLLVM_DATUM:
 			datum = val->v;
 			break;
 		case PLLLVM_F64:
@@ -295,10 +307,51 @@ plllvm_expr_box(plllvm_ir *ir, const plllvm_value *val)
 			datum = NULL;		/* keep compiler quiet */
 	}
 
+	return datum;
+}
+
+/*
+ * The value as a Datum, 0 when it is NULL
+ */
+const char *
+plllvm_expr_box(plllvm_ir *ir, const plllvm_value *val)
+{
+	const char *datum = datum_of(ir, val);
+	const char *result = plllvm_ir_tmp(ir);
+
 	plllvm_ir_emit(ir, "%s = select i1 %s, i64 0, i64 %s", result, val->isnull,
 				   datum);
 
 	return result;
+}
+
+/* a value of repr from its Datum */
+static void
+unbox_datum(plllvm_ir *ir, const char *datum, plllvm_repr repr,
+			plllvm_value *out)
+{
+	const char *v = datum;
+
+	switch (repr)
+	{
+		case PLLLVM_I1:
+			v = plllvm_ir_tmp(ir);
+			plllvm_ir_emit(ir, "%s = icmp ne i64 %s, 0", v, datum);
+			break;
+		case PLLLVM_I32:
+			v = plllvm_ir_tmp(ir);
+			plllvm_ir_emit(ir, "%s = trunc i64 %s to i32", v, datum);
+			break;
+		case PLLLVM_I64:
+		case PLLLVM_DATUM:
+			break;
+		case PLLLVM_F64:
+			v = plllvm_ir_tmp(ir);
+			plllvm_ir_emit(ir, "%s = bitcast i64 %s to double", v, datum);
+			break;
+	}
+	out->v = v;
+	out->repr = repr;
 }
 
 /*
@@ -567,9 +620,50 @@ check_node(const Expr *e, CheckState *cs, plllvm_repr *repr)
 				}
 				return true;
 			}
+		case T_CoerceViaIO:
+			{
+				const CoerceViaIO *io = (const CoerceViaIO *) e;
+				plllvm_repr arepr;
+
+				if (cs->env->call_check == NULL ||
+					!cs->env->call_check(cs->env, (const Node *) e))
+				{
+					cs->why = "node";
+					return false;
+				}
+				cs->nops++;
+				appendStringInfo(cs->hash_key, "Y%u/%u ", exprType((Node *) io->arg),
+								 io->resulttype);
+				if (!plllvm_expr_type_repr(io->resulttype, repr))
+					*repr = PLLLVM_DATUM;
+				return check_call_arg(io->arg, cs, &arepr);
+			}
 		default:
 			cs->why = "node";
 			return false;
+	}
+
+	if (find_op(funcid) == NULL)
+	{
+		/* not in the table: the caller's */
+		if (cs->env->call_check == NULL ||
+			!cs->env->call_check(cs->env, (const Node *) e))
+		{
+			cs->why = "function";
+			return false;
+		}
+		cs->nops++;
+		appendStringInfo(cs->hash_key, "S%u/%d ", funcid, list_length(args));
+		foreach_ptr(Expr, arg, args)
+		{
+			plllvm_repr arepr;
+
+			if (!check_call_arg(arg, cs, &arepr))
+				return false;
+		}
+		if (!plllvm_expr_type_repr(restype, repr))
+			*repr = PLLLVM_DATUM;
+		return true;
 	}
 
 	if (!check_func(funcid, cs, &op))
@@ -588,6 +682,47 @@ check_node(const Expr *e, CheckState *cs, plllvm_repr *repr)
 			return false;
 	}
 	*repr = op->result;
+	return true;
+}
+
+/*
+ * Check an argument of a call, which may be of any type: a Param or Const of
+ * a type of no native representation is its Datum
+ */
+static bool
+check_call_arg(const Expr *e, CheckState *cs, plllvm_repr *repr)
+{
+	Oid			type = InvalidOid;
+
+	if (IsA(e, Param))
+		type = ((const Param *) e)->paramtype;
+	else if (IsA(e, Const))
+		type = ((const Const *) e)->consttype;
+
+	if (!OidIsValid(type) || plllvm_expr_type_repr(type, repr))
+		return check_node(e, cs, repr);
+
+	if (++cs->nnodes > PLLLVM_EXPR_MAX_NODES)
+	{
+		cs->why = "too many nodes";
+		return false;
+	}
+	if (IsA(e, Param))
+	{
+		const Param *p = (const Param *) e;
+
+		if (p->paramkind != PARAM_EXTERN ||
+			!cs->env->param_check(cs->env, p, cs->facts))
+		{
+			cs->why = "Param";
+			return false;
+		}
+		appendStringInfo(cs->hash_key, "P%d:%u ", p->paramid, p->paramtype);
+	}
+	else
+		appendStringInfo(cs->hash_key, "C%u ", type);
+
+	*repr = PLLLVM_DATUM;
 	return true;
 }
 
@@ -680,7 +815,7 @@ emit_node(plllvm_ir *ir, const Expr *e, EmitState *es, plllvm_value *out)
 				const Const *c = (const Const *) e;
 
 				if (!plllvm_expr_type_repr(c->consttype, &out->repr))
-					elog(ERROR, "unsupported type %u", c->consttype);
+					out->repr = PLLLVM_DATUM;
 				out->type = c->consttype;
 				if (c->constisnull)
 				{
@@ -706,6 +841,11 @@ emit_node(plllvm_ir *ir, const Expr *e, EmitState *es, plllvm_value *out)
 						out->v = psprintf("0x%016" PRIX64,
 										  DatumGetUInt64(c->constvalue));
 						break;
+					case PLLLVM_DATUM:
+						/* an address, if the type is passed by reference */
+						out->v = psprintf(UINT64_FORMAT,
+										  (uint64) c->constvalue);
+						break;
 				}
 				return;
 			}
@@ -721,14 +861,20 @@ emit_node(plllvm_ir *ir, const Expr *e, EmitState *es, plllvm_value *out)
 			{
 				const OpExpr *o = (const OpExpr *) e;
 
-				emit_op(ir, find_op(o->opfuncid), o->args, es, out);
+				if (find_op(o->opfuncid) == NULL)
+					emit_call(ir, e, o->args, es, out);
+				else
+					emit_op(ir, find_op(o->opfuncid), o->args, es, out);
 				return;
 			}
 		case T_FuncExpr:
 			{
 				const FuncExpr *f = (const FuncExpr *) e;
 
-				emit_op(ir, find_op(f->funcid), f->args, es, out);
+				if (find_op(f->funcid) == NULL)
+					emit_call(ir, e, f->args, es, out);
+				else
+					emit_op(ir, find_op(f->funcid), f->args, es, out);
 				return;
 			}
 		case T_BoolExpr:
@@ -765,6 +911,9 @@ emit_node(plllvm_ir *ir, const Expr *e, EmitState *es, plllvm_value *out)
 		case T_NullIfExpr:
 			emit_nullif(ir, (const NullIfExpr *) e, es, out);
 			return;
+		case T_CoerceViaIO:
+			emit_call(ir, e, list_make1(((const CoerceViaIO *) e)->arg), es, out);
+			return;
 		default:
 			elog(ERROR, "unrecognized node type: %d", (int) nodeTag(e));
 	}
@@ -776,6 +925,7 @@ emit_op(plllvm_ir *ir, const OpInfo *op, List *args, EmitState *es,
 {
 	plllvm_value av[2];
 	const char *isnull = "false";
+	bool		bare;
 	int			i;
 
 	Assert(op != NULL && list_length(args) == op->nargs);
@@ -813,8 +963,12 @@ emit_op(plllvm_ir *ir, const OpInfo *op, List *args, EmitState *es,
 	}
 	out->isnull = isnull;
 
-	if (op->kind != OP_CALL || strcmp(isnull, "false") == 0)
-		out->v = emit_compute(ir, op, av);
+	/* an operator that is a function call, as a call of its function */
+	bare = es->env->no_native_ops &&
+		(op->kind == OP_CALL || op->kind == OP_CALL_PURE);
+
+	if ((op->kind != OP_CALL && !bare) || strcmp(isnull, "false") == 0)
+		out->v = bare ? emit_bare(ir, es, op, av) : emit_compute(ir, op, av);
 	else
 	{
 		const char *lcall = plllvm_ir_label(ir);
@@ -827,7 +981,7 @@ emit_op(plllvm_ir *ir, const OpInfo *op, List *args, EmitState *es,
 		plllvm_ir_emit(ir, "br i1 %s, label %%%s, label %%%s",
 					   isnull, lnull, lcall);
 		plllvm_ir_block(ir, lcall);
-		r = emit_compute(ir, op, av);
+		r = bare ? emit_bare(ir, es, op, av) : emit_compute(ir, op, av);
 		from = plllvm_ir_current(ir);
 		plllvm_ir_emit(ir, "br label %%%s", ljoin);
 		plllvm_ir_block(ir, lnull);
@@ -839,6 +993,33 @@ emit_op(plllvm_ir *ir, const OpInfo *op, List *args, EmitState *es,
 					   repr_zero(op->result), lnull);
 		out->v = t;
 	}
+}
+
+static void
+emit_call(plllvm_ir *ir, const Expr *e, List *args, EmitState *es,
+		  plllvm_value *out)
+{
+	plllvm_value *av = palloc_array(plllvm_value, Max(list_length(args), 1));
+	int			i = 0;
+
+	foreach_ptr(Expr, arg, args)
+		emit_node(ir, arg, es, &av[i++]);
+
+	es->env->call_emit(es->env, ir, (const Node *) e, av, i, out);
+}
+
+/* the arguments are not NULL here, as for emit_compute() */
+static const char *
+emit_bare(plllvm_ir *ir, EmitState *es, const OpInfo *op, const plllvm_value *av)
+{
+	const char *datums[2];
+	plllvm_value r;
+
+	for (int i = 0; i < op->nargs; i++)
+		datums[i] = datum_of(ir, &av[i]);
+	unbox_datum(ir, es->env->bare_emit(es->env, ir, op->funcid, datums, op->nargs),
+				op->result, &r);
+	return r.v;
 }
 
 /*

@@ -55,7 +55,12 @@ SELECT pj_expect('pbd_tree(int)', 'compiled') \gset
 SELECT pbd_ddl(format('CREATE FUNCTION pbd_stmts(n int) RETURNS int LANGUAGE %s AS $b$ DECLARE x int := 0; BEGIN %s RETURN x; END $b$',
               :'pj_lang', (SELECT string_agg('x := x + n;', ' ') FROM generate_series(1, 5000))));
 SELECT pbd_stmts(1), pbd_stmts(2), pbd_stmts(3);
-SELECT pj_expect('pbd_stmts(int)', 'compiled') \gset
+-- with every operator a call through an fcinfo, the body is over the limit of
+-- instructions, which is a decline, not an error
+SELECT pj_expect('pbd_stmts(int)',
+         CASE WHEN current_setting('plllvm.pj_codegen', true) = 'v1'
+              THEN 'declined:54000: PL/LLVM function body has too many instructions'
+              ELSE 'compiled' END) \gset
 
 -- 200 nested blocks and loops
 SELECT pbd_ddl(format('CREATE FUNCTION pbd_nest(n int) RETURNS int LANGUAGE %s AS $b$ DECLARE x int := 0; BEGIN %s x := x + n; %s RETURN x; END $b$',

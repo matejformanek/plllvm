@@ -98,6 +98,7 @@ extern int	plllvm_pj_codegen;
 #define PLLLVM_PJ_NATIVE	0
 #define PLLLVM_PJ_NOPOS		1
 #define PLLLVM_PJ_BOXED		2
+#define PLLLVM_PJ_V1		3
 
 /* plllvm.c */
 extern const char *plllvm_display_path(const char *path);

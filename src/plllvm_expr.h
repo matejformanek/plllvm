@@ -46,6 +46,7 @@ typedef enum plllvm_repr
 	PLLLVM_I32,
 	PLLLVM_I64,
 	PLLLVM_F64,
+	PLLLVM_DATUM,				/* any other type, as its Datum (i64) */
 } plllvm_repr;
 
 typedef struct plllvm_value
@@ -63,6 +64,21 @@ struct plllvm_expr_env
 	/* may this Param be compiled; append what the code depends on to facts */
 	bool		(*param_check) (plllvm_expr_env *env, const Param *p, StringInfo facts);
 	void		(*param_emit) (plllvm_expr_env *env, plllvm_ir *ir, const Param *p, plllvm_value *out);
+
+	/*
+	 * A FuncExpr, OpExpr or CoerceViaIO with no operator of ours: NULL
+	 * refuses it.  call_emit gets the arguments as emitted; its result is of
+	 * the result's repr, else PLLLVM_DATUM.  With no_native_ops, the
+	 * operators that are function calls go through bare_emit, on Datums, and
+	 * return one.
+	 */
+	bool		(*call_check) (plllvm_expr_env *env, const Node *node);
+	void		(*call_emit) (plllvm_expr_env *env, plllvm_ir *ir, const Node *node,
+							  const plllvm_value *args, int nargs, plllvm_value *out);
+	const char *(*bare_emit) (plllvm_expr_env *env, plllvm_ir *ir, Oid funcid,
+							  const char *const *args, int nargs);
+	bool		no_native_ops;	/* operators that are function calls go
+								 * through bare_emit */
 	void	   *arg;			/* caller's state */
 };
 

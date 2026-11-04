@@ -102,6 +102,40 @@ SELECT pj_expect('pm_cond(int)', 'compiled') \gset
 SELECT pj_expect('pm_cont(int)', 'compiled') \gset
 SELECT pj_expect('pm_if(int)', 'compiled') \gset
 
+-- text built by conversions, a concatenation and a variadic function in a
+-- loop: what one evaluation allocated is freed when its value is out
+CREATE FUNCTION pm_cat(n int) RETURNS int LANGUAGE :pj_lang AS $$
+DECLARE i int := 0; s int := 0;
+BEGIN
+  WHILE i < n LOOP
+    s := s + length(i::text || '/' || (i * 2)::text || format('%s', i));
+    i := i + 1;
+  END LOOP;
+  RETURN s;
+END $$;
+SELECT pm_cat(10), pm_cat(10);
+SELECT pm_cat(1000);
+SELECT pm_peak() AS p1 \gset
+SELECT pm_cat(100000);
+SELECT pm_peak() - :p1 < 1048576 AS peak_flat_cat;
+SELECT pj_expect('pm_cat(int)', 'compiled') \gset
+-- the memory of all contexts, read at the end of one long call
+CREATE FUNCTION pm_total_s() RETURNS bigint LANGUAGE sql STABLE AS
+  'SELECT sum(total_bytes)::bigint FROM pg_backend_memory_contexts';
+CREATE FUNCTION pm_cat_mem(n int) RETURNS bigint LANGUAGE :pj_lang STABLE AS $$
+DECLARE i int := 0; s int := 0;
+BEGIN
+  WHILE i < n LOOP
+    s := s + length(i::text || '/' || (i * 2)::text || format('%s', i));
+    i := i + 1;
+  END LOOP;
+  RETURN pm_total_s() + s * 0;
+END $$;
+SELECT pm_cat_mem(10) AS small \gset
+SELECT pm_cat_mem(10) AS small \gset
+SELECT pm_cat_mem(100000) - :small < 1048576 AS flat_cat_total;
+SELECT pj_expect('pm_cat_mem(int)', 'compiled') \gset
+
 -- recursion: a call allocates once per activation; nothing accumulates
 CREATE FUNCTION pm_fib(n int) RETURNS int LANGUAGE :pj_lang IMMUTABLE AS $$
 BEGIN

@@ -306,7 +306,7 @@ param_compile(ParamListInfo params, Param *param, ExprState *state,
 static void
 fire(ExprState *state, ExprContext *econtext)
 {
-	plllvm_expr_env env;
+	plllvm_expr_env env = {0};
 
 	if (!plllvm_expr_jit || paramfunc_conflict)
 		return;

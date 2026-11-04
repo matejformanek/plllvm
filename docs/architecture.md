@@ -22,6 +22,7 @@ plpgsql_jit` (v0.3).
 | `src/plllvm_plpgsql.c` | the PL/pgSQL plugin: slot and chaining, `paramCompile` wrapper, trampolines on simple expressions, the Params of compiled code (`param_check`, `param_emit`); with `plllvm_pj.c`, the only file that includes `plpgsql.h` |
 | `src/plllvm_pj.c`, `src/plllvm_pj.h` | `LANGUAGE plpgsql_jit`: the call handler, the side entry of each PL/pgSQL function, translation in a subtransaction, guards, the error context, the counters of `plllvm_pj_stats()`; includes `plpgsql.h` |
 | `src/plllvm_pj_boxed.c` | `plpgsql_jit`: the expressions the compiler does not do, run by the executor on the translator's copy of the planned tree, and the per-transaction state they use; includes no `plpgsql.h` |
+| `src/plllvm_pj_sites.c` | `plpgsql_jit`: the sites, the calls compiled code makes through fmgr and the I/O functions, built per level and transaction; includes no `plpgsql.h` |
 | `src/plllvm_pj_translate.c` | `plpgsql_jit`: scope of a function, the planned trees of its expressions, the casts to their targets, the IR of a function (statements, loops, labels, positions); includes `plpgsql.h` |
 | `src/plllvm_ir.c` | IR text builder: temporaries, blocks, declarations |
 | `src/plllvm_expr.c` | planned expression tree to IR: the check (whole tree or nothing) and the emitter; knows neither LLVM nor PL/pgSQL |
@@ -218,8 +219,33 @@ Only `plllvm_jit.c` and `plllvm_error.cpp` include LLVM headers.
   Marks below). A guard that misses sends the call to
   PL/pgSQL and the next call translates again; eight misses with fewer than
   1,000 compiled calls between decline the function (`thrash`).
-* An expression the expression compiler refuses, such as a call of a
-  function or an operator on another type, is evaluated by the executor, as
+* A call of a function the compiler has no operator for, an operator on another
+  type, and a conversion through the I/O functions (`CoerceViaIO`, with a
+  strict input function and no domain) are sites. A site is what the executor
+  builds for the node, an `FmgrInfo` and a `FunctionCallInfo` with the node as
+  `fn_expr`, owned by an activation level and the transaction, so that
+  `track_functions` and the properties of the function are read when the
+  transaction first reaches it. The code evaluates the arguments, stores them
+  into the site's `fcinfo`, and `plllvm_pj_invoke()` (inline, `plllvm_types.c`)
+  does the strict test and the call. A `Param` or `Const` of a type with no
+  native representation is an argument as its Datum, and so is a result of one,
+  so a `RETURN` of a type passed by reference needs no executor.
+* A call through a site may do anything: send a message, run SQL, run code of a
+  user. So after the first one the call cannot start again in PL/pgSQL, and a
+  variant with a site has no deopt point; with an expression still unplanned
+  the function waits in PL/pgSQL rather than compiling and deopting, as it
+  does after the executor ran. The
+  compiled code does not reason about which built-ins are silent. After the
+  expression the code checks EXECUTE again, as the executor path does, and polls
+  before the next statement. A pinned IMMUTABLE function can still run user code
+  through a text search configuration with user dictionaries; such a call also
+  gets no deopt and the recheck. The bare calls of `pj_codegen = v1`, which are
+  built-in operators, keep their deopts. The first site of a call switches to the level's per-tuple
+  memory, where the callee allocates; every expression with a call frees it once
+  its value is out, the `RETURN`'s is the handler's to copy.
+* An expression that needs a snapshot of its own (a stable or volatile function
+  in a `VOLATILE` function) is the executor's; so is everything else the
+  compiler refuses, evaluated as
   `exec_eval_simple_expr()` does: the code stores the variables the tree
   reads into a `ParamListInfo`, `plllvm_pj_boxed_eval()` runs the
   `ExprState` made from the tree copy, and the per-tuple memory is reset once

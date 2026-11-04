@@ -61,3 +61,20 @@ SET debug_discard_caches = 0;
 SELECT pd_inc(11), pd_inc(12), pd_inc(13);
 SELECT s.state, s.last_path FROM plllvm_pj_status('pd_inc(int)') s;
 SELECT failures FROM plllvm_pj_stats();
+
+-- a flush in the middle of a compiled call, by a function labelled
+-- IMMUTABLE: the plans of the function are stale for what follows, and the
+-- code and its sites go on
+CREATE FUNCTION pd_fl(n int) RETURNS int LANGUAGE plpgsql IMMUTABLE AS $$
+BEGIN PERFORM set_config('debug_discard_caches', '1', true); RETURN n; END $$;
+CREATE FUNCTION pd_sites(n int) RETURNS int LANGUAGE plpgsql_jit IMMUTABLE AS $$
+BEGIN RETURN pd_fl(n) + length(n::text) + length((n * 7)::text); END $$;
+SET debug_discard_caches = 0;
+SELECT pd_sites(g) FROM generate_series(1, 3) g;
+SELECT pd_sites(g) FROM generate_series(4, 8) g;
+SELECT s.state, s.last_path FROM plllvm_pj_status('pd_sites(int)') s;
+SET debug_discard_caches = 0;
+SELECT pd_sites(g) FROM generate_series(1, 3) g;
+SELECT pd_sites(g) FROM generate_series(9, 12) g;
+SELECT s.state, s.last_path FROM plllvm_pj_status('pd_sites(int)') s;
+SELECT failures FROM plllvm_pj_stats();

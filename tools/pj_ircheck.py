@@ -12,6 +12,10 @@ and fails if
     slot of the context, or calls anything but ProcessInterrupts,
   - the hot count is more than 1.5 times that of the hand-written code.
 
+fib has no loop and calls itself by design: the whole function is counted
+(the hand-written one has two), it must keep no local slot and make exactly two
+calls through a site, and the ratio is printed, not checked.
+
 A script of the standard library, run by make check-pj-ir against a running
 cluster; it has no dependencies to manage.
 
@@ -53,6 +57,13 @@ BEGIN
     idx := idx + 1;
   END LOOP;
 END""", "7"),
+    "fib": ("integer", """
+BEGIN
+  IF n < 2 THEN
+    RETURN n;
+  END IF;
+  RETURN fib_pj(n - 1) + fib_pj(n - 2);
+END""", "10"),
     "mandelbrot": ("text", """
 DECLARE
   two CONSTANT float8 := 2.0;
@@ -183,6 +194,34 @@ def innermost_loop(text, opt):
     return max(found)[1]
 
 
+def analyze_whole(text):
+    """Hot count of every function of the module, the calls through a site,
+    and the local slots."""
+    hot = sites = 0
+    problems = []
+    insts = None
+    blocks = []
+    for line in text.splitlines():
+        if re.match(r"define .*@([\w.\"$]+)\(", line):
+            insts = []
+            blocks.append(insts)
+        elif insts is None or not line.strip() or line.startswith(";"):
+            continue
+        elif line == "}":
+            insts = None
+        elif re.match(r"^([\w.$\-]+):", line):
+            insts = []
+            blocks.append(insts)
+        else:
+            insts.append(line.strip())
+    for insts in blocks:
+        cold = any("@ProcessInterrupts" in i for i in insts)
+        hot += 0 if cold else len(insts)
+        sites += sum("call " in i and "@plllvm_pj_site(" in i for i in insts)
+        problems += ["local slot: " + i for i in insts if " = alloca " in i]
+    return hot, sites, problems
+
+
 def analyze(text, opt):
     """Hot count, position stores, calls, and what the loop must not do."""
     blocks = parse(text)
@@ -236,6 +275,17 @@ def main():
     try:
         for kernel in args.kernel:
             ir = dump(args, kernel)
+            if kernel == "fib":
+                ll_hot = analyze_whole(ir["ll"])[0]
+                hot, sites, problems = analyze_whole(ir["pj"])
+                print("%-10s %7d %7d %6.2f  %d calls through a site" %
+                      (kernel, ll_hot, hot, hot / ll_hot, sites))
+                if sites != 2:
+                    problems.append("%d calls through a site, want 2" % sites)
+                for p in problems:
+                    print("  FAIL %s: %s" % (kernel, p))
+                    failed = True
+                continue
             ll_hot = analyze(ir["ll"], args.opt)[0]
             hot, stores, calls, problems = analyze(ir["pj"], args.opt)
             ratio = hot / ll_hot

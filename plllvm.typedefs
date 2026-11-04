@@ -34,6 +34,7 @@ CheckState
 CmdType
 CoalesceExpr
 CoerceParamHook
+CoerceViaIO
 CoercionForm
 ColumnRef
 CommandId
@@ -246,6 +247,9 @@ ParserSetupHook
 PartitionDesc
 PartitionDirectory
 PartitionKey
+PgStat_Counter
+PgStat_FunctionCallUsage
+PgStat_FunctionCounts
 Pg_abi_values
 Pg_finfo_record
 Pg_magic_struct
@@ -274,6 +278,10 @@ PjPos
 PjSaved
 PjScope
 PjScopeWalk
+PjSite
+PjSiteDesc
+PjSiteKind
+PjSiteSlot
 PjSlot
 PjState
 PjVariant

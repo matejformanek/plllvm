@@ -23,6 +23,7 @@
 
 struct plllvm_path;
 
+#include "plllvm_host.h"
 #include "plllvm_jit.h"
 
 struct PLpgSQL_function;
@@ -82,7 +83,9 @@ typedef struct PjCtx
 	int32		pos;			/* index into the harvest's position table */
 	int32		deopt;			/* 1 + the expression to re-run interpreted */
 	int32		level;			/* use_count - 1: unique among live frames */
-	bool		evaluated;		/* the executor has run: no deopt any more */
+	bool		evaluated;		/* the executor has run: no deopt any more; a
+								 * site needs none, its variant has no deopt
+								 * point */
 	bool		isnull;			/* of the last boxed evaluation */
 	uint64		serial;			/* of the call; tells a level's next call */
 	Oid			user;			/* the user and the state of the catalogs the */
@@ -154,6 +157,7 @@ typedef struct PjExpr
 	PjPath		path;
 	Bitmapset  *params;			/* datums the tree reads, if boxed */
 	bool		need;			/* a snapshot of our own, if boxed */
+	int			ncalls;			/* calls the compiled code makes, if native */
 	Expr	   *cast_tree;		/* NULL: none, or no code */
 	PjCast	   *cast;			/* guard of the cast, if there is one */
 	uint64		cast_gen;
@@ -173,6 +177,23 @@ typedef struct PjScope
 	int			nnotsimple;
 } PjScope;
 
+typedef enum PjSiteKind
+{
+	PJ_SITE_CALL,				/* a function, through fmgr */
+	PJ_SITE_IO					/* the output and input functions of a
+								 * CoerceViaIO */
+} PjSiteKind;
+
+/* a call the code of a variant makes, which a level builds when first used */
+typedef struct PjSiteDesc
+{
+	PjSiteKind	kind;
+	const Node *node;			/* in the harvest's copy of the tree */
+	Oid			funcid;			/* a call's */
+	int			nargs;
+	Oid			collation;
+} PjSiteDesc;
+
 typedef struct PjVariant
 {
 	struct PjVariant *next;
@@ -189,6 +210,8 @@ typedef struct PjVariant
 	char	   *ir;
 	struct PjLevel **levels;	/* by ctx.level */
 	int			nlevels;
+	PjSiteDesc *sites;			/* by site */
+	int			nsites;
 } PjVariant;
 
 /* a boxed expression's executor state, per level of one frame's activation */
@@ -201,8 +224,19 @@ typedef struct PjSlot
 } PjSlot;
 
 /*
- * What the boxed expressions of one activation level of a variant use, in
- * the transaction that made it
+ * A site of a level: its call, and for an IO site the input function's, whose
+ * output function is the call's
+ */
+typedef struct PjSiteSlot
+{
+	PjSite		site;
+	FunctionCallInfo fcinfo_in;
+	bool		built;
+} PjSiteSlot;
+
+/*
+ * What the boxed expressions and the sites of one activation level of a
+ * variant use, in the transaction that made it
  */
 typedef struct PjLevel
 {
@@ -212,6 +246,7 @@ typedef struct PjLevel
 	ExprContext *econtext;
 	ParamListInfo params;
 	PjSlot	   *slots;			/* by expression */
+	PjSiteSlot *sites;			/* by site */
 	uint64		serial;			/* of the last call that used it */
 } PjLevel;
 
@@ -244,6 +279,7 @@ extern bool plllvm_pj_execute_check(PjHarvest *h, Oid user, uint64 epoch,
 									Oid *denied);
 
 /* plllvm_pj_boxed.c */
+extern PjLevel *plllvm_pj_level(PjCtx *ctx);
 extern void plllvm_pj_levels_release(PjVariant *v);
 extern void plllvm_pj_level_abort(PjCtx *ctx);
 extern void plllvm_pj_xact_callback(XactEvent event);
