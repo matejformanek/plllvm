@@ -1,7 +1,8 @@
 --
 -- pj_calls: functions called from compiled code through sites, which are
 -- built as the executor builds an ExprState, and the conversions through
--- the I/O functions
+-- the I/O functions.  The expected output is stock PL/pgSQL's, so each
+-- comment below says what stock does.
 --
 \getenv pj_lang PJ_LANG
 \if :{?pj_lang}
@@ -219,7 +220,8 @@ SELECT pc_depth(5), pc_depth(5), pc_depth(200);
 SELECT pj_expect('pc_depth(int)', 'compiled') \gset
 CREATE FUNCTION pc_cat(cnt int, h bigint) RETURNS text LANGUAGE :pj_lang IMMUTABLE AS $$
 BEGIN RETURN cnt::text || '/' || h::text; END $$;
--- an immutable function with constant arguments is run by the planner
+-- an immutable function with constant arguments is run by the planner; stock
+-- gives the same text through the query below
 SELECT pc_cat(a, b) FROM (VALUES (1, 2::bigint), (10, 2000000000000), (-5, -7)) v(a, b);
 SELECT pj_mark() \gset
 SELECT pc_cat(a, b) FROM (VALUES (1, 2::bigint), (10, 2000000000000), (-5, -7)) v(a, b);
@@ -397,8 +399,9 @@ SELECT pc_wait(1), pc_wait(2), pc_wait(3);
 SELECT pc_wait(200), pc_wait(4), pc_wait(5);
 SELECT pj_expect('pc_wait(int)', 'compiled') \gset
 
--- a STABLE built-in that runs SQL is no leaf: user code may run in it, so a
--- later deopt must not run the effect a second time
+-- a STABLE built-in that runs SQL (table_to_xml) before an expression that is
+-- not planned yet: the deopt must not run the view's effect a second time.
+-- stock: 3 rows after three calls, 4 after the fourth
 CREATE TABLE pc_log (x int);
 CREATE FUNCTION pc_side() RETURNS int LANGUAGE plpgsql VOLATILE AS $$
 BEGIN INSERT INTO pc_log VALUES (1); RETURN 1; END $$;
@@ -413,6 +416,25 @@ SELECT pc_ld(1), pc_ld(1), pc_ld(1);
 SELECT count(*) AS log_after_three FROM pc_log;
 SELECT pc_ld(101);
 SELECT count(*) AS log_after_four FROM pc_log;
+
+-- a call of a pinned IMMUTABLE function that sends a NOTICE, before an expression
+-- that is not planned yet: the restart in PL/pgSQL must not send it twice.
+-- stock: one NOTICE for each of the six calls
+SELECT to_tsquery('english', 'the');
+CREATE FUNCTION pc_ln(n int) RETURNS int LANGUAGE :pj_lang IMMUTABLE AS $$
+DECLARE x int;
+BEGIN
+  x := numnode(to_tsquery('english', substr('the', 1, n + 2))) + n;
+  IF n > 100 THEN
+    x := x + n * 2;
+  END IF;
+  RETURN x;
+END $$;
+SELECT pc_ln(1);
+SELECT pc_ln(2);
+SELECT pc_ln(3);
+SELECT pc_ln(200);
+SELECT pc_ln(4);
 
 -- a polymorphic callee read after the function was planned again
 CREATE FUNCTION pc_pid(x anyelement) RETURNS anyelement LANGUAGE plpgsql STABLE AS $$

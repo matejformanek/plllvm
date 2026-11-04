@@ -156,7 +156,6 @@ typedef struct PjExpr
 	Bitmapset  *params;			/* datums the tree reads, if boxed */
 	bool		need;			/* a snapshot of our own, if boxed */
 	int			ncalls;			/* calls the compiled code makes, if native */
-	bool		nonleaf;		/* and one may run code of a user */
 	Expr	   *cast_tree;		/* NULL: none, or no code */
 	PjCast	   *cast;			/* guard of the cast, if there is one */
 	uint64		cast_gen;
@@ -191,7 +190,6 @@ typedef struct PjSiteDesc
 	Oid			funcid;			/* a call's */
 	int			nargs;
 	Oid			collation;
-	bool		nonleaf;		/* may run code of a user */
 } PjSiteDesc;
 
 typedef struct PjVariant

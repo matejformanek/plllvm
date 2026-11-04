@@ -60,11 +60,10 @@ typedef struct PjEnv
 	plllvm_expr_env base;
 	PLpgSQL_function *func;
 	PjHarvest  *h;
-	/* of one check: the expression's snapshot rule, and what its calls are */
+	/* reset for each expression checked */
 	bool		need;
 	int			ncalls;
-	bool		nonleaf;
-	/* of an emit: the sites made so far */
+	/* the sites made so far by an emit */
 	List	   *sites;
 } PjEnv;
 
@@ -151,7 +150,6 @@ static void call_emit(plllvm_expr_env *base, plllvm_ir *ir, const Node *node,
 					  const plllvm_value *args, int nargs, plllvm_value *out);
 static const char *bare_emit(plllvm_expr_env *base, plllvm_ir *ir, Oid funcid,
 							 const char *const *args, int nargs);
-static bool site_nonleaf(const Node *node);
 static PjCast *cast_get(Oid srctype, int32 srctypmod, Oid dsttype,
 						Expr **tree);
 static bool cast_pinned(Oid srctype, Oid dsttype);
@@ -734,16 +732,12 @@ harvest_expr(PLpgSQL_function *func, PjHarvest *h, PjEnv *env, PjExpr *pe,
 		initStringInfo(&facts);
 		env->need = pe->need;
 		env->ncalls = 0;
-		env->nonleaf = false;
 		pe->path = plllvm_expr_check(tree, &env->base, &key, &facts, &why) ?
 			PJ_PATH_NATIVE : PJ_PATH_BOXED;
 		if (contain_volatile_functions((Node *) tree))
 			return "volatile callee";
 		if (pe->path == PJ_PATH_NATIVE)
-		{
 			pe->ncalls = env->ncalls;
-			pe->nonleaf = env->nonleaf;
-		}
 
 		/* a tree for the executor reads the datums by number */
 		if (params_walker((Node *) tree, &params))
@@ -933,59 +927,10 @@ call_check(plllvm_expr_env *base, const Node *node)
 		return false;
 
 	env->ncalls++;
-	if (site_nonleaf(node))
-		env->nonleaf = true;
 	return true;
 }
 
-/*
- * May the call run code that is not the server's own?  An immutable function
- * of the catalogs, on types of the catalogs, does not.
- */
-static bool
-site_nonleaf(const Node *node)
-{
-	Oid			funcid = InvalidOid;
-	Oid			result;
-	List	   *args;
-
-	switch (nodeTag(node))
-	{
-		case T_FuncExpr:
-			funcid = ((const FuncExpr *) node)->funcid;
-			result = ((const FuncExpr *) node)->funcresulttype;
-			args = ((const FuncExpr *) node)->args;
-			break;
-		case T_OpExpr:
-			funcid = ((const OpExpr *) node)->opfuncid;
-			result = ((const OpExpr *) node)->opresulttype;
-			args = ((const OpExpr *) node)->args;
-			break;
-		default:
-			result = ((const CoerceViaIO *) node)->resulttype;
-			args = list_make1(((const CoerceViaIO *) node)->arg);
-			break;
-	}
-
-	/* a STABLE built-in may run SQL (table_to_xml), so only IMMUTABLE is leaf */
-	if ((OidIsValid(funcid) &&
-		 (funcid >= FirstUnpinnedObjectId ||
-		  func_volatile(funcid) != PROVOLATILE_IMMUTABLE)) ||
-		result >= FirstUnpinnedObjectId)
-		return true;
-	foreach_ptr(Node, arg, args)
-	{
-		if (exprType(arg) >= FirstUnpinnedObjectId)
-			return true;
-	}
-	return false;
-}
-
-/*
- * The call of a site: the arguments stored into the site's fcinfo, then the
- * call, which does the strictness test (plllvm_pj_invoke).  A CoerceViaIO is
- * one call of the host.
- */
+/* a CoerceViaIO is one call of the host, a function a call of its site */
 static void
 call_emit(plllvm_expr_env *base, plllvm_ir *ir, const Node *node,
 		  const plllvm_value *args, int nargs, plllvm_value *out)
@@ -1000,7 +945,6 @@ call_emit(plllvm_expr_env *base, plllvm_ir *ir, const Node *node,
 
 	desc->node = node;
 	desc->nargs = nargs;
-	desc->nonleaf = site_nonleaf(node);
 	switch (nodeTag(node))
 	{
 		case T_FuncExpr:
@@ -1344,7 +1288,7 @@ plllvm_pj_emit(PLpgSQL_function *func, PjHarvest *h, PjVariant *v)
 	bool		ok;
 	bool		has_boxed = false;
 	bool		has_compiled = false;
-	bool		has_user = false;
+	bool		has_calls = false;
 
 	em.all_boxed = v->codegen == PLLLVM_PJ_BOXED;
 	foreach_ptr(PjExpr, pe, h->exprs)
@@ -1356,15 +1300,16 @@ plllvm_pj_emit(PLpgSQL_function *func, PjHarvest *h, PjVariant *v)
 		else
 		{
 			has_compiled = true;
-			has_user |= pe->nonleaf;
+			has_calls |= pe->ncalls > 0;
 		}
 	}
 
 	/*
-	 * Once the executor or code of a user has run, a call cannot start again
-	 * in the interpreter, so code that runs them has no deopt point.
+	 * Once the executor or any callee has run, a call cannot start again in
+	 * the interpreter (a callee may send a message or run SQL, whatever it
+	 * is), so code that runs them has no deopt point.
 	 */
-	if ((has_boxed || has_user) && h->nunplanned > 0)
+	if ((has_boxed || has_calls) && h->nunplanned > 0)
 		return PJ_EMIT_WAITING;
 
 	plllvm_jit_session_ensure();
@@ -1478,7 +1423,7 @@ plllvm_pj_emit(PLpgSQL_function *func, PjHarvest *h, PjVariant *v)
 	v->code = (PjCode) result.mod->addr;
 	v->native = has_compiled;
 	v->boxed = has_boxed;
-	v->restartable = !has_boxed && !has_user;
+	v->restartable = !has_boxed && !has_calls;
 	return PJ_EMIT_OK;
 }
 
@@ -2070,22 +2015,16 @@ boxed_value(PjEmit *em, int index, const PjExpr *pe, const char **datum,
 /*
  * After an expression with calls: what the evaluation of the executor does
  * once its value is out, but a RETURN's value is the handler's to copy, so
- * it is not freed.  Only a call that may run code of a user needs the check
- * of EXECUTE, and a poll before the next statement.
+ * it is not freed.  The callee may have run user code, so EXECUTE is checked
+ * again, and a poll comes before the next statement.
  */
 static void
 site_done(PjEmit *em, int index, const PjExpr *pe)
 {
-	int			flags = (pe->nonleaf ? PJ_DONE_RECHECK : 0) |
-		(em->in_return ? 0 : PJ_DONE_RESET);
+	int			flags = PJ_DONE_RECHECK | (em->in_return ? 0 : PJ_DONE_RESET);
 
-	if (pe->nonleaf)
-	{
-		em->nboxed++;
-		em->poll_pending = true;
-	}
-	if (flags == 0)
-		return;
+	em->nboxed++;
+	em->poll_pending = true;
 
 	plllvm_ir_declare(em->ir, "declare void @plllvm_pj_site_done(ptr, i32, i32)");
 	plllvm_ir_emit(em->ir, "call void @plllvm_pj_site_done(ptr %%ctx, i32 %d, i32 %d)",

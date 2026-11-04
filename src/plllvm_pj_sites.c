@@ -13,13 +13,8 @@
  * Notes:
  *
  * 1) A site is what the executor builds for a FuncExpr, OpExpr or
- *    CoerceViaIO of an expression (ExecInitFunc, EEOP_IOCOERCE): an FmgrInfo
- *    and a FunctionCallInfo with the node as fn_expr.  It belongs to an
- *    activation level of a variant and lives as long as the ExprState of the
- *    interpreter would, a transaction, so that track_functions and the
- *    function's properties are read when the transaction first reaches it.
- *    Compiled code stores the arguments and calls plllvm_pj_invoke() (inline,
- *    plllvm_types.c) on it.
+ *    CoerceViaIO (ExecInitFunc, EEOP_IOCOERCE), per activation level and
+ *    transaction, as an ExprState is.
  *
  * 2) Nothing here checks EXECUTE: the function is on the harvest's list, which
  *    the handler checks (plllvm_pj_execute_check).
@@ -27,7 +22,6 @@
  * 3) The first site of a call switches to the level's per-tuple memory, where
  *    the callee allocates as it does for the executor.  The handler switches
  *    back when the call ends.
- *
  */
 #include "postgres.h"
 
@@ -45,9 +39,6 @@
 static PjSiteSlot *site_enter(PjCtx *ctx, int32 idx);
 static void site_build(PjLevel *lv, const PjSiteDesc *desc, PjSiteSlot *slot);
 
-/*
- * The site idx of the variant for this frame, ready to take arguments
- */
 PjSite *
 plllvm_pj_site(PjCtx *ctx, int32 idx)
 {
@@ -138,9 +129,8 @@ site_enter(PjCtx *ctx, int32 idx)
 	if (!slot->built)
 		site_build(lv, desc, slot);
 
-	/* code of a user may run now: no deopt after it */
-	if (desc->nonleaf)
-		ctx->evaluated = true;
+	/* the callee may have sent a message or run SQL: no deopt after it */
+	ctx->evaluated = true;
 
 	MemoryContextSwitchTo(lv->econtext->ecxt_per_tuple_memory);
 
@@ -186,6 +176,11 @@ site_build(PjLevel *lv, const PjSiteDesc *desc, PjSiteSlot *slot)
 		getTypeInputInfo(io->resulttype, &iofunc, &ioparam);
 		fmgr_info_cxt(iofunc, flinfo_in, lv->cxt);
 		fmgr_info_set_expr((Node *) io, flinfo_in);
+
+		/*
+		 * the input function's typioparam and typmod, as EEOP_IOCOERCE sets
+		 * them
+		 */
 		slot->fcinfo_in = palloc0(SizeForFunctionCallInfo(3));
 		InitFunctionCallInfoData(*slot->fcinfo_in, flinfo_in, 3, InvalidOid,
 								 NULL, NULL);

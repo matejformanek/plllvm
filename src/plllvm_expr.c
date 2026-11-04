@@ -278,9 +278,6 @@ plllvm_repr_type(plllvm_repr repr)
 	return types[repr];
 }
 
-/*
- * The Datum of a value, whatever it says of a NULL
- */
 static const char *
 datum_of(plllvm_ir *ir, const plllvm_value *val)
 {
@@ -998,10 +995,6 @@ emit_op(plllvm_ir *ir, const OpInfo *op, List *args, EmitState *es,
 	}
 }
 
-/*
- * A call of the caller's: the arguments first, as for an operator, then the
- * call, which does the rest
- */
 static void
 emit_call(plllvm_ir *ir, const Expr *e, List *args, EmitState *es,
 		  plllvm_value *out)
@@ -1015,10 +1008,7 @@ emit_call(plllvm_ir *ir, const Expr *e, List *args, EmitState *es,
 	es->env->call_emit(es->env, ir, (const Node *) e, av, i, out);
 }
 
-/*
- * An operator of the table as a call of its function, on arguments known not
- * to be NULL
- */
+/* the arguments are not NULL here, as for emit_compute() */
 static const char *
 emit_bare(plllvm_ir *ir, EmitState *es, const OpInfo *op, const plllvm_value *av)
 {

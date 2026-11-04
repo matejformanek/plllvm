@@ -66,13 +66,11 @@ struct plllvm_expr_env
 	void		(*param_emit) (plllvm_expr_env *env, plllvm_ir *ir, const Param *p, plllvm_value *out);
 
 	/*
-	 * A call the compiler has no operator for: a FuncExpr or OpExpr, or a
-	 * CoerceViaIO.  NULL: refuse them.  call_emit gets the arguments as
-	 * emitted, and sets out; its repr is that of the result's type if it has
-	 * one, else PLLLVM_DATUM.  bare says that node is an operator the
-	 * compiler would do, called as a function because no_native_ops is set;
-	 * bare_emit emits that call on the arguments as Datums and returns the
-	 * result's.
+	 * A FuncExpr, OpExpr or CoerceViaIO with no operator of ours: NULL
+	 * refuses it.  call_emit gets the arguments as emitted; its result is of
+	 * the result's repr, else PLLLVM_DATUM.  With no_native_ops, the
+	 * operators that are function calls go through bare_emit, on Datums, and
+	 * return one.
 	 */
 	bool		(*call_check) (plllvm_expr_env *env, const Node *node);
 	void		(*call_emit) (plllvm_expr_env *env, plllvm_ir *ir, const Node *node,

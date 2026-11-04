@@ -229,15 +229,21 @@ Only `plllvm_jit.c` and `plllvm_error.cpp` include LLVM headers.
   into the site's `fcinfo`, and `plllvm_pj_invoke()` (inline, `plllvm_types.c`)
   does the strict test and the call. A `Param` or `Const` of a type with no
   native representation is an argument as its Datum, and so is a result of one,
-  so a `RETURN` of a type passed by reference needs no executor. The first site
-  of a call switches to the level's per-tuple memory, where the callee
-  allocates; every expression with a call frees it once its value is out, the
-  `RETURN`'s is the handler's to copy. A call that may run code of a user (a
-  function or a type outside the catalogs) makes the variant not restartable,
-  checks EXECUTE again after the expression as the executor path does, and polls
-  before the next statement. An expression that needs a snapshot of its own (a
-  stable or volatile function in a `VOLATILE` function) is the executor's; so is
-  everything else the compiler refuses, evaluated as
+  so a `RETURN` of a type passed by reference needs no executor.
+* A call through a site may do anything: send a message, run SQL, run code of a
+  user. So after the first one the call cannot start again in PL/pgSQL, and a
+  variant with a site has no deopt point; with an expression still unplanned
+  the function waits in PL/pgSQL, as it does after the executor ran. The
+  compiled code does not reason about which built-ins are silent. After the
+  expression the code checks EXECUTE again, as the executor path does, and polls
+  before the next statement. A pinned IMMUTABLE function can still run user code
+  through a text search configuration with user dictionaries; this is stated,
+  not handled. The first site of a call switches to the level's per-tuple
+  memory, where the callee allocates; every expression with a call frees it once
+  its value is out, the `RETURN`'s is the handler's to copy.
+* An expression that needs a snapshot of its own (a stable or volatile function
+  in a `VOLATILE` function) is the executor's; so is everything else the
+  compiler refuses, evaluated as
   `exec_eval_simple_expr()` does: the code stores the variables the tree
   reads into a `ParamListInfo`, `plllvm_pj_boxed_eval()` runs the
   `ExprState` made from the tree copy, and the per-tuple memory is reset once
