@@ -939,8 +939,8 @@ call_check(plllvm_expr_env *base, const Node *node)
 }
 
 /*
- * May the call run code that is not the server's own?  A function of the
- * catalogs, on types of the catalogs, does not.
+ * May the call run code that is not the server's own?  An immutable function
+ * of the catalogs, on types of the catalogs, does not.
  */
 static bool
 site_nonleaf(const Node *node)
@@ -967,7 +967,10 @@ site_nonleaf(const Node *node)
 			break;
 	}
 
-	if ((OidIsValid(funcid) && funcid >= FirstUnpinnedObjectId) ||
+	/* a STABLE built-in may run SQL (table_to_xml), so only IMMUTABLE is leaf */
+	if ((OidIsValid(funcid) &&
+		 (funcid >= FirstUnpinnedObjectId ||
+		  func_volatile(funcid) != PROVOLATILE_IMMUTABLE)) ||
 		result >= FirstUnpinnedObjectId)
 		return true;
 	foreach_ptr(Node, arg, args)

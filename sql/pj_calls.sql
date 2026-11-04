@@ -397,6 +397,23 @@ SELECT pc_wait(1), pc_wait(2), pc_wait(3);
 SELECT pc_wait(200), pc_wait(4), pc_wait(5);
 SELECT pj_expect('pc_wait(int)', 'compiled') \gset
 
+-- a STABLE built-in that runs SQL is no leaf: user code may run in it, so a
+-- later deopt must not run the effect a second time
+CREATE TABLE pc_log (x int);
+CREATE FUNCTION pc_side() RETURNS int LANGUAGE plpgsql VOLATILE AS $$
+BEGIN INSERT INTO pc_log VALUES (1); RETURN 1; END $$;
+CREATE VIEW pc_vw AS SELECT pc_side() AS x;
+CREATE FUNCTION pc_ld(n int) RETURNS int LANGUAGE :pj_lang STABLE AS $f$
+BEGIN
+  IF table_to_xml('pc_vw'::regclass, true, false, '') IS NULL THEN RETURN -1; END IF;
+  IF n > 100 THEN RETURN n + 1; END IF;
+  RETURN 0;
+END $f$;
+SELECT pc_ld(1), pc_ld(1), pc_ld(1);
+SELECT count(*) AS log_after_three FROM pc_log;
+SELECT pc_ld(101);
+SELECT count(*) AS log_after_four FROM pc_log;
+
 -- a polymorphic callee read after the function was planned again
 CREATE FUNCTION pc_pid(x anyelement) RETURNS anyelement LANGUAGE plpgsql STABLE AS $$
 BEGIN RETURN x; END $$;
