@@ -263,7 +263,11 @@ Only `plllvm_jit.c` and `plllvm_error.cpp` include LLVM headers.
   duration, and gives them back afterwards if no one has changed them. A call
   finding any expression of the function busy goes to PL/pgSQL
   (`interpreted:in use`), so a compiled call starts only where PL/pgSQL
-  takes its simple path.
+  takes its simple path. SPI runs on an expression only with its
+  plan pointer null or refcounted: PL/pgSQL holds a refcount from its first
+  use of the plan in a transaction, a compiled frame never does, so a mark
+  forgets the plan pointer unless PL/pgSQL has one, and PL/pgSQL replans
+  instead of trusting a pointer whose plan SPI may have freed.
 * Differences from PL/pgSQL, kept: a compiled inner frame of a recursion
   through an expression evaluates it on the simple path, where PL/pgSQL's
   takes SPI, so values can follow the generic plan rather than the custom ones
