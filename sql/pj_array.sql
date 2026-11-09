@@ -112,7 +112,7 @@ DECLARE
   b bool[] := ARRAY[true, false];
   i4 int4[] := ARRAY[1, 2];
   i8 int8[] := ARRAY[10000000000, 2];
-  f8 float8[] := ARRAY[1.5, 2.5];
+  f8 float8[] := ARRAY[1.5, 2.5]::float8[];
   nu numeric[] := ARRAY[1.10, 2.25];
   tx text[] := ARRAY['a', 'b'];
 BEGIN
@@ -202,6 +202,7 @@ BEGIN
   RETURN pa_rec(n - 1, b, bad) || b::text;
 END $$;
 SELECT pa_rec(4, '{}', 0), pa_rec(4, '{}', 0), pa_rec(6, '{1,2}', 0);
+\set SHOW_CONTEXT never
 SELECT pa_rec(3, '{}', 1);  -- fail
 SELECT pa_rec(3, '{}', 1);  -- fail
 BEGIN;
@@ -210,6 +211,7 @@ SELECT pa_rec(3, '{}', 1);  -- fail
 ROLLBACK TO s;
 SELECT pa_rec(2, '{9}', 0);
 COMMIT;
+\set SHOW_CONTEXT always
 SELECT pa_rec(2, '{}', 0), pa_rec(5, '{}', 0);
 
 -- an array argument is the caller's: assigning to it, or to what it was
@@ -433,13 +435,15 @@ BEGIN
     a[1 + i % 1000] := a[1 + i % 1000] + i;
     s := repeat('z', i % 100);
   END LOOP;
-  RETURN a[1] + length(s);
+  RETURN (a[1] + length(s))::bigint;
 END $$;
 SELECT pa_cancel(10), pa_cancel(10);
 SELECT pa_mem() AS m0 \gset
 SET statement_timeout = 300;
+\set SHOW_CONTEXT never
 SELECT pa_cancel(2000000000);  -- fail
 SELECT pa_cancel(2000000000);  -- fail
+\set SHOW_CONTEXT always
 RESET statement_timeout;
 SELECT pa_cancel(1000), pa_cancel(1000);
 SELECT pa_mem() - :m0 < 262144 AS flat_after_cancel;

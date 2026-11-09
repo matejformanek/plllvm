@@ -157,6 +157,7 @@ typedef struct PjExpr
 	int			generation;
 	PjPath		path;
 	Bitmapset  *params;			/* datums the tree reads, if boxed */
+	int			rw;				/* the datum its read/write Param is, or -1 */
 	bool		need;			/* a snapshot of our own, if boxed */
 	int			ncalls;			/* calls the compiled code makes, cast
 								 * included */
@@ -272,7 +273,8 @@ typedef struct PjHarvest
 	bool		has_notice;		/* as in PjScope */
 	List	   *fori;
 	int			ndatums;
-	Oid		   *ptypes;			/* of the datums a boxed tree may read */
+	int			nparams;		/* the datums, then a read/write twin of each */
+	Oid		   *ptypes;			/* of the params a boxed tree may read */
 	List	   *funcids;		/* of the trees and the casts: EXECUTE is
 								 * checked on them */
 	LocalTransactionId key_lxid;	/* they were checked in this transaction
@@ -293,6 +295,7 @@ extern bool plllvm_pj_execute_check(PjHarvest *h, Oid user, uint64 epoch,
 extern PjLevel *plllvm_pj_level(PjCtx *ctx);
 extern void plllvm_pj_levels_release(PjVariant *v);
 extern void plllvm_pj_level_abort(PjCtx *ctx);
+extern void plllvm_pj_datums_release(PjCtx *ctx);
 extern void plllvm_pj_xact_callback(XactEvent event);
 
 /* plllvm_pj_translate.c */

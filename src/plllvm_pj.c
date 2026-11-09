@@ -831,6 +831,8 @@ run(PLpgSQL_function *func, FunctionCallInfo fcinfo, PjEntry *e, PjVariant *v)
 	}
 	PG_END_TRY();
 
+	/* the result is out of the arrays, and a deopt starts again without them */
+	plllvm_pj_datums_release(&ctx);
 	error_context_stack = errcallback.previous;
 	e->top = ctx.outer;
 

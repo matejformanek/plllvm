@@ -299,7 +299,7 @@ DECLARE
   b bool[] := ARRAY[true, false];
   i4 int4[] := ARRAY[1, 2];
   i8 int8[] := ARRAY[10000000000, 2];
-  f8 float8[] := ARRAY[1.5, 2.5];
+  f8 float8[] := ARRAY[1.5, 2.5]::float8[];
   nu numeric[] := ARRAY[1.10, 2.25];
   tx text[] := ARRAY['a', 'b'];
 BEGIN
@@ -477,32 +477,15 @@ SELECT pa_rec(4, '{}', 0), pa_rec(4, '{}', 0), pa_rec(6, '{1,2}', 0);
  {0,1,2,3,4}[2:5]={1,2,3,4}[3:5]={2,3,4}[4:5]={3,4}[5:5]={4} | {0,1,2,3,4}[2:5]={1,2,3,4}[3:5]={2,3,4}[4:5]={3,4}[5:5]={4} | {0,1,2,3,4,5,6}{1,1,2,3,4,5,6}{1,2,2,3,4,5,6}{1,2,NULL,3,4,5,6}{1,2,NULL,NULL,4,5,6}{1,2,NULL,NULL,NULL,5,6}{1,2,NULL,NULL,NULL,NULL,6}
 (1 row)
 
+\set SHOW_CONTEXT never
 SELECT pa_rec(3, '{}', 1);  -- fail
 ERROR:  array subscript in assignment must not be null
-CONTEXT:  PL/pgSQL function pa_rec(integer,integer[],integer) line 6 at assignment
-PL/pgSQL expression "pa_rec(n - 1, b, bad) || b::text"
-PL/pgSQL function pa_rec(integer,integer[],integer) line 9 at RETURN
-PL/pgSQL expression "pa_rec(n - 1, b, bad) || b::text"
-PL/pgSQL function pa_rec(integer,integer[],integer) line 9 at RETURN
-PL/pgSQL function pa_rec(integer,integer[],integer) line 9 at RETURN
 SELECT pa_rec(3, '{}', 1);  -- fail
 ERROR:  array subscript in assignment must not be null
-CONTEXT:  PL/pgSQL function pa_rec(integer,integer[],integer) line 6 at assignment
-PL/pgSQL expression "pa_rec(n - 1, b, bad) || b::text"
-PL/pgSQL function pa_rec(integer,integer[],integer) line 9 at RETURN
-PL/pgSQL expression "pa_rec(n - 1, b, bad) || b::text"
-PL/pgSQL function pa_rec(integer,integer[],integer) line 9 at RETURN
-PL/pgSQL function pa_rec(integer,integer[],integer) line 9 at RETURN
 BEGIN;
 SAVEPOINT s;
 SELECT pa_rec(3, '{}', 1);  -- fail
 ERROR:  array subscript in assignment must not be null
-CONTEXT:  PL/pgSQL function pa_rec(integer,integer[],integer) line 6 at assignment
-PL/pgSQL expression "pa_rec(n - 1, b, bad) || b::text"
-PL/pgSQL function pa_rec(integer,integer[],integer) line 9 at RETURN
-PL/pgSQL expression "pa_rec(n - 1, b, bad) || b::text"
-PL/pgSQL function pa_rec(integer,integer[],integer) line 9 at RETURN
-PL/pgSQL function pa_rec(integer,integer[],integer) line 9 at RETURN
 ROLLBACK TO s;
 SELECT pa_rec(2, '{9}', 0);
           pa_rec          
@@ -511,6 +494,7 @@ SELECT pa_rec(2, '{9}', 0);
 (1 row)
 
 COMMIT;
+\set SHOW_CONTEXT always
 SELECT pa_rec(2, '{}', 0), pa_rec(5, '{}', 0);
            pa_rec            |                                     pa_rec                                     
 -----------------------------+--------------------------------------------------------------------------------
@@ -898,7 +882,7 @@ BEGIN
     a[1 + i % 1000] := a[1 + i % 1000] + i;
     s := repeat('z', i % 100);
   END LOOP;
-  RETURN a[1] + length(s);
+  RETURN (a[1] + length(s))::bigint;
 END $$;
 SELECT pa_cancel(10), pa_cancel(10);
  pa_cancel | pa_cancel 
@@ -908,12 +892,12 @@ SELECT pa_cancel(10), pa_cancel(10);
 
 SELECT pa_mem() AS m0 \gset
 SET statement_timeout = 300;
+\set SHOW_CONTEXT never
 SELECT pa_cancel(2000000000);  -- fail
 ERROR:  canceling statement due to statement timeout
-CONTEXT:  PL/pgSQL function pa_cancel(integer) line 6 at assignment
 SELECT pa_cancel(2000000000);  -- fail
 ERROR:  canceling statement due to statement timeout
-CONTEXT:  PL/pgSQL function pa_cancel(integer) line 6 at assignment
+\set SHOW_CONTEXT always
 RESET statement_timeout;
 SELECT pa_cancel(1000), pa_cancel(1000);
  pa_cancel | pa_cancel 

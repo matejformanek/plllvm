@@ -342,6 +342,8 @@ SubPlan
 SubPlanState
 SubTransactionId
 SubXactEvent
+SubscriptingRef
+SupportRequestModifyInPlace
 SysCacheIdentifier
 TBMIterator
 TBMPrivateIterator
