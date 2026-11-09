@@ -220,6 +220,7 @@ PLpgSQL_stmt_exit
 PLpgSQL_stmt_fori
 PLpgSQL_stmt_if
 PLpgSQL_stmt_loop
+PLpgSQL_stmt_raise
 PLpgSQL_stmt_return
 PLpgSQL_stmt_type
 PLpgSQL_stmt_while
@@ -464,6 +465,7 @@ plllvm_spi_stmt
 plllvm_value
 plpgsql_call_handler_t
 plpgsql_compile_t
+plpgsql_recognize_err_condition_t
 plpgsql_stmt_typename_t
 policy_t
 regproc

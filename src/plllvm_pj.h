@@ -16,6 +16,7 @@
 #include "executor/executor.h"
 #include "fmgr.h"
 #include "lib/ilist.h"
+#include "lib/stringinfo.h"
 #include "nodes/params.h"
 #include "nodes/pg_list.h"
 #include "nodes/primnodes.h"
@@ -178,6 +179,8 @@ typedef struct PjScope
 	int			nready;
 	int			nunplanned;
 	int			nnotsimple;
+	bool		has_notice;		/* a RAISE may have an effect a deopt would
+								 * repeat */
 } PjScope;
 
 typedef enum PjSiteKind
@@ -248,6 +251,8 @@ typedef struct PjLevel
 	MemoryContext cxt;			/* NULL: none in this transaction */
 	MemoryContext datum_cxt;	/* the copies in variables passed by
 								 * reference, under cxt */
+	MemoryContext raise_cxt;	/* the message of a RAISE, under cxt */
+	StringInfoData raise_msg;
 	ExprContext *econtext;
 	ParamListInfo params;
 	PjSlot	   *slots;			/* by expression */
@@ -264,6 +269,7 @@ typedef struct PjHarvest
 	PjPos	   *pos;
 	int			npos;
 	int			nbase;			/* then one per expression */
+	bool		has_notice;		/* as in PjScope */
 	List	   *fori;
 	int			ndatums;
 	Oid		   *ptypes;			/* of the datums a boxed tree may read */
@@ -304,5 +310,6 @@ typedef enum PjEmitResult
 extern PjEmitResult plllvm_pj_emit(struct PLpgSQL_function *func, PjHarvest *h,
 								   PjVariant *v);
 extern const char *plllvm_pj_stmt_typename(void *stmt);
+extern int	plllvm_pj_err_condition(const char *condname);
 
 #endif							/* PLLLVM_PJ_H */

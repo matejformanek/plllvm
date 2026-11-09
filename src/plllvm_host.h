@@ -104,6 +104,13 @@ extern Datum plllvm_pj_boxed_eval(struct PjCtx *ctx, int32 idx);
 extern void plllvm_pj_boxed_reset(struct PjCtx *ctx);
 extern Datum plllvm_pj_assign(struct PjCtx *ctx, Datum old, bool owned,
 							  Datum value, bool isnull, int32 typlen);
+extern void plllvm_pj_raise_start(struct PjCtx *ctx);
+extern void plllvm_pj_raise_text(struct PjCtx *ctx, const char *text);
+extern void plllvm_pj_raise_param(struct PjCtx *ctx, Datum value, bool isnull,
+								  Oid type);
+extern void plllvm_pj_raise(struct PjCtx *ctx, int32 level, int32 sqlstate,
+							const char *msg);
+pg_noreturn extern void plllvm_pj_raise_bare(void);
 
 /*
  * A call of a function from compiled code, for plllvm_pj_invoke(): the

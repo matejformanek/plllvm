@@ -140,6 +140,8 @@ static void scope_pos(PjScopeWalk *w, PLpgSQL_stmt *stmt);
 static void scope_expr(PjScopeWalk *w, const void *owner, PLpgSQL_expr *expr,
 					   Oid dsttype, int32 dsttypmod);
 static bool stmt_terminal(PLpgSQL_stmt *stmt);
+static bool raise_terminal(PLpgSQL_stmt_raise *stmt);
+static bool raise_bare(PLpgSQL_stmt_raise *stmt);
 static PjFrame *frame_push(List **frames, const char *label, bool loop,
 						   bool fori);
 static void frame_pop(List **frames);
@@ -186,6 +188,10 @@ static void emit_loop(PjEmit *em, PLpgSQL_stmt *stmt);
 static void emit_fori(PjEmit *em, PLpgSQL_stmt_fori *stmt);
 static void emit_exit(PjEmit *em, PLpgSQL_stmt_exit *stmt);
 static void emit_return(PjEmit *em, PLpgSQL_stmt_return *stmt);
+static void emit_raise(PjEmit *em, PLpgSQL_stmt_raise *stmt);
+static const char *raise_string(PjEmit *em, const char *str);
+static void raise_text(PjEmit *em, const char *text);
+static void raise_param(PjEmit *em, PLpgSQL_expr *expr);
 static void emit_body(PjEmit *em, List *body, int stmtid);
 static bool cond_may_raise(PjEmit *em);
 static bool may_raise(Node *node, void *context);
@@ -394,6 +400,26 @@ walk_stmt(PjScopeWalk *w, PLpgSQL_stmt *stmt)
 				return NULL;
 			}
 
+		case PLPGSQL_STMT_RAISE:
+			{
+				PLpgSQL_stmt_raise *raise = (PLpgSQL_stmt_raise *) stmt;
+
+				if (raise->options != NIL)
+					return "statement:RAISE USING";
+				/* the value of a parameter is printed as it is */
+				foreach_ptr(PLpgSQL_expr, param, raise->params)
+					scope_expr(w, param, param, InvalidOid, -1);
+
+				/*
+				 * A message is sent, or an output function ran before a later
+				 * parameter that a deopt could run again; whether it is
+				 * silent is not for us to say.
+				 */
+				if (!raise_terminal(raise) || list_length(raise->params) > 1)
+					w->scope->has_notice = true;
+				return NULL;
+			}
+
 		default:
 			return psprintf("statement:%s", plllvm_pj_stmt_typename(stmt));
 	}
@@ -484,14 +510,35 @@ scope_expr(PjScopeWalk *w, const void *owner, PLpgSQL_expr *expr,
 }
 
 /*
- * Nothing after a RETURN, or an EXIT or CONTINUE with no condition, runs
+ * Nothing after a RETURN, a RAISE that raises, or an EXIT or CONTINUE with no
+ * condition, runs
  */
 static bool
 stmt_terminal(PLpgSQL_stmt *stmt)
 {
 	return stmt->cmd_type == PLPGSQL_STMT_RETURN ||
 		(stmt->cmd_type == PLPGSQL_STMT_EXIT &&
-		 ((PLpgSQL_stmt_exit *) stmt)->cond == NULL);
+		 ((PLpgSQL_stmt_exit *) stmt)->cond == NULL) ||
+		(stmt->cmd_type == PLPGSQL_STMT_RAISE &&
+		 raise_terminal((PLpgSQL_stmt_raise *) stmt));
+}
+
+/*
+ * RAISE at ERROR does not return, and neither does one with nothing to raise,
+ * which re-throws the error of a handler: a function with no EXCEPTION block
+ * has none.
+ */
+static bool
+raise_terminal(PLpgSQL_stmt_raise *stmt)
+{
+	return stmt->elog_level >= ERROR || raise_bare(stmt);
+}
+
+static bool
+raise_bare(PLpgSQL_stmt_raise *stmt)
+{
+	return stmt->condname == NULL && stmt->message == NULL &&
+		stmt->options == NIL;
 }
 
 /*
@@ -621,6 +668,7 @@ plllvm_pj_harvest(PLpgSQL_function *func, const PjScope *scope, PjHarvest *h)
 	oldcxt = MemoryContextSwitchTo(h->cxt);
 	/* then a copy of its statement's for each expression, naming it */
 	h->nbase = scope->npos;
+	h->has_notice = scope->has_notice;
 	h->npos = scope->npos + list_length(scope->exprs);
 	h->pos = palloc_array(PjPos, h->npos);
 	memcpy(h->pos, scope->pos, sizeof(PjPos) * scope->npos);
@@ -761,6 +809,10 @@ harvest_expr(PLpgSQL_function *func, PjHarvest *h, PjEnv *env, PjExpr *pe,
 		MemoryContextSwitchTo(oldcxt);
 	}
 	funcs_walker((Node *) tree, funcs);
+
+	/* a RAISE parameter has no target */
+	if (pe->dsttype == InvalidOid)
+		return NULL;
 
 	if (pe->type == pe->dsttype &&
 		(pe->typmod == pe->dsttypmod || pe->dsttypmod == -1))
@@ -1365,11 +1417,11 @@ plllvm_pj_emit(PLpgSQL_function *func, PjHarvest *h, PjVariant *v)
 	}
 
 	/*
-	 * Once the executor or any callee has run, a call cannot start again in
-	 * the interpreter (a callee may send a message or run SQL, whatever it
-	 * is), so code that runs them has no deopt point.
+	 * Once the executor, any callee or a message has run, a call cannot start
+	 * again in the interpreter (a callee may send a message or run SQL,
+	 * whatever it is), so code that runs them has no deopt point.
 	 */
-	if ((has_boxed || has_calls) && h->nunplanned > 0)
+	if ((has_boxed || has_calls || h->has_notice) && h->nunplanned > 0)
 		return PJ_EMIT_WAITING;
 
 	plllvm_jit_session_ensure();
@@ -1487,7 +1539,7 @@ plllvm_pj_emit(PLpgSQL_function *func, PjHarvest *h, PjVariant *v)
 	v->code = (PjCode) result.mod->addr;
 	v->native = has_compiled;
 	v->boxed = has_boxed;
-	v->restartable = !has_boxed && !has_calls;
+	v->restartable = !has_boxed && !has_calls && !h->has_notice;
 	return PJ_EMIT_OK;
 }
 
@@ -1548,6 +1600,9 @@ emit_stmt(PjEmit *em, PLpgSQL_stmt *stmt)
 			break;
 		case PLPGSQL_STMT_RETURN:
 			emit_return(em, (PLpgSQL_stmt_return *) stmt);
+			break;
+		case PLPGSQL_STMT_RAISE:
+			emit_raise(em, (PLpgSQL_stmt_raise *) stmt);
 			break;
 		default:
 			elog(ERROR, "unexpected statement type: %d", (int) stmt->cmd_type);
@@ -1930,6 +1985,134 @@ emit_return(PjEmit *em, PLpgSQL_stmt_return *stmt)
 }
 
 /*
+ * exec_stmt_raise() without options.  The message is built as it does: for
+ * each % in turn the parameter is evaluated, converted and its memory
+ * released, so the effects of the parameters and of their output functions
+ * come in its order, and the message is formatted whether anybody will
+ * receive it or not.  An error of an expression names that expression; the
+ * conversion and the message are the statement's, since the interpreter has
+ * marked no expression by then.
+ */
+static void
+emit_raise(PjEmit *em, PLpgSQL_stmt_raise *stmt)
+{
+	plllvm_ir  *ir = em->ir;
+	int			sqlstate = 0;
+	const char *fixed = "null";
+
+	if (raise_bare(stmt))
+	{
+		plllvm_ir_declare(ir, "declare void @plllvm_pj_raise_bare()");
+		plllvm_ir_emit(ir, "call void @plllvm_pj_raise_bare()");
+		plllvm_ir_emit(ir, "unreachable");
+		em->open = false;
+		return;
+	}
+
+	if (stmt->condname != NULL)
+		sqlstate = plllvm_pj_err_condition(stmt->condname);
+	if (sqlstate == 0 && stmt->elog_level >= ERROR)
+		sqlstate = ERRCODE_RAISE_EXCEPTION;
+
+	if (stmt->message == NULL)
+		fixed = raise_string(em, stmt->condname);
+	else
+	{
+		ListCell   *param = list_head(stmt->params);
+		StringInfoData lit;
+
+		if (param != NULL)
+		{
+			plllvm_ir_declare(ir, "declare void @plllvm_pj_raise_start(ptr)");
+			plllvm_ir_emit(ir, "call void @plllvm_pj_raise_start(ptr %%ctx)");
+		}
+
+		/* the text between the placeholders, with %% as % */
+		initStringInfo(&lit);
+		for (const char *cp = stmt->message; *cp; cp++)
+		{
+			if (cp[0] != '%')
+				appendStringInfoChar(&lit, cp[0]);
+			else if (cp[1] == '%')
+			{
+				appendStringInfoChar(&lit, '%');
+				cp++;
+			}
+			else
+			{
+				raise_text(em, lit.data);
+				resetStringInfo(&lit);
+				raise_param(em, lfirst(param));
+				param = lnext(stmt->params, param);
+			}
+		}
+		if (stmt->params == NIL)
+			fixed = raise_string(em, lit.data);
+		else
+			raise_text(em, lit.data);
+	}
+
+	plllvm_ir_declare(ir, "declare void @plllvm_pj_raise(ptr, i32, i32, ptr)");
+	plllvm_ir_emit(ir,
+				   "call void @plllvm_pj_raise(ptr %%ctx, i32 %d, i32 %d, ptr %s)",
+				   stmt->elog_level, sqlstate, fixed);
+	if (stmt->elog_level >= ERROR)
+	{
+		plllvm_ir_emit(ir, "unreachable");
+		em->open = false;
+	}
+}
+
+/* a string of the harvest, as an operand */
+static const char *
+raise_string(PjEmit *em, const char *str)
+{
+	return psprintf("inttoptr (i64 " UINT64_FORMAT " to ptr)",
+					(uint64) (uintptr_t) MemoryContextStrdup(em->h->cxt, str));
+}
+
+static void
+raise_text(PjEmit *em, const char *text)
+{
+	if (text[0] == '\0')
+		return;
+	plllvm_ir_declare(em->ir, "declare void @plllvm_pj_raise_text(ptr, ptr)");
+	plllvm_ir_emit(em->ir, "call void @plllvm_pj_raise_text(ptr %%ctx, ptr %s)",
+				   raise_string(em, text));
+}
+
+/*
+ * The next parameter of a RAISE: evaluate it, print it, and only then let the
+ * memory of the evaluation go, since the value may live in it
+ */
+static void
+raise_param(PjEmit *em, PLpgSQL_expr *expr)
+{
+	plllvm_ir  *ir = em->ir;
+	PjExpr	   *pe = list_nth(em->h->exprs, em->next_expr);
+	const char *datum;
+	const char *isnull;
+
+	em->hold_reset = true;
+	expr_value(em, expr, &datum, &isnull);
+	em->hold_reset = false;
+
+	/* pe->pos is the statement's */
+	if (em->cur != pe->pos)
+		set_pos(em, pe->pos);
+	plllvm_ir_declare(ir, "declare void @plllvm_pj_raise_param(ptr, i64, i1, i32)");
+	plllvm_ir_emit(ir, "call void @plllvm_pj_raise_param(ptr %%ctx, i64 %s, i1 %s, i32 %d)",
+				   datum, isnull, (int32) pe->type);
+
+	if (em->reset_held)
+	{
+		plllvm_ir_declare(ir, "declare void @plllvm_pj_boxed_reset(ptr)");
+		plllvm_ir_emit(ir, "call void @plllvm_pj_boxed_reset(ptr %%ctx)");
+		em->reset_held = false;
+	}
+}
+
+/*
  * The next expression of the walk, as a Datum and a null flag.  An
  * expression that is not planned yet leaves the call to the interpreter.
  */
@@ -2262,8 +2445,13 @@ stmt_enter(PjEmit *em, PLpgSQL_stmt *stmt)
 {
 	int			index = stmt->stmtid;
 
-	/* the statement's first expression names the position of both */
-	if (em->next_expr < list_length(em->h->exprs) &&
+	/*
+	 * The statement's first expression names the position of both, but not
+	 * for a RAISE: its parameters are evaluated and printed one by one, and
+	 * only an error of the expression itself names it.
+	 */
+	if (stmt->cmd_type != PLPGSQL_STMT_RAISE &&
+		em->next_expr < list_length(em->h->exprs) &&
 		((PjExpr *) list_nth(em->h->exprs, em->next_expr))->pos == stmt->stmtid)
 		index = em->h->nbase + em->next_expr;
 	set_pos(em, index);
