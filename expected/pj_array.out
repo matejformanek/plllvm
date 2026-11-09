@@ -696,7 +696,8 @@ SELECT CASE WHEN :'dd'::bool THEN true
 
 SELECT pj_expect('pa_transfer(int,int)', 'compiled') \gset
 -- an array that no assignment targets is read-only in every expression, in
--- the first slot of the function as in any other
+-- the first slot of the function as in any other.  A regression pin: a
+-- default of 0 for the read/write datum is an equivalent mutant
 CREATE FUNCTION pa_ro0(a int[], k int) RETURNS text LANGUAGE :pj_lang AS $$
 DECLARE b int[];
 BEGIN

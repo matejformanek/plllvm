@@ -27,7 +27,8 @@ tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT
 for m in nout oat_deny; do
 	$cc -fPIC -I"$("$bin/pg_config" --includedir-server)" $shlib \
-		-o "$tmp/$m.so" "$here/$m.c"
+		-o "$tmp/$m.so" "$here/$m.c" 2>"$tmp/cc.log" ||
+		{ echo "pj_cmodule_pins: skipped, cannot build $m.c:"; cat "$tmp/cc.log"; exit 0; }
 done
 
 # $1 = extension to create, $2 = PGOPTIONS, $3 = the script

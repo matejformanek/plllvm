@@ -1,6 +1,6 @@
 /*
  * A by-value type whose output function sends a NOTICE, and fails on 0, for
- * pj_raise_effect.sh
+ * pj_cmodule_pins.sh
  */
 #include "postgres.h"
 #include "fmgr.h"
