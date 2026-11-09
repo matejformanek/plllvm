@@ -228,7 +228,9 @@ the type of its target only by a widening (`int4` to `int8` or `float8`,
 `int8` to `float8`, `int4` and `int8` to `numeric`), a pinned relabeling
 (`name` to `text` calls its function), or, for a constant, a conversion made
 when the function is translated; a `varchar(n)` or `numeric(p,s)` default
-declines. An expression that PL/pgSQL has not
+declines, while an assignment to such a variable runs the coercion inside
+its own expression, so its error is raised from compiled code with the
+SQLSTATE and CONTEXT of PL/pgSQL. An expression that PL/pgSQL has not
 planned yet, as the branch that a first call did not reach, sends the call
 back to PL/pgSQL, and the function is translated again once it is planned;
 if the function has expressions for the executor, it runs in PL/pgSQL until

@@ -726,6 +726,7 @@ harvest_expr(PLpgSQL_function *func, PjHarvest *h, PjEnv *env, PjExpr *pe,
 	{
 		Const	   *c = (Const *) tree;
 
+		/* a constant of a type passed by reference is copied at the store */
 		move = c->constisnull || c->constbyval || byref_type(c->consttype);
 		null_const = c->constisnull;
 	}
@@ -2117,9 +2118,9 @@ store_var(PjEmit *em, int dno, const char *datum, const char *isnull)
 }
 
 /*
- * The value of an expression into a variable passed by reference: a copy of
- * its own, the old one freed if it is one of ours (exec_assign_value).  What
- * the evaluation allocated is reset only now, as the value lives there.
+ * The value of an expression into a variable passed by reference
+ * (plllvm_pj_assign).  What the evaluation allocated is reset only now, as
+ * the value lives there.
  */
 static void
 assign_var(PjEmit *em, PLpgSQL_var *var, const char *datum, const char *isnull,
@@ -2132,14 +2133,16 @@ assign_var(PjEmit *em, PLpgSQL_var *var, const char *datum, const char *isnull,
 	const char *value = plllvm_ir_tmp(ir);
 	const char *kept = plllvm_ir_tmp(ir);
 
-	plllvm_ir_declare(ir, "declare i64 @plllvm_pj_assign(ptr, i64, i1, i64, i1, i32)");
+	plllvm_ir_declare(ir,
+					  "declare i64 @plllvm_pj_assign(ptr, i64, i1, i64, i1, i32)");
 
 	/* the copy can fail: the error is the statement's, not the expression's */
 	if (evaluated)
 		set_pos(em, ((PjExpr *) list_nth(em->h->exprs, em->next_expr - 1))->pos);
 	plllvm_ir_emit(ir, "%s = load i64, ptr %%v%d", old, dno);
 	plllvm_ir_emit(ir, "%s = load i1, ptr %%o%d", owned, dno);
-	plllvm_ir_emit(ir, "%s = call i64 @plllvm_pj_assign(ptr %%ctx, i64 %s, i1 %s, i64 %s, i1 %s, i32 %d)",
+	plllvm_ir_emit(ir,
+				   "%s = call i64 @plllvm_pj_assign(ptr %%ctx, i64 %s, i1 %s, i64 %s, i1 %s, i32 %d)",
 				   value, old, owned, datum, isnull, var->datatype->typlen);
 	plllvm_ir_emit(ir, "store i64 %s, ptr %%v%d", value, dno);
 	plllvm_ir_emit(ir, "store i1 %s, ptr %%n%d", isnull, dno);
@@ -2154,7 +2157,7 @@ assign_var(PjEmit *em, PLpgSQL_var *var, const char *datum, const char *isnull,
 	}
 }
 
-/* a NOT NULL variable takes no NULL (exec_assign_value) */
+/* a NOT NULL variable takes no NULL (exec_assign_value()) */
 static void
 check_not_null(PjEmit *em, PLpgSQL_var *var, const char *isnull)
 {

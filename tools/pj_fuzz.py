@@ -788,7 +788,8 @@ class RefCat:
         self.run = run_sql
         self.cache = {}
         self.oid = {t: int(run_sql("SELECT '%s'::regtype::oid" % t)[0])
-                    for t in ("text", "numeric", "integer", "boolean", "name")}
+                    for t in ("text", "numeric", "integer", "boolean", "name",
+                              "character varying")}
 
     def _one(self, key, q):
         if key not in self.cache:
@@ -996,6 +997,8 @@ class RefGen:
             return e
         bit = self.nbit
         self.nbit += 1
+        for op in (">>", "&", "="):
+            self.use(c.op("integer", op, "integer"))
         return "(COALESCE(%s, false) IS DISTINCT FROM ((sel >> %d) & 1 = 1))" % (e, bit)
 
     def value(self, ty, d=2):
@@ -1026,7 +1029,17 @@ class RefGen:
             e = o["name"] if o else self.text(1)
         else:
             e = self.value(ty)
+        self.note_typmod(v)
         return {"k": "assign", "v": v["name"], "e": e}
+
+    def note_typmod(self, v):
+        """The coercion function of an assignment to varchar(n) or numeric(p,s)
+        is in the tree, and a role without it is refused."""
+        decl = v.get("decl", "")
+        if decl.startswith("varchar("):
+            self.use(self.cat.fn("varchar", "character varying", "integer", "boolean"))
+        elif decl.startswith("numeric("):
+            self.use(self.cat.fn("numeric", "numeric", "integer"))
 
     def stmts(self, depth, n):
         return [self.stmt(depth) for _ in range(n)]
@@ -1117,6 +1130,7 @@ class RefGen:
         notnull = d is not None and d != "NULL" and r.random() < 0.1
         self.nvar += 1
         v = {"name": "v%d" % self.nvar, "ty": ty, "assign": True, "decl": decl}
+        self.note_typmod(v)
         self.scope.append(v)
         if decl == "name":
             v["ty"] = "text"

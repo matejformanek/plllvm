@@ -444,9 +444,9 @@ check-pj-ir: port-ok
 
 # The differential fuzzer: N programs from SEED, as plpgsql and as plpgsql_jit
 # at opt level 0 and 2, NREC recursive ones and NREF over text and numeric,
-# in the throwaway database pj_fuzz.  A difference is
-# reported by seed, with the program and both outputs in results-fuzz/.  Not part of
-# installcheck or verify.
+# in the throwaway database pj_fuzz.  A difference is reported by seed, with
+# the program and both outputs in results-fuzz/.  Not part of installcheck or
+# verify.
 N ?= 2000
 NREC ?= 500
 NREF ?= 500

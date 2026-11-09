@@ -1,5 +1,6 @@
 --
--- pj_byref: variables of types passed by reference
+-- pj_byref: variables of types passed by reference (arguments, locals,
+-- results); compiled, each gives the answer of PL/pgSQL
 --
 \getenv pj_lang PJ_LANG
 \if :{?pj_lang}
@@ -142,6 +143,24 @@ SELECT pr_grow_block(10) IS NOT NULL;
 SELECT pr_grow_block(10) IS NOT NULL;
 SELECT pr_grow_block(200000) < 1048576 AS flat_block;
 SELECT pj_expect('pr_grow_block(int)', 'compiled') \gset
+
+-- and across calls: the copies of a call are gone when the next one starts, so
+-- a per-row function does not grow the transaction
+CREATE FUNCTION pr_cross(k int) RETURNS int LANGUAGE :pj_lang IMMUTABLE AS $$
+DECLARE t text := repeat('x', 3000 + k % 7); u text;
+BEGIN
+  u := t || k::text;
+  RETURN length(u);
+END $$;
+SELECT sum(pr_cross(g)) FROM generate_series(1, 10) g;
+SELECT sum(pr_cross(g)) FROM generate_series(1, 10) g;
+BEGIN;
+SELECT sum(pr_cross(g)) FROM generate_series(1, 2000) g;
+SELECT pr_mem() AS m0 \gset
+SELECT sum(pr_cross(g)) FROM generate_series(1, 20000) g;
+SELECT pr_mem() - :m0 < 1048576 AS flat_across_calls;
+COMMIT;
+SELECT pj_expect('pr_cross(int)', 'compiled') \gset
 
 -- a local passed down a recursion; the callee assigns its argument
 CREATE FUNCTION pr_rec(n int, s text) RETURNS text LANGUAGE :pj_lang IMMUTABLE AS $$

@@ -196,7 +196,11 @@ Only `plllvm_jit.c` and `plllvm_error.cpp` include LLVM headers.
   `pg_cast` row; or, for a constant, a
   conversion of built-in immutable functions that runs when the function is
   translated (an error there declines the function). Any other cast declines
-  (`cast`), so a cast error always comes from PL/pgSQL's own code. A domain
+  (`cast`), so the cast of a default or a RETURN that fails is PL/pgSQL's own.
+  The coercion of `:=` to `varchar(n)` or `numeric(p,s)` is a function in the
+  assignment's own expression: it runs as a callee and raises from compiled
+  code with PL/pgSQL's SQLSTATE and CONTEXT, and a caught error marks the
+  expression as any. A domain
   is never a target: a variable of a domain type declines the function.
 * A variable of a built-in base type passed by reference (not an array,
   composite, domain or `refcursor`) has a slot of three parts: the Datum, a
@@ -204,8 +208,7 @@ Only `plllvm_jit.c` and `plllvm_error.cpp` include LLVM headers.
   the flag is false and it is never freed. An assignment copies the value
   into the datum context of the activation level (`datum_cxt`, under the
   level's context, reset when a call first uses the level), then frees the
-  old copy if it is ours, as `exec_assign_value()` does; the copy comes
-  first because the value may be the old one. What the evaluation allocated
+  old copy if it is ours (`plllvm_pj_assign()`). What the evaluation allocated
   is reset only after that, as the value lives in it. A block frees its
   variables at entry and starts them NULL. A bare constant or variable is
   moved without the executor, and a constant cast to such a type is folded

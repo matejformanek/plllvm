@@ -1,6 +1,7 @@
 --
 -- pj_udf: per-row functions over numeric and text columns, of the shapes of
--- the bench's line_net and of a word counter and an instr
+-- the bench's line_net and of a word counter and an instr; compiled, each
+-- gives the answer of PL/pgSQL
 --
 \getenv pj_lang PJ_LANG
 \if :{?pj_lang}
@@ -97,7 +98,8 @@ SELECT pj_delta(NULL, NULL, NULL, 0, 0) \gset
 SELECT pj_expect('pu_words(varchar)', 'compiled') \gset
 SELECT id, pu_words(txt) FROM pu_rows WHERE id <= 8 ORDER BY id;
 
--- instr
+-- instr, as in the Oracle-compatible example of the PostgreSQL documentation
+-- (PostgreSQL licence)
 CREATE FUNCTION pu_instr(str varchar, sub varchar, beg integer) RETURNS integer
 LANGUAGE :pj_lang AS $$
 DECLARE
@@ -127,6 +129,7 @@ END
 $$;
 SELECT pu_instr('hello world', 'o', 1), pu_instr('hello world', 'o', 6), pu_instr('hello', 'z', 1);
 SELECT pu_instr('hello world', 'o', -1), pu_instr('hello world', 'l', -4), pu_instr('hello', 'z', -1);
+-- both branches and the loop's exits ran, so nothing is left to wait for
 SELECT pu_instr('hello world', 'o', 1), pu_instr('hello world', 'o', 6), pu_instr('hello', 'z', 1);
 SELECT pu_instr('hello world', 'o', -1), pu_instr('hello world', 'l', -4), pu_instr('hello', 'z', -1);
 SELECT pu_instr('hello world', 'o', 1), pu_instr('hello', 'z', -1);

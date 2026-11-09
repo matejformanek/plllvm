@@ -1,6 +1,7 @@
 --
 -- pj_udf: per-row functions over numeric and text columns, of the shapes of
--- the bench's line_net and of a word counter and an instr
+-- the bench's line_net and of a word counter and an instr; compiled, each
+-- gives the answer of PL/pgSQL
 --
 \getenv pj_lang PJ_LANG
 \if :{?pj_lang}
@@ -159,7 +160,8 @@ SELECT id, pu_words(txt) FROM pu_rows WHERE id <= 8 ORDER BY id;
   8 |        1
 (8 rows)
 
--- instr
+-- instr, as in the Oracle-compatible example of the PostgreSQL documentation
+-- (PostgreSQL licence)
 CREATE FUNCTION pu_instr(str varchar, sub varchar, beg integer) RETURNS integer
 LANGUAGE :pj_lang AS $$
 DECLARE
@@ -199,6 +201,7 @@ SELECT pu_instr('hello world', 'o', -1), pu_instr('hello world', 'l', -4), pu_in
         8 |        4 |        0
 (1 row)
 
+-- both branches and the loop's exits ran, so nothing is left to wait for
 SELECT pu_instr('hello world', 'o', 1), pu_instr('hello world', 'o', 6), pu_instr('hello', 'z', 1);
  pu_instr | pu_instr | pu_instr 
 ----------+----------+----------
