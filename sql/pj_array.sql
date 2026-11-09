@@ -38,20 +38,29 @@ SELECT pa_sum(v, 10), pa_sum(v, 100), pa_sum(v, 1000), pa_sum(v, 14285) FROM pa_
 SELECT pj_expect('pa_sum(float8[],int)', 'compiled') \gset
 SELECT pa_peak() < 65536 AS peak_small_arg;
 
--- an element store changes the array in place, it is not copied: the
--- per-tuple memory stays small for an array of 800 kB
+-- an element store changes the array in place, it is not copied: 4000
+-- stores in an array of 32 MB take milliseconds, a copy of each would not
+-- finish within the time given
 CREATE FUNCTION pa_store(n int) RETURNS float8 LANGUAGE :pj_lang AS $$
-DECLARE a float8[] := array_fill(1.5::float8, ARRAY[100000]); i int;
+DECLARE a float8[] := array_fill(1.5::float8, ARRAY[4000000]); i int;
 BEGIN
   FOR i IN 1..n LOOP
-    a[1 + i % 100000] := a[1 + i % 100000] + i;
+    a[1 + i % 4000000] := a[1 + i % 4000000] + i;
   END LOOP;
-  RETURN a[1] + a[100000] + a[7];
+  RETURN a[1] + a[4000000] + a[7];
 END $$;
 SELECT pa_store(10), pa_store(10);
-SELECT pa_store(20000);
+SET statement_timeout = '1s';
+SELECT pa_store(4000);
+RESET statement_timeout;
 SELECT pj_expect('pa_store(int)', 'compiled') \gset
-SELECT pa_peak() < 65536 AS peak_small;
+
+-- and its arrays are given up when the call ends
+BEGIN;
+SELECT pa_mem() AS m0 \gset
+SELECT pa_store(10);
+SELECT pa_mem() - :m0 < 65536 AS released;
+COMMIT;
 
 -- values: NULL elements, subscripts out of range, assignment past the ends,
 -- other lower bounds; the argument is not changed
@@ -262,6 +271,15 @@ CREATE FUNCTION pa_same(a int[]) RETURNS int[] LANGUAGE plpgsql STABLE AS $$
 BEGIN
   RETURN a;
 END $$;
+CREATE FUNCTION pa_give(a int[]) RETURNS int[] LANGUAGE plpgsql STABLE AS $$
+BEGIN
+  a := array_cat(a, ARRAY[7]);
+  RETURN a;
+END $$;
+CREATE FUNCTION pa_drop(a int[]) RETURNS int[] LANGUAGE plpgsql STABLE AS $$
+BEGIN
+  RETURN ARRAY[a[1], 5];
+END $$;
 CREATE FUNCTION pa_first(a int[]) RETURNS int LANGUAGE plpgsql STABLE AS $$
 BEGIN
   a[2] := 99;
@@ -275,14 +293,20 @@ BEGIN
     IF k = 1 THEN a := pa_take(a); END IF;
     IF k = 2 THEN a := pa_same(a); END IF;
     IF k = 3 THEN a := array_append(a, pa_first(a)); END IF;
+    IF k = 4 THEN a := pa_give(a); END IF;
+    IF k = 5 THEN a := pa_drop(a); END IF;
     a[3] := a[3] + a[1];
   END LOOP;
   RETURN a::text;
 END $$;
-SELECT pa_transfer(5, 0), pa_transfer(5, 1), pa_transfer(5, 2), pa_transfer(5, 3);
-SELECT pa_transfer(5, 0), pa_transfer(5, 1), pa_transfer(5, 2), pa_transfer(5, 3);
-SELECT pa_transfer(5, 1), pa_transfer(5, 2), pa_transfer(5, 3), pa_transfer(5, 0);
-SELECT pa_transfer(300, 1), pa_transfer(300, 2), pa_transfer(300, 3);
+SELECT pa_transfer(5, 0), pa_transfer(5, 1), pa_transfer(5, 2), pa_transfer(5, 3),
+       pa_transfer(5, 4), pa_transfer(5, 5);
+SELECT pa_transfer(5, 0), pa_transfer(5, 1), pa_transfer(5, 2), pa_transfer(5, 3),
+       pa_transfer(5, 4), pa_transfer(5, 5);
+SELECT pa_transfer(5, 5), pa_transfer(5, 4), pa_transfer(5, 3), pa_transfer(5, 2),
+       pa_transfer(5, 1), pa_transfer(5, 0);
+SELECT pa_transfer(200, 1), pa_transfer(200, 2), pa_transfer(30, 3),
+       pa_transfer(20, 4), pa_transfer(200, 5);
 SELECT pj_expect('pa_transfer(int,int)', 'compiled') \gset
 
 -- an array stored over itself, over another, and the old one freed

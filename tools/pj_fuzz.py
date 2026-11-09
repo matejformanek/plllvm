@@ -52,7 +52,8 @@ PL/pgSQL raised 42501, else MISMATCH, except that a step where PL/pgSQL raises
 after an earlier 42501 of plpgsql_jit in the same transaction, in a call
 that reaches a nested frame, is class stale-privilege.  XX000 or a lost connection is always a MISMATCH.
 --mode ref writes programs over text, varchar, numeric and integer variables,
-arguments and results, in the same steps as flat ones; a bit of the first
+arguments and results, and int4[] locals with element stores, appends,
+slices and subscripts past the ends, in the same steps as flat ones; a bit of the first
 argument inverts each condition, so that a few warm calls reach every branch.
 
 A third of the programs call f directly instead of through the wrapper.  The
@@ -876,6 +877,9 @@ class RefGen:
 
     def text(self, d):
         r = self.r
+        v = self.var("arr") if r.random() < 0.04 else None
+        if v:
+            return "COALESCE(%s::text, 'n')" % v["name"]
         if d <= 0 or r.random() < 0.25:
             v = self.var("text") if r.random() < 0.75 else None
             if v:
@@ -982,6 +986,9 @@ class RefGen:
                 return v["name"]
             return r.choice(REF_LITS["int4"])
         x = r.random()
+        v = self.var("arr") if r.random() < 0.1 else None
+        if v:
+            return "COALESCE(%s[%s], 7)" % (v["name"], self.subscript())
         if x < 0.4:
             self.use(c.fn("length", "text"))
             return "length(%s)" % self.text(d - 1)
@@ -1067,11 +1074,40 @@ class RefGen:
         elif decl.startswith("numeric("):
             self.use(self.cat.fn("numeric", "numeric", "integer"))
 
+    def subscript(self):
+        """A subscript of a small array: below, inside and past its ends."""
+        r = self.r
+        if r.random() < 0.6:
+            return r.choice(["1", "2", "3", "4", "0", "(-1)"])
+        for op in ("%", "+"):
+            self.use(self.cat.op("integer", op, "integer"))
+        return "(COALESCE(%s, 2) %% 4 + 1)" % self.int(1)
+
+    def arr_stmt(self):
+        """An element stored, an array appended to or rebuilt, a slice."""
+        r = self.r
+        a = self.var("arr")["name"]
+        x = r.random()
+        if x < 0.5:
+            return {"k": "assign", "v": "%s[%s]" % (a, self.subscript()),
+                    "e": self.int(1)}
+        if x < 0.65:
+            return {"k": "assign", "v": a, "e": "%s || %s" % (a, self.int(1))}
+        if x < 0.8:
+            return {"k": "assign", "v": a, "e": "ARRAY[%s, %s, %s]::int4[]" % (
+                self.int(1), self.int(1), self.int(0))}
+        if x < 0.9:
+            return {"k": "assign", "v": a, "e": "%s[%s:%s]" % (
+                a, self.subscript(), self.subscript())}
+        return {"k": "assign", "v": a, "e": a}
+
     def stmts(self, depth, n):
         return [self.stmt(depth) for _ in range(n)]
 
     def stmt(self, depth):
         r = self.r
+        if r.random() < 0.1 and self.var("arr") is not None:
+            return self.arr_stmt()
         x = r.random()
         if depth <= 0 or x < 0.4:
             return self.assign()
@@ -1144,8 +1180,19 @@ class RefGen:
         del self.scope[n:]
         return {"k": "block", "label": None, "decls": decls, "body": body}
 
+    def arr_decl(self):
+        r = self.r
+        d = r.choice(["'{}'", "'{1,2,3}'", "NULL", "ARRAY[%s, %s]::int4[]" % (
+            self.int(1), self.int(0))])
+        self.nvar += 1
+        v = {"name": "a%d" % self.nvar, "ty": "arr", "assign": False}
+        self.scope.append(v)
+        return (v["name"], "int4[]", False, False, d)
+
     def decl(self):
         r = self.r
+        if r.random() < 0.1:
+            return self.arr_decl()
         ty = r.choice(REF_POOL)
         decl = r.choice(REF_DECL[ty])
         d = None
