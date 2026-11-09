@@ -476,15 +476,22 @@ fuzz-pj: port-ok
 
 # The classes of the fuzzer on programs of known shape: seed 22:745 is
 # stale-privilege (L2), seed 21:597 frame-mix ((g)); and frame_mix refuses a
-# wrong value
+# wrong value.  setup() drops and recreates the fuzz database, so the
+# cluster must be a throwaway
 check-pj-fuzz: port-ok
+	@case "$(origin PLLLVM_PORT):$(PLLLVM_PORT)" in file:*|*:|*:544[2-5]) \
+	  echo "check-pj-fuzz needs the PLLLVM_PORT of a throwaway cluster" >&2; \
+	  exit 1;; esac
 	python3 -I tools/pj_fuzz.py --selftest
+	mkdir -p results-fuzz
 	python3 -I tools/pj_fuzz.py --psql '$(bindir)/psql' --host /tmp --port $(PLLLVM_PORT) \
-	  --seed 22 --start 745 --n 1 --opt-level 0 --out results-fuzz/unit | \
-	  tee /dev/stderr | grep -q 'stale-privilege=1 permissive=0 mismatch=0'
+	  --seed 22 --start 745 --n 1 --opt-level 0 --out results-fuzz/unit > results-fuzz/unit.log; \
+	  rc=$$?; cat results-fuzz/unit.log >&2; [ $$rc = 0 ] && \
+	  grep -q 'stale-privilege=1 permissive=0 mismatch=0' results-fuzz/unit.log
 	python3 -I tools/pj_fuzz.py --psql '$(bindir)/psql' --host /tmp --port $(PLLLVM_PORT) \
-	  --mode rec --seed 21 --start 597 --n 1 --opt-level 2 --out results-fuzz/unit | \
-	  tee /dev/stderr | grep -q 'frame-mix=1 history=0 stale-privilege=0 permissive=0'
+	  --mode rec --seed 21 --start 597 --n 1 --opt-level 2 --out results-fuzz/unit > results-fuzz/unit.log; \
+	  rc=$$?; cat results-fuzz/unit.log >&2; [ $$rc = 0 ] && \
+	  grep -q 'frame-mix=1 history=0 stale-privilege=0 permissive=0' results-fuzz/unit.log
 
 #
 # Every suite of a PR in order; the commit and each exit code go to

@@ -24,8 +24,9 @@ A step is one of
               role must really lack a function the body needs at that step,
               else it is a MISMATCH
   stale-privilege  plpgsql raises 42501 and plpgsql_jit does not, after a call
-              that plpgsql_jit refused with 42501 where plpgsql went on, and
-              plpgsql without that call answers as plpgsql_jit does (L2)
+              that plpgsql_jit refused with 42501 where plpgsql went on; it
+              is that only if plpgsql, run without the refused call, answers
+              as plpgsql_jit does (L2)
   PERMISSIVE  plpgsql raises 42501 and plpgsql_jit does not: a bug
   MISMATCH    anything else
 
@@ -48,7 +49,7 @@ plan_cache_mode = force_generic_plan or force_custom_plan, each step by
 itself, so that a history of one then the other is allowed, or a 42501 for
 the function the program revoked (stricter).  A step may also be a mix: an
 answer that one of the modes gives, with the effects (NOTICE and the like) of
-the custom plan as a subsequence of them and they of the generic plan's, as
+the custom plan as a prefix of them and they of the generic plan's, as
 frames that took the custom plan and frames that took the generic one give;
 the class is frame-mix.  Any other step is searched for a history: each call
 run by PL/pgSQL under auto, generic or custom, or not at all (only a call
@@ -1555,24 +1556,25 @@ def effects(lines):
     return ([l for l in lines if EFFECT.match(l)], [l for l in lines if not EFFECT.match(l)])
 
 
-def subseq(a, b):
-    it = iter(b)
-    return all(l in it for l in a)
+def prefix(a, b):
+    return b[:len(a)] == a
 
 
 def frame_mix(j, a, c, g):
     """Is the output j of plpgsql_jit what a recursion gets when some frames
-    take SPI's custom plan and others the generic one?  Its answer is that of
-    auto, custom or generic, and its effects lie between the custom plan's
-    and the generic plan's: those of custom are a subsequence of them, and
-    they a subsequence of those of generic.  A wrong value, or an effect that
-    no mode has, is not a mix."""
+    take SPI's custom plan and others the generic one?  A frame prints
+    before it recurses, so the effects of j are a prefix of generic's and
+    have custom's as a prefix.  The answer is generic's when j reaches the
+    last effect of generic, else that of auto or custom.  A wrong value, an
+    effect that no mode has or one dropped from the middle is not a mix."""
     if c is None or g is None:
         return False
     je, ja = effects(j)
     ce, ca = effects(c)
     ge, ga = effects(g)
-    return ja in (effects(a)[1], ca, ga) and subseq(ce, je) and subseq(je, ge)
+    if not (prefix(ce, je) and prefix(je, ge)):
+        return False
+    return ja == ga if len(je) == len(ge) else ja in (effects(a)[1], ca)
 
 
 def selftest():
@@ -1586,7 +1588,11 @@ def selftest():
            (n(4, 3, 2, 9) + ["N"], c, c, g),              # an effect no mode has
            (n(4, 2) + ["N"], c, c, g),                    # custom's effects lost
            (n(4, 3, 2, 1, 0, 0) + ["N"], c, c, g),        # more than generic's
-           (n(4, 3, 2) + ["ERROR:  22003: x"], c, c, g)]  # an error no mode raises
+           (n(4, 3, 2) + ["ERROR:  22003: x"], c, c, g),  # an error no mode raises
+           (n(4, 3, 1) + ["N"], c, c, g),                 # a middle effect dropped
+           (n(4, 3, 0) + ["N"], c, c, g),
+           (n(4, 3, 2, 1, 0) + ["N"], c, c, g),           # generic's effects, custom's value
+           (n(4, 3) + ["ERROR:  22012: division by zero"], c, c, g)]  # the reverse
     assert all(frame_mix(*t) for t in ok), "frame-mix refused a mix"
     assert not any(frame_mix(*t) for t in bad), "frame-mix accepted a mutant"
     print("pj_fuzz: selftest ok")
@@ -1799,7 +1805,10 @@ def compare(args, prog, a, b, tally):
     A PERMISSIVE step after calls that plpgsql_jit refused with 42501 where
     plpgsql went on is looked up in a run of plpgsql without those calls (L2):
     if plpgsql then answers as plpgsql_jit does, the program is
-    stale-privilege, and the comparison goes on against that run."""
+    stale-privilege, and the comparison goes on against that run, which
+    hides a mask of later steps: they are counted as replay-steps.  Leaving
+    out a refused call is exact only for a refusal at entry (E1), where the
+    call did nothing before it; a refusal further in is not modelled."""
     sa, sb = split(a, SCHEMAS["plpgsql"]), split(b, SCHEMAS["plpgsql_jit"])
     verdict, first = "equal", None
     refused, skip = [], set()
@@ -1809,6 +1818,8 @@ def compare(args, prog, a, b, tally):
         if i in prog.real:
             tally["walk-calls"] += 1
             tally["walk-calls-aborted"] += any("25P02" in l for l in x)
+        if skip and i not in skip:
+            tally["replay-steps"] += 1
         if i in skip or x == y:
             i += 1
             continue
@@ -1825,6 +1836,7 @@ def compare(args, prog, a, b, tally):
                 return "PERMISSIVE", i
             sa = replay_without(args, prog, set(refused))
             skip = set(refused)
+            tally["replay-steps"] += 1
             if [l for l in sa.get(str(i), []) if not EXPRCTX.match(l)] != y2:
                 return "PERMISSIVE", i
             verdict, first = "stale-privilege", i
@@ -1922,8 +1934,9 @@ def main():
           % (tally["stock-42501"], tally["jit-42501"], tally["stricter-steps"],
              tally["allowed-context"]))
     print("pj_fuzz: walk programs %d, their calls %d, of which %d after the "
-          "transaction aborted in plpgsql"
-          % (tally["walk-programs"], tally["walk-calls"], tally["walk-calls-aborted"]))
+          "transaction aborted in plpgsql; steps compared against the replay %d"
+          % (tally["walk-programs"], tally["walk-calls"], tally["walk-calls-aborted"],
+             tally["replay-steps"]))
     for k, v in reasons.most_common(12):
         print("  not compiled: %5d  %s" % (v, k))
     if comp < args.floor * args.n:
