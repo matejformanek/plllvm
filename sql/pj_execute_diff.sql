@@ -318,5 +318,74 @@ GRANT EXECUTE ON FUNCTION int4pl(int4, int4), int4div(int4, int4) TO PUBLIC;
 DROP OWNED BY regress_pj_pown;
 DROP ROLE regress_pj_pown;
 
+-- an overflow in the typmod cast of a numeric, caught: compiled code leaves no
+-- mark in the cast state of PL/pgSQL, which a failed cast leaves to be built
+-- again, and checked again, at its next use.  The role that lost the function
+-- since passes the interpreter's reach of the cast (PL/pgSQL: 42501)
+CREATE ROLE regress_pj_r3;
+CREATE FUNCTION pdd_t(x numeric) RETURNS numeric LANGUAGE plpgsql_jit AS $$
+DECLARE n numeric(5,2) := x;
+BEGIN RETURN n; END $$;
+SELECT pdd_t(1.5), pdd_t(2.5), pdd_t(3.5);
+SELECT pj_expect('pdd_t(numeric)', 'compiled') \gset
+REVOKE EXECUTE ON FUNCTION "numeric"(numeric, int4) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION "numeric"(numeric, int4) TO regress_pj_r3;
+BEGIN;
+SET ROLE regress_pj_r3;
+SELECT pdd_t(NULL) IS NULL;
+SAVEPOINT s;
+SELECT pdd_t(1000);  -- fail
+ROLLBACK TO s;
+RESET ROLE;
+SELECT pj_expect('pdd_t(numeric)', 'compiled') \gset
+REVOKE EXECUTE ON FUNCTION "numeric"(numeric, int4) FROM regress_pj_r3;
+SET ROLE regress_pj_r3;
+SAVEPOINT s;
+SELECT pdd_t(2.5);
+ROLLBACK TO s;
+RESET ROLE;
+SELECT pj_expect('pdd_t(numeric)', 'interpreted:execute') \gset
+ROLLBACK;
+GRANT EXECUTE ON FUNCTION "numeric"(numeric, int4) TO PUBLIC;
+DROP OWNED BY regress_pj_r3;
+DROP ROLE regress_pj_r3;
+
+-- the switch of the language turned off in the middle of a compiled call: the
+-- inner frames go to PL/pgSQL without a lookup, and nothing marks the
+-- expression the outer frame runs, so a nested SECURITY DEFINER frame whose
+-- owner lacks int4pl reaches the state that the interpreted call built before
+-- it.  PL/pgSQL: 42501, its outer frame being busy in the expression.
+CREATE ROLE regress_pj_own;
+CREATE FUNCTION pdd_ks(n int) RETURNS int LANGUAGE plpgsql STABLE SECURITY DEFINER AS $$
+BEGIN
+  IF n = 2 THEN PERFORM set_config('plllvm.plpgsql_jit', 'off', true); END IF;
+  RETURN 0;
+END $$;
+CREATE FUNCTION pdd_k(n int, m int) RETURNS int LANGUAGE plpgsql_jit STABLE AS $$
+BEGIN
+  IF n <= 0 THEN RETURN m; END IF;
+  RETURN pdd_ks(n) + pdd_kw(n - 1, m);
+END $$;
+CREATE FUNCTION pdd_kw(n int, m int) RETURNS int LANGUAGE plpgsql STABLE SECURITY DEFINER AS $$
+BEGIN RETURN pdd_k(n, m); END $$;
+ALTER FUNCTION pdd_kw(int, int) OWNER TO regress_pj_own;
+SELECT pdd_k(1, 2), pdd_k(1, 2), pdd_k(1, 2);
+SELECT pj_expect('pdd_k(int,int)', 'compiled') \gset
+REVOKE EXECUTE ON FUNCTION int4pl(int4, int4) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION int4pl(int4, int4) TO regress_pj_r1;
+BEGIN;
+SET ROLE regress_pj_r1;
+SELECT pdd_k(1, NULL) IS NULL;
+SAVEPOINT s;
+SELECT pdd_k(2, 5);
+ROLLBACK TO s;
+RESET ROLE;
+ROLLBACK;
+SELECT pj_expect('pdd_k(int,int)', 'compiled') \gset
+GRANT EXECUTE ON FUNCTION int4pl(int4, int4) TO PUBLIC;
+DROP FUNCTION pdd_k(int, int), pdd_kw(int, int), pdd_ks(int);
+DROP OWNED BY regress_pj_own;
+DROP ROLE regress_pj_own;
+
 DROP OWNED BY regress_pj_r1, regress_pj_grp;
 DROP ROLE regress_pj_r1, regress_pj_grp;
