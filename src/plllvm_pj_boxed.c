@@ -33,6 +33,7 @@
 #include "miscadmin.h"
 #include "tcop/pquery.h"
 #include "utils/acl.h"
+#include "utils/datum.h"
 #include "utils/lsyscache.h"
 #include "utils/memutils.h"
 #include "utils/snapmgr.h"
@@ -121,6 +122,32 @@ plllvm_pj_boxed_reset(PjCtx *ctx)
 }
 
 /*
+ * Assign the value of an expression to a variable passed by reference, as
+ * exec_assign_value() does: a copy of its own, the old one freed if it is a
+ * copy of ours (an argument is the caller's).  The copy comes first, since
+ * the value may be the old one.  Returns the Datum the variable holds.
+ */
+Datum
+plllvm_pj_assign(PjCtx *ctx, Datum old, bool owned, Datum value, bool isnull,
+				 int32 typlen)
+{
+	Datum		result = (Datum) 0;
+
+	if (!isnull)
+	{
+		PjLevel    *lv = plllvm_pj_level(ctx);
+		MemoryContext oldcxt = MemoryContextSwitchTo(lv->datum_cxt);
+
+		result = datumCopy(value, false, typlen);
+		MemoryContextSwitchTo(oldcxt);
+	}
+	if (owned)
+		pfree(DatumGetPointer(old));
+
+	return result;
+}
+
+/*
  * After an expression with sites ran, as the executor of an evaluation does:
  * check EXECUTE again, since the callee may have run user code, and free what the evaluation
  * allocated once its value is out.  The result of a RETURN is not reset: the
@@ -181,6 +208,7 @@ plllvm_pj_level(PjCtx *ctx)
 	if (lv->serial != ctx->serial)
 	{
 		level_reset(lv);
+		MemoryContextReset(lv->datum_cxt);
 		lv->serial = ctx->serial;
 	}
 
@@ -206,6 +234,8 @@ level_build(PjLevel *lv, PjHarvest *h)
 								"plllvm - pj level",
 								ALLOCSET_SMALL_SIZES);
 	econtext = CreateExprContext(xact_estate);
+	lv->datum_cxt = AllocSetContextCreate(cxt, "plllvm - pj datums",
+										  ALLOCSET_SMALL_SIZES);
 
 	oldcxt = MemoryContextSwitchTo(cxt);
 	params = makeParamList(h->ndatums);
@@ -230,6 +260,7 @@ static void
 level_forget(PjLevel *lv)
 {
 	lv->cxt = NULL;
+	lv->datum_cxt = NULL;
 	lv->econtext = NULL;
 	lv->params = NULL;
 	lv->slots = NULL;

@@ -67,14 +67,14 @@ SELECT p.proname, s.state, s.reason, s.last_path, s.calls, s.compiled_calls,
  proname |  state   |     reason      |        last_path         | calls | compiled_calls | translations 
 ---------+----------+-----------------+--------------------------+-------+----------------+--------------
  ps_cast | declined | cast            | declined:cast            |     2 |              0 |            0
- ps_decl | declined | datum:numeric   | declined:datum:numeric   |     2 |              0 |            0
+ ps_decl | declined | cast            | declined:cast            |     2 |              0 |            0
  ps_exc  | declined | exception block | declined:exception block |     2 |              0 |            0
  ps_if   | declined | statement:CASE  | declined:statement:CASE  |     2 |              0 |            0
  ps_inc  | compiled |                 | compiled                 |     2 |              1 |            1
  ps_poly | declined | signature       | declined:signature       |     2 |              0 |            0
  ps_rnd  | declined | volatile callee | declined:volatile callee |     2 |              0 |            0
  ps_sub  | declined | not simple      | declined:not simple      |     2 |              0 |            0
- ps_text | declined | datum:text      | declined:datum:text      |     2 |              0 |            0
+ ps_text | compiled |                 | compiled                 |     2 |              1 |            1
  ps_user | compiled |                 | compiled                 |     2 |              1 |            1
 (10 rows)
 
@@ -101,7 +101,8 @@ SELECT kind, translate_ms > 0 AS translate_ms, ir_instructions > 0 AS ir
 ------+--------------+----
  pj   | t            | t
  pj   | t            | t
-(2 rows)
+ pj   | t            | t
+(3 rows)
 
 -- the symbol links the code to its function; a declined one has none
 SELECT s.symbol IS NOT NULL AS has_symbol,
@@ -231,9 +232,10 @@ SELECT opt_level, kind FROM plllvm_code_cache() WHERE kind = 'pj' AND NOT retire
          2 | pj
          2 | pj
          2 | pj
+         2 | pj
          0 | pj
          3 | pj
-(5 rows)
+(6 rows)
 
 -- a variant that fails to compile is marked, the others run
 CREATE FUNCTION ps_mul(n int) RETURNS int LANGUAGE plpgsql_jit AS $$

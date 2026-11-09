@@ -215,7 +215,7 @@ SELECT pb_i2mul(3::int2), pb_num(4), pb_f8k();
 SELECT pb_i2mul(3::int2), pb_num(4), pb_f8k();
 SELECT pb_i2mul(3::int2), pb_num(4), pb_f8k();
 SELECT pj_expect('pb_i2mul(int2)', 'declined:cast') \gset
-SELECT pj_expect('pb_num(int)', 'declined:cast') \gset
+SELECT pj_expect('pb_num(int)', 'compiled') \gset
 -- a constant converts when the function is translated
 SELECT pj_expect('pb_f8k()', 'compiled') \gset
 
@@ -265,7 +265,7 @@ CALL pb_proc(1);
 SELECT pj_expect('pb_if(int)', 'compiled') \gset
 SELECT pj_expect('pb_decl(int)', 'compiled') \gset
 SELECT pj_expect('pb_exc(int)', 'declined:exception block') \gset
-SELECT pj_expect('pb_text(text)', 'declined:datum:text') \gset
+SELECT pj_expect('pb_text(text)', 'compiled') \gset
 SELECT pj_expect('pb_poly(anyelement)', 'declined:signature') \gset
 SELECT pj_expect('pb_out(int)', 'declined:signature') \gset
 SELECT pj_expect('pb_set1(int)', 'declined:signature') \gset

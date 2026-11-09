@@ -102,6 +102,8 @@ struct PjCtx;
 extern void *plllvm_pj_params(struct PjCtx *ctx);
 extern Datum plllvm_pj_boxed_eval(struct PjCtx *ctx, int32 idx);
 extern void plllvm_pj_boxed_reset(struct PjCtx *ctx);
+extern Datum plllvm_pj_assign(struct PjCtx *ctx, Datum old, bool owned,
+							  Datum value, bool isnull, int32 typlen);
 
 /*
  * A call of a function from compiled code, for plllvm_pj_invoke(): the
