@@ -213,8 +213,23 @@ Only `plllvm_jit.c` and `plllvm_error.cpp` include LLVM headers.
   variables at entry and starts them NULL. A bare constant or variable is
   moved without the executor, and a constant cast to such a type is folded
   at translation and copied at the store. An ERROR deletes the level.
-* Statements are walked twice in the same order, skipping what a RETURN, EXIT
-  or CONTINUE makes unreachable: the first walk collects the expressions and
+* RAISE without `USING` is a few calls of the host: one starts the message in
+  a context of the activation level, then for each `%` the code evaluates the
+  parameter, prints it with the output function of its type
+  (`plllvm_pj_raise_param()`) and releases what the evaluation allocated,
+  as `exec_stmt_raise()` does, and the last call sends the message. The
+  message is built whether or not the level would be sent, so a parameter is
+  evaluated, and can fail, at any level. While the parameters run, the
+  position is the expression's, so an error marks it as PL/pgSQL does; the
+  conversion and the message are positioned at the statement, as nothing is
+  marked by then. The condition name is turned into a SQLSTATE at
+  translation, by PL/pgSQL's own function. A RAISE at ERROR, and one with
+  nothing to raise (outside a handler, which these functions have none), end
+  the function; one below ERROR has sent a message, so like a site it leaves
+  no deopt point to a variant that has an expression unplanned, and the
+  function waits.
+* Statements are walked twice in the same order, skipping what a RETURN, EXIT,
+  CONTINUE or RAISE that raises makes unreachable: the first walk collects the expressions and
   positions, the second emits code and takes the expressions back in that
   order. An expression PL/pgSQL has not planned becomes a deopt point: the code
   stores its index in `ctx` and returns, the handler runs the call in PL/pgSQL,

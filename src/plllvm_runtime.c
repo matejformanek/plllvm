@@ -31,10 +31,12 @@
 #include "catalog/pg_type_d.h"
 #include "utils/builtins.h"
 #include "utils/datum.h"
+#include "utils/lsyscache.h"
 #include "utils/memutils.h"
 #include "varatt.h"
 
 #include "plllvm.h"
+#include "plllvm_pj.h"
 
 const plllvm_host_symbol plllvm_host_symbols[] =
 {
@@ -51,6 +53,11 @@ const plllvm_host_symbol plllvm_host_symbols[] =
 	{"plllvm_pj_boxed_eval", (void *) plllvm_pj_boxed_eval},
 	{"plllvm_pj_boxed_reset", (void *) plllvm_pj_boxed_reset},
 	{"plllvm_pj_assign", (void *) plllvm_pj_assign},
+	{"plllvm_pj_raise_start", (void *) plllvm_pj_raise_start},
+	{"plllvm_pj_raise_text", (void *) plllvm_pj_raise_text},
+	{"plllvm_pj_raise_param", (void *) plllvm_pj_raise_param},
+	{"plllvm_pj_raise", (void *) plllvm_pj_raise},
+	{"plllvm_pj_raise_bare", (void *) plllvm_pj_raise_bare},
 	{"plllvm_pj_site", (void *) plllvm_pj_site},
 	{"plllvm_pj_invoke_track", (void *) plllvm_pj_invoke_track},
 	{"plllvm_pj_io", (void *) plllvm_pj_io},
@@ -196,6 +203,79 @@ plllvm_pj_for_error(int32 what)
 			break;
 	}
 	pg_unreachable();
+}
+
+/*
+ * RAISE of plpgsql_jit code (exec_stmt_raise), one call per step so that
+ * each parameter is evaluated between them.  The message is built in a
+ * context of the level, which is reset after the message is sent.
+ */
+void
+plllvm_pj_raise_start(PjCtx *ctx)
+{
+	PjLevel    *lv = plllvm_pj_level(ctx);
+	MemoryContext oldcxt;
+
+	if (lv->raise_cxt == NULL)
+		lv->raise_cxt = AllocSetContextCreate(lv->cxt, "plllvm - pj raise",
+											  ALLOCSET_SMALL_SIZES);
+	else
+		MemoryContextReset(lv->raise_cxt);
+
+	oldcxt = MemoryContextSwitchTo(lv->raise_cxt);
+	initStringInfo(&lv->raise_msg);
+	MemoryContextSwitchTo(oldcxt);
+}
+
+void
+plllvm_pj_raise_text(PjCtx *ctx, const char *text)
+{
+	appendStringInfoString(&ctx->lv->raise_msg, text);
+}
+
+void
+plllvm_pj_raise_param(PjCtx *ctx, Datum value, bool isnull, Oid type)
+{
+	PjLevel    *lv = ctx->lv;
+	const char *str = "<NULL>";
+
+	if (!isnull)
+	{
+		MemoryContext oldcxt = MemoryContextSwitchTo(lv->raise_cxt);
+		Oid			output;
+		bool varlena;
+
+		getTypeOutputInfo(type, &output, &varlena);
+		str = OidOutputFunctionCall(output, value);
+		MemoryContextSwitchTo(oldcxt);
+	}
+	appendStringInfoString(&lv->raise_msg, str);
+}
+
+/* msg is the whole message, or NULL for the one built */
+void
+plllvm_pj_raise(PjCtx *ctx, int32 level, int32 sqlstate, const char *msg)
+{
+	bool		built = msg == NULL;
+
+	if (built)
+		msg = ctx->lv->raise_msg.data;
+
+	ereport(level,
+			(sqlstate ? errcode(sqlstate) : 0,
+			 errmsg_internal("%s", msg)));
+
+	if (built)
+		MemoryContextReset(ctx->lv->raise_cxt);
+}
+
+/* RAISE with nothing to raise, in a function that has no handler */
+void
+plllvm_pj_raise_bare(void)
+{
+	ereport_domain(ERROR, PG_TEXTDOMAIN("plpgsql"),
+				   (errcode(ERRCODE_STACKED_DIAGNOSTICS_ACCESSED_WITHOUT_ACTIVE_HANDLER),
+					errmsg("RAISE without parameters cannot be used outside an exception handler")));
 }
 
 /*

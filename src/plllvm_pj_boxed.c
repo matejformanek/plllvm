@@ -261,6 +261,7 @@ level_forget(PjLevel *lv)
 {
 	lv->cxt = NULL;
 	lv->datum_cxt = NULL;
+	lv->raise_cxt = NULL;
 	lv->econtext = NULL;
 	lv->params = NULL;
 	lv->slots = NULL;

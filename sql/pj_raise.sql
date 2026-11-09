@@ -210,7 +210,7 @@ SELECT pj_mark() \gset
 SELECT pz_rare3(500);  -- fail
 SELECT pj_delta(0, 0, 0, 1, 0) \gset
 SELECT pz_rare3(500);  -- fail
-SELECT pj_expect('pz_rare3(integer)', 'interpreted:replan') \gset
+SELECT pj_expect('pz_rare3(integer)', 'compiled') \gset
 
 -- an error in an argument belongs to its expression: in the same transaction
 -- the expression is in use, and a later error shows the SQL expression
@@ -226,7 +226,10 @@ SAVEPOINT s;
 SELECT pz_arg(1, 0);  -- fail
 ROLLBACK TO s;
 SELECT pz_arg(1, 0);  -- fail
+ROLLBACK TO s;
+SELECT pj_expect('pz_arg(integer,integer)', 'interpreted:in use') \gset
 COMMIT;
+SELECT pz_arg(3, 3);
 SELECT pj_expect('pz_arg(integer,integer)', 'compiled') \gset
 
 -- but not when the arguments are done: the final message is the statement's
@@ -266,7 +269,7 @@ SELECT pj_expect('pz_loop(integer)', 'compiled') \gset
 -- recursion: each level has its message (a nested call in an expression is
 -- not the interpreter's, so the context lines are left out)
 \set SHOW_CONTEXT never
-CREATE FUNCTION pz_rec(n int) RETURNS int LANGUAGE :pj_lang AS $$
+CREATE FUNCTION pz_rec(n int) RETURNS int LANGUAGE :pj_lang IMMUTABLE AS $$
 BEGIN
   IF n = 0 THEN RETURN 0; END IF;
   RAISE NOTICE 'down % then %', n, pz_rec(n - 1);
