@@ -192,11 +192,24 @@ Only `plllvm_jit.c` and `plllvm_error.cpp` include LLVM headers.
   `plpgsql_exec_error_callback`. A value is converted to the result type by
   the cast tree PL/pgSQL would build, cached per pair of types, but only by
   a cast that cannot raise: widening int4 to int8 or float8, int8 to float8,
-  or a relabeling through a pinned `pg_cast` row; or, for a constant, a
+  int4 or int8 to numeric, name to text, or a relabeling through a pinned
+  `pg_cast` row; or, for a constant, a
   conversion of built-in immutable functions that runs when the function is
   translated (an error there declines the function). Any other cast declines
   (`cast`), so a cast error always comes from PL/pgSQL's own code. A domain
   is never a target: a variable of a domain type declines the function.
+* A variable of a built-in base type passed by reference (not an array,
+  composite, domain or `refcursor`) has a slot of three parts: the Datum, a
+  null flag and a flag that the copy is ours. An argument is the caller's:
+  the flag is false and it is never freed. An assignment copies the value
+  into the datum context of the activation level (`datum_cxt`, under the
+  level's context, reset when a call first uses the level), then frees the
+  old copy if it is ours, as `exec_assign_value()` does; the copy comes
+  first because the value may be the old one. What the evaluation allocated
+  is reset only after that, as the value lives in it. A block frees its
+  variables at entry and starts them NULL. A bare constant or variable is
+  moved without the executor, and a constant cast to such a type is folded
+  at translation and copied at the store. An ERROR deletes the level.
 * Statements are walked twice in the same order, skipping what a RETURN, EXIT
   or CONTINUE makes unreachable: the first walk collects the expressions and
   positions, the second emits code and takes the expressions back in that
