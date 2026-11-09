@@ -275,8 +275,7 @@ SELECT pj_expect('pr_ret_i4(int)', 'compiled') \gset
 SELECT pj_expect('pr_ret_i8(bigint)', 'compiled') \gset
 SELECT pj_expect('pr_const()', 'compiled') \gset
 
--- what stays declined, and why: a cast to a varchar or a char can raise, an
--- array is not ours
+-- what stays declined, and why: a cast to a varchar or a char can raise.
 CREATE FUNCTION pr_typmod(x numeric) RETURNS numeric LANGUAGE :pj_lang AS $$
 DECLARE n numeric(5,2) := x;
 BEGIN RETURN n; END $$;
@@ -305,7 +304,7 @@ SELECT pj_expect('pr_trunc(text)', 'declined:cast') \gset
 SELECT pj_expect('pr_pad(text)', 'declined:cast') \gset
 SELECT pj_expect('pr_pad2(text)', 'compiled') \gset
 SELECT pj_expect('pr_tm(numeric)', 'compiled') \gset
-SELECT pj_expect('pr_arr(int[])', 'declined:datum:_int4') \gset
+SELECT pj_expect('pr_arr(int[])', 'compiled') \gset
 SELECT pr_trunc('abcdef');  -- fail
 SELECT pr_typmod(123456);  -- fail
 SELECT pr_tm(123456);  -- fail

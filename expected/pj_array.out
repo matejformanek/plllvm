@@ -1,0 +1,1001 @@
+--
+-- pj_array: arrays in functions of plpgsql_jit: values, errors, ownership and
+-- memory; compiled, each gives the answer of PL/pgSQL
+--
+\getenv pj_lang PJ_LANG
+\if :{?pj_lang}
+\else
+  \set pj_lang plpgsql
+\endif
+\set SHOW_CONTEXT always
+SET extra_float_digits = 0;
+-- the biggest per-tuple memory the compiled code has seen (0 on PL/pgSQL)
+CREATE FUNCTION pa_peak() RETURNS bigint LANGUAGE plpgsql AS $$
+DECLARE p bigint := 0;
+BEGIN
+  IF current_setting('plllvm.plpgsql_jit', true) IS NOT NULL
+     AND current_setting('debug_discard_caches')::int = 0 THEN
+    EXECUTE 'SELECT peak_tuple_bytes FROM plllvm_pj_stats()' INTO p;
+  END IF;
+  RETURN p;
+END $$;
+CREATE FUNCTION pa_mem() RETURNS bigint LANGUAGE sql STABLE AS
+  $$ SELECT sum(total_bytes)::bigint FROM pg_backend_memory_contexts $$;
+-- a big array, stored compressed or out of line, is read in a loop: it is
+-- expanded once, not at every subscript
+CREATE TABLE pa_big (id int, v float8[]);
+INSERT INTO pa_big SELECT 1, array_agg(0.5::float8 * g) FROM generate_series(1, 100000) g;
+CREATE FUNCTION pa_sum(a float8[], n int) RETURNS float8 LANGUAGE :pj_lang STABLE AS $$
+DECLARE s float8 := 0; i int;
+BEGIN
+  FOR i IN 1..n LOOP s := s + a[i * 7]; END LOOP;
+  RETURN s;
+END $$;
+SELECT pa_sum(v, 10), pa_sum(v, 100) FROM pa_big;
+ pa_sum | pa_sum 
+--------+--------
+  192.5 |  17675
+(1 row)
+
+SELECT pa_sum(v, 10), pa_sum(v, 100), pa_sum(v, 1000), pa_sum(v, 14285) FROM pa_big;
+ pa_sum | pa_sum | pa_sum  |   pa_sum    
+--------+--------+---------+-------------
+  192.5 |  17675 | 1751750 | 357132142.5
+(1 row)
+
+SELECT pj_expect('pa_sum(float8[],int)', 'compiled') \gset
+SELECT pa_peak() < 65536 AS peak_small_arg;
+ peak_small_arg 
+----------------
+ t
+(1 row)
+
+-- an element store changes the array in place, it is not copied: the
+-- per-tuple memory stays small for an array of 800 kB
+CREATE FUNCTION pa_store(n int) RETURNS float8 LANGUAGE :pj_lang AS $$
+DECLARE a float8[] := array_fill(1.5::float8, ARRAY[100000]); i int;
+BEGIN
+  FOR i IN 1..n LOOP
+    a[1 + i % 100000] := a[1 + i % 100000] + i;
+  END LOOP;
+  RETURN a[1] + a[100000] + a[7];
+END $$;
+SELECT pa_store(10), pa_store(10);
+ pa_store | pa_store 
+----------+----------
+     10.5 |     10.5
+(1 row)
+
+SELECT pa_store(20000);
+ pa_store 
+----------
+     10.5
+(1 row)
+
+SELECT pj_expect('pa_store(int)', 'compiled') \gset
+SELECT pa_peak() < 65536 AS peak_small;
+ peak_small 
+------------
+ t
+(1 row)
+
+-- values: NULL elements, subscripts out of range, assignment past the ends,
+-- other lower bounds; the argument is not changed
+CREATE FUNCTION pa_rw(a float8[], i int, v float8) RETURNS text LANGUAGE :pj_lang AS $$
+DECLARE b float8[];
+BEGIN
+  b := a;
+  b[i] := v;
+  RETURN coalesce(b::text, 'NULL') || ' | ' || coalesce(a::text, 'NULL') || ' | ' ||
+         coalesce(b[i]::text, 'NULL') || ' | ' || coalesce(a[i]::text, 'NULL') || ' | ' ||
+         array_ndims(b) || array_lower(b, 1);
+END $$;
+SELECT pa_rw('{1,2,3}', 2, 9.5) FROM generate_series(1, 3);
+               pa_rw                
+------------------------------------
+ {1,9.5,3} | {1,2,3} | 9.5 | 2 | 11
+ {1,9.5,3} | {1,2,3} | 9.5 | 2 | 11
+ {1,9.5,3} | {1,2,3} | 9.5 | 2 | 11
+(3 rows)
+
+SELECT i, pa_rw(a::float8[], i, v)
+  FROM (VALUES ('{1,2,3}'), ('{1,NULL,3}'), ('{}'), ('[5:7]={1,2,3}'), ('[-2:0]={4,5,6}'),
+               ('{1,2,3,4,5,6,7,8,9,10,11,12}')) a(a),
+       generate_series(-3, 8) i, (VALUES (9.5), ('NaN'::float8)) x(v)
+  WHERE i % 2 = 0 OR a LIKE '{1,2%'
+  ORDER BY a, i, v;
+ i  |                                                   pa_rw                                                   
+----+-----------------------------------------------------------------------------------------------------------
+ -2 | [-2:0]={9.5,5,6} | [-2:0]={4,5,6} | 9.5 | 4 | 1-2
+ -2 | [-2:0]={NaN,5,6} | [-2:0]={4,5,6} | NaN | 4 | 1-2
+  0 | [-2:0]={4,5,9.5} | [-2:0]={4,5,6} | 9.5 | 6 | 1-2
+  0 | [-2:0]={4,5,NaN} | [-2:0]={4,5,6} | NaN | 6 | 1-2
+  2 | [-2:2]={4,5,6,NULL,9.5} | [-2:0]={4,5,6} | 9.5 | NULL | 1-2
+  2 | [-2:2]={4,5,6,NULL,NaN} | [-2:0]={4,5,6} | NaN | NULL | 1-2
+  4 | [-2:4]={4,5,6,NULL,NULL,NULL,9.5} | [-2:0]={4,5,6} | 9.5 | NULL | 1-2
+  4 | [-2:4]={4,5,6,NULL,NULL,NULL,NaN} | [-2:0]={4,5,6} | NaN | NULL | 1-2
+  6 | [-2:6]={4,5,6,NULL,NULL,NULL,NULL,NULL,9.5} | [-2:0]={4,5,6} | 9.5 | NULL | 1-2
+  6 | [-2:6]={4,5,6,NULL,NULL,NULL,NULL,NULL,NaN} | [-2:0]={4,5,6} | NaN | NULL | 1-2
+  8 | [-2:8]={4,5,6,NULL,NULL,NULL,NULL,NULL,NULL,NULL,9.5} | [-2:0]={4,5,6} | 9.5 | NULL | 1-2
+  8 | [-2:8]={4,5,6,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NaN} | [-2:0]={4,5,6} | NaN | NULL | 1-2
+ -2 | [-2:7]={9.5,NULL,NULL,NULL,NULL,NULL,NULL,1,2,3} | [5:7]={1,2,3} | 9.5 | NULL | 1-2
+ -2 | [-2:7]={NaN,NULL,NULL,NULL,NULL,NULL,NULL,1,2,3} | [5:7]={1,2,3} | NaN | NULL | 1-2
+  0 | [0:7]={9.5,NULL,NULL,NULL,NULL,1,2,3} | [5:7]={1,2,3} | 9.5 | NULL | 10
+  0 | [0:7]={NaN,NULL,NULL,NULL,NULL,1,2,3} | [5:7]={1,2,3} | NaN | NULL | 10
+  2 | [2:7]={9.5,NULL,NULL,1,2,3} | [5:7]={1,2,3} | 9.5 | NULL | 12
+  2 | [2:7]={NaN,NULL,NULL,1,2,3} | [5:7]={1,2,3} | NaN | NULL | 12
+  4 | [4:7]={9.5,1,2,3} | [5:7]={1,2,3} | 9.5 | NULL | 14
+  4 | [4:7]={NaN,1,2,3} | [5:7]={1,2,3} | NaN | NULL | 14
+  6 | [5:7]={1,9.5,3} | [5:7]={1,2,3} | 9.5 | 2 | 15
+  6 | [5:7]={1,NaN,3} | [5:7]={1,2,3} | NaN | 2 | 15
+  8 | [5:8]={1,2,3,9.5} | [5:7]={1,2,3} | 9.5 | NULL | 15
+  8 | [5:8]={1,2,3,NaN} | [5:7]={1,2,3} | NaN | NULL | 15
+ -3 | [-3:12]={9.5,NULL,NULL,NULL,1,2,3,4,5,6,7,8,9,10,11,12} | {1,2,3,4,5,6,7,8,9,10,11,12} | 9.5 | NULL | 1-3
+ -3 | [-3:12]={NaN,NULL,NULL,NULL,1,2,3,4,5,6,7,8,9,10,11,12} | {1,2,3,4,5,6,7,8,9,10,11,12} | NaN | NULL | 1-3
+ -2 | [-2:12]={9.5,NULL,NULL,1,2,3,4,5,6,7,8,9,10,11,12} | {1,2,3,4,5,6,7,8,9,10,11,12} | 9.5 | NULL | 1-2
+ -2 | [-2:12]={NaN,NULL,NULL,1,2,3,4,5,6,7,8,9,10,11,12} | {1,2,3,4,5,6,7,8,9,10,11,12} | NaN | NULL | 1-2
+ -1 | [-1:12]={9.5,NULL,1,2,3,4,5,6,7,8,9,10,11,12} | {1,2,3,4,5,6,7,8,9,10,11,12} | 9.5 | NULL | 1-1
+ -1 | [-1:12]={NaN,NULL,1,2,3,4,5,6,7,8,9,10,11,12} | {1,2,3,4,5,6,7,8,9,10,11,12} | NaN | NULL | 1-1
+  0 | [0:12]={9.5,1,2,3,4,5,6,7,8,9,10,11,12} | {1,2,3,4,5,6,7,8,9,10,11,12} | 9.5 | NULL | 10
+  0 | [0:12]={NaN,1,2,3,4,5,6,7,8,9,10,11,12} | {1,2,3,4,5,6,7,8,9,10,11,12} | NaN | NULL | 10
+  1 | {9.5,2,3,4,5,6,7,8,9,10,11,12} | {1,2,3,4,5,6,7,8,9,10,11,12} | 9.5 | 1 | 11
+  1 | {NaN,2,3,4,5,6,7,8,9,10,11,12} | {1,2,3,4,5,6,7,8,9,10,11,12} | NaN | 1 | 11
+  2 | {1,9.5,3,4,5,6,7,8,9,10,11,12} | {1,2,3,4,5,6,7,8,9,10,11,12} | 9.5 | 2 | 11
+  2 | {1,NaN,3,4,5,6,7,8,9,10,11,12} | {1,2,3,4,5,6,7,8,9,10,11,12} | NaN | 2 | 11
+  3 | {1,2,9.5,4,5,6,7,8,9,10,11,12} | {1,2,3,4,5,6,7,8,9,10,11,12} | 9.5 | 3 | 11
+  3 | {1,2,NaN,4,5,6,7,8,9,10,11,12} | {1,2,3,4,5,6,7,8,9,10,11,12} | NaN | 3 | 11
+  4 | {1,2,3,9.5,5,6,7,8,9,10,11,12} | {1,2,3,4,5,6,7,8,9,10,11,12} | 9.5 | 4 | 11
+  4 | {1,2,3,NaN,5,6,7,8,9,10,11,12} | {1,2,3,4,5,6,7,8,9,10,11,12} | NaN | 4 | 11
+  5 | {1,2,3,4,9.5,6,7,8,9,10,11,12} | {1,2,3,4,5,6,7,8,9,10,11,12} | 9.5 | 5 | 11
+  5 | {1,2,3,4,NaN,6,7,8,9,10,11,12} | {1,2,3,4,5,6,7,8,9,10,11,12} | NaN | 5 | 11
+  6 | {1,2,3,4,5,9.5,7,8,9,10,11,12} | {1,2,3,4,5,6,7,8,9,10,11,12} | 9.5 | 6 | 11
+  6 | {1,2,3,4,5,NaN,7,8,9,10,11,12} | {1,2,3,4,5,6,7,8,9,10,11,12} | NaN | 6 | 11
+  7 | {1,2,3,4,5,6,9.5,8,9,10,11,12} | {1,2,3,4,5,6,7,8,9,10,11,12} | 9.5 | 7 | 11
+  7 | {1,2,3,4,5,6,NaN,8,9,10,11,12} | {1,2,3,4,5,6,7,8,9,10,11,12} | NaN | 7 | 11
+  8 | {1,2,3,4,5,6,7,9.5,9,10,11,12} | {1,2,3,4,5,6,7,8,9,10,11,12} | 9.5 | 8 | 11
+  8 | {1,2,3,4,5,6,7,NaN,9,10,11,12} | {1,2,3,4,5,6,7,8,9,10,11,12} | NaN | 8 | 11
+ -3 | [-3:3]={9.5,NULL,NULL,NULL,1,2,3} | {1,2,3} | 9.5 | NULL | 1-3
+ -3 | [-3:3]={NaN,NULL,NULL,NULL,1,2,3} | {1,2,3} | NaN | NULL | 1-3
+ -2 | [-2:3]={9.5,NULL,NULL,1,2,3} | {1,2,3} | 9.5 | NULL | 1-2
+ -2 | [-2:3]={NaN,NULL,NULL,1,2,3} | {1,2,3} | NaN | NULL | 1-2
+ -1 | [-1:3]={9.5,NULL,1,2,3} | {1,2,3} | 9.5 | NULL | 1-1
+ -1 | [-1:3]={NaN,NULL,1,2,3} | {1,2,3} | NaN | NULL | 1-1
+  0 | [0:3]={9.5,1,2,3} | {1,2,3} | 9.5 | NULL | 10
+  0 | [0:3]={NaN,1,2,3} | {1,2,3} | NaN | NULL | 10
+  1 | {9.5,2,3} | {1,2,3} | 9.5 | 1 | 11
+  1 | {NaN,2,3} | {1,2,3} | NaN | 1 | 11
+  2 | {1,9.5,3} | {1,2,3} | 9.5 | 2 | 11
+  2 | {1,NaN,3} | {1,2,3} | NaN | 2 | 11
+  3 | {1,2,9.5} | {1,2,3} | 9.5 | 3 | 11
+  3 | {1,2,NaN} | {1,2,3} | NaN | 3 | 11
+  4 | {1,2,3,9.5} | {1,2,3} | 9.5 | NULL | 11
+  4 | {1,2,3,NaN} | {1,2,3} | NaN | NULL | 11
+  5 | {1,2,3,NULL,9.5} | {1,2,3} | 9.5 | NULL | 11
+  5 | {1,2,3,NULL,NaN} | {1,2,3} | NaN | NULL | 11
+  6 | {1,2,3,NULL,NULL,9.5} | {1,2,3} | 9.5 | NULL | 11
+  6 | {1,2,3,NULL,NULL,NaN} | {1,2,3} | NaN | NULL | 11
+  7 | {1,2,3,NULL,NULL,NULL,9.5} | {1,2,3} | 9.5 | NULL | 11
+  7 | {1,2,3,NULL,NULL,NULL,NaN} | {1,2,3} | NaN | NULL | 11
+  8 | {1,2,3,NULL,NULL,NULL,NULL,9.5} | {1,2,3} | 9.5 | NULL | 11
+  8 | {1,2,3,NULL,NULL,NULL,NULL,NaN} | {1,2,3} | NaN | NULL | 11
+ -2 | [-2:3]={9.5,NULL,NULL,1,NULL,3} | {1,NULL,3} | 9.5 | NULL | 1-2
+ -2 | [-2:3]={NaN,NULL,NULL,1,NULL,3} | {1,NULL,3} | NaN | NULL | 1-2
+  0 | [0:3]={9.5,1,NULL,3} | {1,NULL,3} | 9.5 | NULL | 10
+  0 | [0:3]={NaN,1,NULL,3} | {1,NULL,3} | NaN | NULL | 10
+  2 | {1,9.5,3} | {1,NULL,3} | 9.5 | NULL | 11
+  2 | {1,NaN,3} | {1,NULL,3} | NaN | NULL | 11
+  4 | {1,NULL,3,9.5} | {1,NULL,3} | 9.5 | NULL | 11
+  4 | {1,NULL,3,NaN} | {1,NULL,3} | NaN | NULL | 11
+  6 | {1,NULL,3,NULL,NULL,9.5} | {1,NULL,3} | 9.5 | NULL | 11
+  6 | {1,NULL,3,NULL,NULL,NaN} | {1,NULL,3} | NaN | NULL | 11
+  8 | {1,NULL,3,NULL,NULL,NULL,NULL,9.5} | {1,NULL,3} | 9.5 | NULL | 11
+  8 | {1,NULL,3,NULL,NULL,NULL,NULL,NaN} | {1,NULL,3} | NaN | NULL | 11
+ -2 | [-2:-2]={9.5} | {} | 9.5 | NULL | 1-2
+ -2 | [-2:-2]={NaN} | {} | NaN | NULL | 1-2
+  0 | [0:0]={9.5} | {} | 9.5 | NULL | 10
+  0 | [0:0]={NaN} | {} | NaN | NULL | 10
+  2 | [2:2]={9.5} | {} | 9.5 | NULL | 12
+  2 | [2:2]={NaN} | {} | NaN | NULL | 12
+  4 | [4:4]={9.5} | {} | 9.5 | NULL | 14
+  4 | [4:4]={NaN} | {} | NaN | NULL | 14
+  6 | [6:6]={9.5} | {} | 9.5 | NULL | 16
+  6 | [6:6]={NaN} | {} | NaN | NULL | 16
+  8 | [8:8]={9.5} | {} | 9.5 | NULL | 18
+  8 | [8:8]={NaN} | {} | NaN | NULL | 18
+(96 rows)
+
+SELECT pj_expect('pa_rw(float8[],int,float8)', 'compiled') \gset
+-- two dimensions
+CREATE FUNCTION pa_md(a float8[], i int, j int, v float8) RETURNS text LANGUAGE :pj_lang AS $$
+DECLARE b float8[];
+BEGIN
+  b := a;
+  b[i][j] := v;
+  RETURN b::text || coalesce(b[i][j]::text, 'N') || coalesce(a[i][j]::text, 'N') || array_dims(b);
+END $$;
+SELECT pa_md('{{1,2},{3,4}}', i, j, 8) FROM generate_series(1, 2) i, generate_series(1, 2) j ORDER BY i, j;
+           pa_md           
+---------------------------
+ {{8,2},{3,4}}81[1:2][1:2]
+ {{1,8},{3,4}}82[1:2][1:2]
+ {{1,2},{8,4}}83[1:2][1:2]
+ {{1,2},{3,8}}84[1:2][1:2]
+(4 rows)
+
+SELECT pa_md('[2:3][-1:0]={{1,2},{3,4}}', i, j, 8) FROM generate_series(2, 3) i, generate_series(-1, 0) j ORDER BY i, j;
+                 pa_md                  
+----------------------------------------
+ [2:3][-1:0]={{8,2},{3,4}}81[2:3][-1:0]
+ [2:3][-1:0]={{1,8},{3,4}}82[2:3][-1:0]
+ [2:3][-1:0]={{1,2},{8,4}}83[2:3][-1:0]
+ [2:3][-1:0]={{1,2},{3,8}}84[2:3][-1:0]
+(4 rows)
+
+SELECT pa_md('{{1,2},{3,4}}', 1, 1, 1);
+           pa_md           
+---------------------------
+ {{1,2},{3,4}}11[1:2][1:2]
+(1 row)
+
+SELECT pj_expect('pa_md(float8[],int,int,float8)', 'compiled') \gset
+-- slices, a NULL subscript, a NULL array, a subscript past the end, array
+-- functions on the variable itself
+CREATE FUNCTION pa_misc(k int) RETURNS text LANGUAGE :pj_lang AS $$
+DECLARE a int[] := ARRAY[10, 20, 30, 40]; b int[]; c text[]; n int := nullif(k, k);
+BEGIN
+  IF k = 1 THEN a[2:3] := ARRAY[7, 8]; RETURN a::text; END IF;
+  IF k = 2 THEN b[3] := 1; RETURN b::text; END IF;
+  IF k = 3 THEN a[7] := 1; RETURN a::text; END IF;
+  IF k = 4 THEN a[0] := 1; RETURN a::text || array_lower(a, 1); END IF;
+  IF k = 5 THEN RETURN coalesce(a[n]::text, 'null-read') || a[2:3]::text || a[n:n]::text; END IF;
+  IF k = 6 THEN c := ARRAY['x', NULL, 'z']; c[2] := 'y'; c[5] := NULL; RETURN c::text; END IF;
+  IF k = 7 THEN b := a; a := NULL; RETURN coalesce(a::text, 'N') || b::text; END IF;
+  IF k = 8 THEN a := a || a; a[1] := a[1] + a[8]; a := array_append(a, a[1]); RETURN a::text; END IF;
+  IF k = 9 THEN b := array_fill(0, ARRAY[2, 3]); b[2][3] := 5; b[1][1] := b[2][3] * 2; RETURN b::text; END IF;
+  RETURN 'none';
+END $$;
+SELECT k, pa_misc(k) FROM generate_series(0, 9) k, generate_series(1, 3) rep WHERE rep = 3 ORDER BY k;
+ k |           pa_misc            
+---+------------------------------
+ 0 | none
+ 1 | {10,7,8,40}
+ 2 | [3:3]={1}
+ 3 | {10,20,30,40,NULL,NULL,1}
+ 4 | [0:4]={1,10,20,30,40}0
+ 5 | 
+ 6 | {x,y,z,NULL,NULL}
+ 7 | N{10,20,30,40}
+ 8 | {50,20,30,40,10,20,30,40,50}
+ 9 | {{10,0,0},{0,0,5}}
+(10 rows)
+
+SELECT pa_misc(k) FROM generate_series(1, 9) k, generate_series(1, 2) rep ORDER BY k, rep;
+           pa_misc            
+------------------------------
+ {10,7,8,40}
+ {10,7,8,40}
+ [3:3]={1}
+ [3:3]={1}
+ {10,20,30,40,NULL,NULL,1}
+ {10,20,30,40,NULL,NULL,1}
+ [0:4]={1,10,20,30,40}0
+ [0:4]={1,10,20,30,40}0
+ 
+ 
+ {x,y,z,NULL,NULL}
+ {x,y,z,NULL,NULL}
+ N{10,20,30,40}
+ N{10,20,30,40}
+ {50,20,30,40,10,20,30,40,50}
+ {50,20,30,40,10,20,30,40,50}
+ {{10,0,0},{0,0,5}}
+ {{10,0,0},{0,0,5}}
+(18 rows)
+
+SELECT pj_expect('pa_misc(int)', 'compiled') \gset
+-- element types
+CREATE FUNCTION pa_types(k int) RETURNS text LANGUAGE :pj_lang AS $$
+DECLARE
+  b bool[] := ARRAY[true, false];
+  i4 int4[] := ARRAY[1, 2];
+  i8 int8[] := ARRAY[10000000000, 2];
+  f8 float8[] := ARRAY[1.5, 2.5];
+  nu numeric[] := ARRAY[1.10, 2.25];
+  tx text[] := ARRAY['a', 'b'];
+BEGIN
+  IF k = 1 THEN b[3] := NOT b[1]; i4[1] := i4[2] * 3; i8[2] := i8[1] + 1; f8[2] := f8[1] / 3; END IF;
+  IF k = 2 THEN nu[3] := nu[1] * nu[2]; tx[1] := upper(tx[2]) || tx[1]; tx[3] := tx[1] || tx[2]; END IF;
+  IF k = 3 THEN tx[2] := NULL; tx[5] := 'e'; nu[1] := NULL; b[2] := NULL; END IF;
+  RETURN concat_ws('|', b::text, i4::text, i8::text, f8::text, nu::text, tx::text);
+END $$;
+SELECT k, pa_types(k) FROM generate_series(0, 3) k, generate_series(1, 2) r ORDER BY k, r;
+ k |                                 pa_types                                  
+---+---------------------------------------------------------------------------
+ 0 | {t,f}|{1,2}|{10000000000,2}|{1.5,2.5}|{1.10,2.25}|{a,b}
+ 0 | {t,f}|{1,2}|{10000000000,2}|{1.5,2.5}|{1.10,2.25}|{a,b}
+ 1 | {t,f,f}|{6,2}|{10000000000,10000000001}|{1.5,0.5}|{1.10,2.25}|{a,b}
+ 1 | {t,f,f}|{6,2}|{10000000000,10000000001}|{1.5,0.5}|{1.10,2.25}|{a,b}
+ 2 | {t,f}|{1,2}|{10000000000,2}|{1.5,2.5}|{1.10,2.25,2.4750}|{Ba,b,Bab}
+ 2 | {t,f}|{1,2}|{10000000000,2}|{1.5,2.5}|{1.10,2.25,2.4750}|{Ba,b,Bab}
+ 3 | {t,NULL}|{1,2}|{10000000000,2}|{1.5,2.5}|{NULL,2.25}|{a,NULL,NULL,NULL,e}
+ 3 | {t,NULL}|{1,2}|{10000000000,2}|{1.5,2.5}|{NULL,2.25}|{a,NULL,NULL,NULL,e}
+(8 rows)
+
+SELECT pj_expect('pa_types(int)', 'compiled') \gset
+CREATE FUNCTION pa_i4err(k int) RETURNS text LANGUAGE :pj_lang AS $$
+DECLARE a int4[] := ARRAY[1, 2];
+BEGIN
+  a[1] := 2147483647 + k;
+  RETURN a::text;
+END $$;
+SELECT pa_i4err(0);
+    pa_i4err    
+----------------
+ {2147483647,2}
+(1 row)
+
+SELECT pa_i4err(0);
+    pa_i4err    
+----------------
+ {2147483647,2}
+(1 row)
+
+SELECT pa_i4err(1);  -- fail
+ERROR:  integer out of range
+CONTEXT:  PL/pgSQL function pa_i4err(integer) line 4 at assignment
+SELECT pj_expect('pa_i4err(int)', 'compiled') \gset
+-- errors and their CONTEXT
+CREATE FUNCTION pa_err(k int) RETURNS int LANGUAGE :pj_lang AS $$
+DECLARE a int[] := ARRAY[1, 2, 3]; m int[]; n int := nullif(k, k); z int := k - k;
+BEGIN
+  m := array_fill(0, ARRAY[2, 2]);
+  IF k = 1 THEN a[n] := 1; END IF;
+  IF k = 2 THEN a[1] := 1 / z; END IF;
+  IF k = 3 THEN m[5][1] := 1; END IF;
+  IF k = 4 THEN a[1:2] := ARRAY[1]; END IF;
+  IF k = 5 THEN a[1] := 2147483647 + k - 4; END IF;
+  IF k = 6 THEN a[2] := a[1] / z; END IF;
+  IF k = 7 THEN m[1] := 1; END IF;
+  IF k = 8 THEN a[1] := a[k]::text::int; END IF;
+  RETURN a[1] + coalesce(m[1][1], 0);
+END $$;
+SELECT pa_err(0), pa_err(0);
+ pa_err | pa_err 
+--------+--------
+      1 |      1
+(1 row)
+
+SELECT pa_err(1);  -- fail
+ERROR:  array subscript in assignment must not be null
+CONTEXT:  PL/pgSQL function pa_err(integer) line 5 at assignment
+SELECT pa_err(2);  -- fail
+ERROR:  division by zero
+CONTEXT:  PL/pgSQL function pa_err(integer) line 6 at assignment
+SELECT pa_err(3);  -- fail
+ERROR:  array subscript out of range
+CONTEXT:  PL/pgSQL function pa_err(integer) line 7 at assignment
+SELECT pa_err(4);  -- fail
+ERROR:  source array too small
+CONTEXT:  PL/pgSQL function pa_err(integer) line 8 at assignment
+SELECT pa_err(5);  -- fail
+ERROR:  integer out of range
+CONTEXT:  PL/pgSQL function pa_err(integer) line 9 at assignment
+SELECT pa_err(6);  -- fail
+ERROR:  division by zero
+CONTEXT:  PL/pgSQL function pa_err(integer) line 10 at assignment
+SELECT pa_err(7);  -- fail
+ERROR:  wrong number of array subscripts
+CONTEXT:  PL/pgSQL function pa_err(integer) line 11 at assignment
+SELECT pa_err(8);  -- fail
+ pa_err 
+--------
+       
+(1 row)
+
+SELECT pa_err(1);  -- fail
+ERROR:  array subscript in assignment must not be null
+CONTEXT:  PL/pgSQL function pa_err(integer) line 5 at assignment
+SELECT pa_err(3);  -- fail
+ERROR:  array subscript out of range
+CONTEXT:  PL/pgSQL function pa_err(integer) line 7 at assignment
+SELECT pa_err(0), pa_err(0);
+ pa_err | pa_err 
+--------+--------
+      1 |      1
+(1 row)
+
+SELECT pj_expect('pa_err(int)', 'compiled') \gset
+-- an error after element stores leaves the marks of an interpreted failure:
+-- the next call of the transaction is PL/pgSQL's, a later one compiled
+CREATE FUNCTION pa_mark(n int, bad int) RETURNS text LANGUAGE :pj_lang AS $$
+DECLARE a int[] := ARRAY[1, 2, 3]; i int;
+BEGIN
+  FOR i IN 1..n LOOP
+    a[1 + i % 3] := a[1 + i % 3] + i;
+  END LOOP;
+  IF bad = 1 THEN a[nullif(bad, 1)] := 1; END IF;
+  a[2] := a[2] * 2;
+  RETURN a::text;
+END $$;
+SELECT pa_mark(3, 0);
+ pa_mark 
+---------
+ {4,6,5}
+(1 row)
+
+SELECT pa_mark(4, 0), pa_mark(5, 0);
+ pa_mark  |  pa_mark  
+----------+-----------
+ {4,14,5} | {4,14,10}
+(1 row)
+
+SELECT pa_mark(4, 1);  -- fail
+ERROR:  array subscript in assignment must not be null
+CONTEXT:  PL/pgSQL function pa_mark(integer,integer) line 7 at assignment
+SELECT pa_mark(3, 0), pa_mark(4, 0);
+ pa_mark | pa_mark  
+---------+----------
+ {4,6,5} | {4,14,5}
+(1 row)
+
+SELECT pj_expect('pa_mark(int,int)', 'compiled') \gset
+BEGIN;
+SAVEPOINT s;
+SELECT pa_mark(5, 1);  -- fail
+ERROR:  array subscript in assignment must not be null
+CONTEXT:  PL/pgSQL function pa_mark(integer,integer) line 7 at assignment
+ROLLBACK TO s;
+SELECT pa_mark(5, 0);
+  pa_mark  
+-----------
+ {4,14,10}
+(1 row)
+
+SELECT pj_expect('pa_mark(int,int)', 'interpreted:in use') \gset
+COMMIT;
+SELECT pa_mark(5, 0), pa_mark(6, 0);
+  pa_mark  |  pa_mark   
+-----------+------------
+ {4,14,10} | {10,14,10}
+(1 row)
+
+SELECT pj_expect('pa_mark(int,int)', 'compiled') \gset
+-- recursion: a frame has its own arrays, and an error in the deepest one
+CREATE FUNCTION pa_rec(n int, a int[], bad int) RETURNS text LANGUAGE :pj_lang STABLE AS $$
+DECLARE b int[] := a;
+BEGIN
+  b[n + 1] := n;
+  IF n = 0 THEN
+    IF bad = 1 THEN b[nullif(n, 0)] := 1; END IF;
+    RETURN b::text;
+  END IF;
+  RETURN pa_rec(n - 1, b, bad) || b::text;
+END $$;
+SELECT pa_rec(4, '{}', 0), pa_rec(4, '{}', 0), pa_rec(6, '{1,2}', 0);
+                           pa_rec                            |                           pa_rec                            |                                                                 pa_rec                                                                  
+-------------------------------------------------------------+-------------------------------------------------------------+-----------------------------------------------------------------------------------------------------------------------------------------
+ {0,1,2,3,4}[2:5]={1,2,3,4}[3:5]={2,3,4}[4:5]={3,4}[5:5]={4} | {0,1,2,3,4}[2:5]={1,2,3,4}[3:5]={2,3,4}[4:5]={3,4}[5:5]={4} | {0,1,2,3,4,5,6}{1,1,2,3,4,5,6}{1,2,2,3,4,5,6}{1,2,NULL,3,4,5,6}{1,2,NULL,NULL,4,5,6}{1,2,NULL,NULL,NULL,5,6}{1,2,NULL,NULL,NULL,NULL,6}
+(1 row)
+
+SELECT pa_rec(3, '{}', 1);  -- fail
+ERROR:  array subscript in assignment must not be null
+CONTEXT:  PL/pgSQL function pa_rec(integer,integer[],integer) line 6 at assignment
+PL/pgSQL expression "pa_rec(n - 1, b, bad) || b::text"
+PL/pgSQL function pa_rec(integer,integer[],integer) line 9 at RETURN
+PL/pgSQL expression "pa_rec(n - 1, b, bad) || b::text"
+PL/pgSQL function pa_rec(integer,integer[],integer) line 9 at RETURN
+PL/pgSQL function pa_rec(integer,integer[],integer) line 9 at RETURN
+SELECT pa_rec(3, '{}', 1);  -- fail
+ERROR:  array subscript in assignment must not be null
+CONTEXT:  PL/pgSQL function pa_rec(integer,integer[],integer) line 6 at assignment
+PL/pgSQL expression "pa_rec(n - 1, b, bad) || b::text"
+PL/pgSQL function pa_rec(integer,integer[],integer) line 9 at RETURN
+PL/pgSQL expression "pa_rec(n - 1, b, bad) || b::text"
+PL/pgSQL function pa_rec(integer,integer[],integer) line 9 at RETURN
+PL/pgSQL function pa_rec(integer,integer[],integer) line 9 at RETURN
+BEGIN;
+SAVEPOINT s;
+SELECT pa_rec(3, '{}', 1);  -- fail
+ERROR:  array subscript in assignment must not be null
+CONTEXT:  PL/pgSQL function pa_rec(integer,integer[],integer) line 6 at assignment
+PL/pgSQL expression "pa_rec(n - 1, b, bad) || b::text"
+PL/pgSQL function pa_rec(integer,integer[],integer) line 9 at RETURN
+PL/pgSQL expression "pa_rec(n - 1, b, bad) || b::text"
+PL/pgSQL function pa_rec(integer,integer[],integer) line 9 at RETURN
+PL/pgSQL function pa_rec(integer,integer[],integer) line 9 at RETURN
+ROLLBACK TO s;
+SELECT pa_rec(2, '{9}', 0);
+          pa_rec          
+--------------------------
+ {0,1,2}{9,1,2}{9,NULL,2}
+(1 row)
+
+COMMIT;
+SELECT pa_rec(2, '{}', 0), pa_rec(5, '{}', 0);
+           pa_rec            |                                     pa_rec                                     
+-----------------------------+--------------------------------------------------------------------------------
+ {0,1,2}[2:3]={1,2}[3:3]={2} | {0,1,2,3,4,5}[2:6]={1,2,3,4,5}[3:6]={2,3,4,5}[4:6]={3,4,5}[5:6]={4,5}[6:6]={5}
+(1 row)
+
+-- an array argument is the caller's: assigning to it, or to what it was
+-- assigned to, changes neither it nor the column it came from
+CREATE FUNCTION pa_alias(a int[]) RETURNS text LANGUAGE :pj_lang STABLE AS $$
+DECLARE b int[]; c int[];
+BEGIN
+  b := a;
+  a[1] := 100;
+  b[2] := 200;
+  c := b;
+  c[3] := c[1] + c[2];
+  a := array_append(a, a[1]);
+  b := array_cat(b, b);
+  RETURN a::text || b::text || c::text;
+END $$;
+CREATE TABLE pa_t (id int, v int[]);
+INSERT INTO pa_t VALUES (1, '{1,2,3}'), (2, '{4,5,6}');
+SELECT id, pa_alias(v), v FROM pa_t ORDER BY id;
+ id |                 pa_alias                  |    v    
+----+-------------------------------------------+---------
+  1 | {100,2,3,100}{1,200,3,1,200,3}{1,200,201} | {1,2,3}
+  2 | {100,5,6,100}{4,200,6,4,200,6}{4,200,204} | {4,5,6}
+(2 rows)
+
+SELECT id, pa_alias(v), v FROM pa_t ORDER BY id;
+ id |                 pa_alias                  |    v    
+----+-------------------------------------------+---------
+  1 | {100,2,3,100}{1,200,3,1,200,3}{1,200,201} | {1,2,3}
+  2 | {100,5,6,100}{4,200,6,4,200,6}{4,200,204} | {4,5,6}
+(2 rows)
+
+SELECT id, pa_alias(v), v FROM pa_t ORDER BY id;
+ id |                 pa_alias                  |    v    
+----+-------------------------------------------+---------
+  1 | {100,2,3,100}{1,200,3,1,200,3}{1,200,201} | {1,2,3}
+  2 | {100,5,6,100}{4,200,6,4,200,6}{4,200,204} | {4,5,6}
+(2 rows)
+
+SELECT pj_expect('pa_alias(int[])', 'compiled') \gset
+CREATE FUNCTION pa_idem(a int[]) RETURNS int[] LANGUAGE :pj_lang STABLE AS $$
+BEGIN
+  RETURN a;
+END $$;
+CREATE FUNCTION pa_caller() RETURNS text LANGUAGE :pj_lang AS $$
+DECLARE a int[] := ARRAY[1, 2, 3]; r text;
+BEGIN
+  a[1] := 5;
+  r := pa_alias(a);
+  a := pa_idem(a);
+  a[2] := 7;
+  RETURN r || '/' || a::text;
+END $$;
+SELECT pa_caller(), pa_caller(), pa_caller();
+                     pa_caller                     |                     pa_caller                     |                     pa_caller                     
+---------------------------------------------------+---------------------------------------------------+---------------------------------------------------
+ {100,2,3,100}{5,200,3,5,200,3}{5,200,205}/{5,7,3} | {100,2,3,100}{5,200,3,5,200,3}{5,200,205}/{5,7,3} | {100,2,3,100}{5,200,3,5,200,3}{5,200,205}/{5,7,3}
+(1 row)
+
+SELECT pj_expect('pa_caller()', 'compiled') \gset
+-- a read/write array handed to a callee that takes ownership of its argument
+-- (the transfer rule of PL/pgSQL) and returns it, or gives it away: the
+-- caller's variable stays whole
+CREATE FUNCTION pa_take(a int[]) RETURNS int[] LANGUAGE plpgsql STABLE AS $$
+BEGIN
+  a[1] := a[1] + 1;
+  RETURN a;
+END $$;
+CREATE FUNCTION pa_same(a int[]) RETURNS int[] LANGUAGE plpgsql STABLE AS $$
+BEGIN
+  RETURN a;
+END $$;
+CREATE FUNCTION pa_first(a int[]) RETURNS int LANGUAGE plpgsql STABLE AS $$
+BEGIN
+  a[2] := 99;
+  RETURN a[1];
+END $$;
+CREATE FUNCTION pa_transfer(n int, k int) RETURNS text LANGUAGE :pj_lang AS $$
+DECLARE a int[] := ARRAY[1, 2, 3]; i int;
+BEGIN
+  FOR i IN 1..n LOOP
+    a[2] := a[2] + 1;
+    IF k = 1 THEN a := pa_take(a); END IF;
+    IF k = 2 THEN a := pa_same(a); END IF;
+    IF k = 3 THEN a := array_append(a, pa_first(a)); END IF;
+    a[3] := a[3] + a[1];
+  END LOOP;
+  RETURN a::text;
+END $$;
+SELECT pa_transfer(5, 0), pa_transfer(5, 1), pa_transfer(5, 2), pa_transfer(5, 3);
+ pa_transfer | pa_transfer | pa_transfer |    pa_transfer    
+-------------+-------------+-------------+-------------------
+ {1,7,8}     | {6,7,23}    | {1,7,8}     | {1,7,8,1,1,1,1,1}
+(1 row)
+
+SELECT pa_transfer(5, 0), pa_transfer(5, 1), pa_transfer(5, 2), pa_transfer(5, 3);
+ pa_transfer | pa_transfer | pa_transfer |    pa_transfer    
+-------------+-------------+-------------+-------------------
+ {1,7,8}     | {6,7,23}    | {1,7,8}     | {1,7,8,1,1,1,1,1}
+(1 row)
+
+SELECT pa_transfer(5, 1), pa_transfer(5, 2), pa_transfer(5, 3), pa_transfer(5, 0);
+ pa_transfer | pa_transfer |    pa_transfer    | pa_transfer 
+-------------+-------------+-------------------+-------------
+ {6,7,23}    | {1,7,8}     | {1,7,8,1,1,1,1,1} | {1,7,8}
+(1 row)
+
+SELECT pa_transfer(300, 1), pa_transfer(300, 2), pa_transfer(300, 3);
+   pa_transfer   | pa_transfer |                                                                                                                                                                                                                                                                                                             pa_transfer                                                                                                                                                                                                                                                                                                             
+-----------------+-------------+-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ {301,302,45453} | {1,302,303} | {1,302,303,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1}
+(1 row)
+
+SELECT pj_expect('pa_transfer(int,int)', 'compiled') \gset
+-- an array stored over itself, over another, and the old one freed
+CREATE FUNCTION pa_self(a int[], k int) RETURNS text LANGUAGE :pj_lang AS $$
+DECLARE b int[] := a;
+BEGIN
+  a := a;
+  b := b;
+  IF k = 1 THEN a := NULL; END IF;
+  IF k = 2 THEN a := b; a[1] := 0; b[2] := 0; END IF;
+  IF k = 3 THEN b := a[1:2]; a := b || a; END IF;
+  IF k = 4 THEN a := array_cat(a, a); a := a[2:5]; END IF;
+  RETURN coalesce(a::text, 'N') || '|' || coalesce(b::text, 'N');
+END $$;
+SELECT pa_self('{1,2,3}', 0), pa_self('{1,2,3}', 1), pa_self('{1,2,3}', 2),
+       pa_self('{1,2,3}', 3), pa_self('{1,2,3}', 4);
+     pa_self     |  pa_self  |     pa_self     |      pa_self      |      pa_self      
+-----------------+-----------+-----------------+-------------------+-------------------
+ {1,2,3}|{1,2,3} | N|{1,2,3} | {0,2,3}|{1,0,3} | {1,2,1,2,3}|{1,2} | {2,3,1,2}|{1,2,3}
+(1 row)
+
+SELECT pa_self('{1,2,3}', 0), pa_self('{1,2,3}', 1), pa_self('{1,2,3}', 2),
+       pa_self('{1,2,3}', 3), pa_self('{1,2,3}', 4);
+     pa_self     |  pa_self  |     pa_self     |      pa_self      |      pa_self      
+-----------------+-----------+-----------------+-------------------+-------------------
+ {1,2,3}|{1,2,3} | N|{1,2,3} | {0,2,3}|{1,0,3} | {1,2,1,2,3}|{1,2} | {2,3,1,2}|{1,2,3}
+(1 row)
+
+SELECT pj_expect('pa_self(int[],int)', 'compiled') \gset
+-- a constant text as an array of a type whose input reads no setting is
+-- converted when the function is translated; for any other type the function
+-- stays PL/pgSQL's, which converts at every call
+CREATE FUNCTION pa_const(k int) RETURNS text LANGUAGE :pj_lang AS $$
+DECLARE
+  l text[] := '{}';
+  w int4[] := '{1,2,3}';
+  f float8[] := '{1.5,NaN}';
+  n numeric[] := '{1.50,2}';
+BEGIN
+  IF k = 1 THEN l := l || 'x'::text; w[2] := w[2] + 1; END IF;
+  RETURN l::text || w::text || f::text || n::text;
+END $$;
+SELECT pa_const(0), pa_const(1), pa_const(0);
+          pa_const          |          pa_const           |          pa_const          
+----------------------------+-----------------------------+----------------------------
+ {}{1,2,3}{1.5,NaN}{1.50,2} | {x}{1,3,3}{1.5,NaN}{1.50,2} | {}{1,2,3}{1.5,NaN}{1.50,2}
+(1 row)
+
+SELECT pa_const(0), pa_const(1);
+          pa_const          |          pa_const           
+----------------------------+-----------------------------
+ {}{1,2,3}{1.5,NaN}{1.50,2} | {x}{1,3,3}{1.5,NaN}{1.50,2}
+(1 row)
+
+SELECT pj_expect('pa_const(int)', 'compiled') \gset
+CREATE FUNCTION pa_const_date(k int) RETURNS text LANGUAGE :pj_lang AS $$
+DECLARE d date[] := '{1.2.2020}';
+BEGIN
+  IF k = 1 THEN d[2] := d[1] + 1; END IF;
+  RETURN d::text;
+END $$;
+SELECT pa_const_date(0), pa_const_date(1);
+ pa_const_date |      pa_const_date      
+---------------+-------------------------
+ {01-02-2020}  | {01-02-2020,01-03-2020}
+(1 row)
+
+SET datestyle = 'ISO, DMY';
+SELECT pa_const_date(0), pa_const_date(1);
+ pa_const_date |      pa_const_date      
+---------------+-------------------------
+ {2020-02-01}  | {2020-02-01,2020-02-02}
+(1 row)
+
+SET datestyle = 'ISO, MDY';
+SELECT pa_const_date(0), pa_const_date(1);
+ pa_const_date |      pa_const_date      
+---------------+-------------------------
+ {2020-01-02}  | {2020-01-02,2020-01-03}
+(1 row)
+
+RESET datestyle;
+SELECT pj_expect('pa_const_date(int)', 'declined:cast') \gset
+CREATE FUNCTION pa_const_err() RETURNS text LANGUAGE :pj_lang AS $$
+DECLARE w int4[] := '{1,x}';
+BEGIN
+  RETURN w::text;
+END $$;
+SELECT pa_const_err();  -- fail
+ERROR:  invalid input syntax for type integer: "x"
+CONTEXT:  PL/pgSQL function pa_const_err() line 2 during statement block local variable initialization
+SELECT pa_const_err();  -- fail
+ERROR:  invalid input syntax for type integer: "x"
+CONTEXT:  PL/pgSQL function pa_const_err() line 2 during statement block local variable initialization
+-- an element store: no deopt after it, and nothing it did repeats.  A branch
+-- no call has taken yet makes the function wait.
+CREATE FUNCTION pa_wait(n int, flag int) RETURNS text LANGUAGE :pj_lang AS $$
+DECLARE a int[] := ARRAY[1, 2, 3];
+BEGIN
+  a[1] := a[1] + n;
+  RAISE NOTICE 'stored %', a[1];
+  IF flag = 1 THEN a[2] := a[2] * 10; END IF;
+  a[3] := a[3] + 1;
+  RETURN a::text;
+END $$;
+SELECT pa_wait(5, 0), pa_wait(5, 0);
+NOTICE:  stored 6
+CONTEXT:  PL/pgSQL function pa_wait(integer,integer) line 5 at RAISE
+NOTICE:  stored 6
+CONTEXT:  PL/pgSQL function pa_wait(integer,integer) line 5 at RAISE
+ pa_wait | pa_wait 
+---------+---------
+ {6,2,4} | {6,2,4}
+(1 row)
+
+SELECT pj_expect('pa_wait(int,int)', 'waiting') \gset
+SELECT pa_wait(5, 1);
+NOTICE:  stored 6
+CONTEXT:  PL/pgSQL function pa_wait(integer,integer) line 5 at RAISE
+ pa_wait  
+----------
+ {6,20,4}
+(1 row)
+
+SELECT pa_wait(5, 0), pa_wait(5, 1), pa_wait(6, 1);
+NOTICE:  stored 6
+CONTEXT:  PL/pgSQL function pa_wait(integer,integer) line 5 at RAISE
+NOTICE:  stored 6
+CONTEXT:  PL/pgSQL function pa_wait(integer,integer) line 5 at RAISE
+NOTICE:  stored 7
+CONTEXT:  PL/pgSQL function pa_wait(integer,integer) line 5 at RAISE
+ pa_wait | pa_wait  | pa_wait  
+---------+----------+----------
+ {6,2,4} | {6,20,4} | {7,20,4}
+(1 row)
+
+SELECT pj_expect('pa_wait(int,int)', 'compiled') \gset
+-- a branch unplanned after translation
+DISCARD PLANS;
+SELECT pa_wait(7, 1), pa_wait(7, 0);
+NOTICE:  stored 8
+CONTEXT:  PL/pgSQL function pa_wait(integer,integer) line 5 at RAISE
+NOTICE:  stored 8
+CONTEXT:  PL/pgSQL function pa_wait(integer,integer) line 5 at RAISE
+ pa_wait  | pa_wait 
+----------+---------
+ {8,20,4} | {8,2,4}
+(1 row)
+
+SELECT pj_expect('pa_wait(int,int)', 'compiled') \gset
+-- a restartable function: arrays only declared and returned; the deopt
+-- gives up the arrays of the call
+CREATE FUNCTION pa_restart(flag int) RETURNS int[] LANGUAGE :pj_lang AS $$
+DECLARE a int[] := '{1,2,3}'; b text[] := '{x,y}'; c int[];
+BEGIN
+  IF flag = 1 THEN c := a; END IF;
+  RETURN c;
+END $$;
+SELECT pa_restart(0), pa_restart(0), pa_restart(0);
+ pa_restart | pa_restart | pa_restart 
+------------+------------+------------
+            |            | 
+(1 row)
+
+SELECT pj_expect('pa_restart(int)', 'compiled') \gset
+SELECT pj_mark() \gset
+SELECT pa_restart(1);
+ pa_restart 
+------------
+ {1,2,3}
+(1 row)
+
+SELECT pj_delta(0, 0, 0, 1, 0) \gset
+SELECT pa_restart(1), pa_restart(0);
+ pa_restart | pa_restart 
+------------+------------
+ {1,2,3}    | 
+(1 row)
+
+-- memory: the old array of each assignment is freed, whatever the shape of
+-- the loop; measured inside the call, between an iteration and the end
+CREATE FUNCTION pa_loop(n int, probe int) RETURNS bigint LANGUAGE :pj_lang AS $$
+DECLARE
+  a float8[] := array_fill(0.0::float8, ARRAY[10]);
+  t text[] := array_fill('x'::text, ARRAY[5]);
+  b float8[];
+  s text := '';
+  m1 bigint; m2 bigint;
+  i int;
+BEGIN
+  FOR i IN 1..n LOOP
+    a[1 + i % 10] := a[1 + i % 10] + i;
+    t[1 + i % 5] := md5(i::text);
+    b := a;
+    a := array_cat(a, ARRAY[1.0::float8]);
+    a := a[1:10];
+    s := repeat('y', i % 50);
+    IF i = probe THEN m1 := pa_mem(); END IF;
+  END LOOP;
+  m2 := pa_mem();
+  RETURN m2 - m1;
+END $$;
+SELECT pa_loop(10, 5) IS NOT NULL;
+ ?column? 
+----------
+ t
+(1 row)
+
+SELECT pa_loop(2000, 1000) < 65536 AS flat_2k;
+ flat_2k 
+---------
+ t
+(1 row)
+
+SELECT pa_loop(100000, 1000) < 65536 AS flat_100k;
+ flat_100k 
+-----------
+ t
+(1 row)
+
+SELECT pa_loop(100000, 1000) < 65536 AS flat_100k_again;
+ flat_100k_again 
+-----------------
+ t
+(1 row)
+
+SELECT pj_expect('pa_loop(int,int)', 'compiled') \gset
+-- over many calls of one function
+CREATE FUNCTION pa_small(i int) RETURNS int LANGUAGE :pj_lang AS $$
+DECLARE a int[] := ARRAY[1, 2, 3]; t text := 'abc' || i::text;
+BEGIN
+  a[2] := i;
+  a := array_append(a, length(t));
+  RETURN a[2] + a[4];
+END $$;
+CREATE FUNCTION pa_calls(n int) RETURNS bigint LANGUAGE plpgsql AS $$
+DECLARE m bigint; s bigint := 0; i int;
+BEGIN
+  FOR i IN 1..n LOOP
+    s := s + pa_small(i);
+    IF i = 1000 THEN m := pa_mem(); END IF;
+  END LOOP;
+  RETURN pa_mem() - m + 0 * s;
+END $$;
+SELECT pa_calls(1001) IS NOT NULL;
+ ?column? 
+----------
+ t
+(1 row)
+
+SELECT pa_calls(100000) < 65536 AS flat;
+ flat 
+------
+ t
+(1 row)
+
+SELECT pa_small(5), pa_small(6);
+ pa_small | pa_small 
+----------+----------
+        9 |       10
+(1 row)
+
+SELECT pj_expect('pa_small(int)', 'compiled') \gset
+-- a cancel in a long loop of element stores, and the function again
+CREATE FUNCTION pa_cancel(n int) RETURNS bigint LANGUAGE :pj_lang AS $$
+DECLARE a float8[] := array_fill(0.0::float8, ARRAY[1000]); s text := ''; i int;
+BEGIN
+  FOR i IN 1..n LOOP
+    a[1 + i % 1000] := a[1 + i % 1000] + i;
+    s := repeat('z', i % 100);
+  END LOOP;
+  RETURN a[1] + length(s);
+END $$;
+SELECT pa_cancel(10), pa_cancel(10);
+ pa_cancel | pa_cancel 
+-----------+-----------
+        10 |        10
+(1 row)
+
+SELECT pa_mem() AS m0 \gset
+SET statement_timeout = 300;
+SELECT pa_cancel(2000000000);  -- fail
+ERROR:  canceling statement due to statement timeout
+CONTEXT:  PL/pgSQL function pa_cancel(integer) line 6 at assignment
+SELECT pa_cancel(2000000000);  -- fail
+ERROR:  canceling statement due to statement timeout
+CONTEXT:  PL/pgSQL function pa_cancel(integer) line 6 at assignment
+RESET statement_timeout;
+SELECT pa_cancel(1000), pa_cancel(1000);
+ pa_cancel | pa_cancel 
+-----------+-----------
+      1000 |      1000
+(1 row)
+
+SELECT pa_mem() - :m0 < 262144 AS flat_after_cancel;
+ flat_after_cancel 
+-------------------
+ t
+(1 row)
+
+SELECT pj_expect('pa_cancel(int)', 'compiled') \gset
+-- what stays declined: a domain over an array, an array of a type of the user
+CREATE DOMAIN pa_dom AS int[] CHECK (cardinality(VALUE) < 5);
+CREATE TYPE pa_comp AS (a int, b text);
+CREATE FUNCTION pa_domain(x int) RETURNS int LANGUAGE :pj_lang AS $$
+DECLARE d pa_dom := ARRAY[1, 2];
+BEGIN d[2] := x; RETURN d[2]; END $$;
+CREATE FUNCTION pa_composite(x int) RETURNS int LANGUAGE :pj_lang AS $$
+DECLARE c pa_comp[] := ARRAY[ROW(1, 'x')]::pa_comp[];
+BEGIN RETURN x + cardinality(c); END $$;
+SELECT pa_domain(1), pa_composite(1);
+ pa_domain | pa_composite 
+-----------+--------------
+         1 |            2
+(1 row)
+
+SELECT pa_domain(2), pa_composite(2);
+ pa_domain | pa_composite 
+-----------+--------------
+         2 |            3
+(1 row)
+
+SELECT pj_expect('pa_domain(int)', 'declined:datum:pa_dom') \gset
+SELECT pj_expect('pa_composite(int)', 'declined:datum:_pa_comp') \gset
+SELECT pa_domain(9);  -- fail
+ pa_domain 
+-----------
+         9
+(1 row)
+
+SELECT pa_domain(2), pa_composite(3);
+ pa_domain | pa_composite 
+-----------+--------------
+         2 |            4
+(1 row)
+
+-- NOT NULL, CONSTANT and a NULL argument
+CREATE FUNCTION pa_decl(k int) RETURNS text LANGUAGE :pj_lang AS $$
+DECLARE
+  nn int[] NOT NULL := ARRAY[1, 2];
+  c CONSTANT int[] := ARRAY[5, 6, 7];
+  n int[];
+BEGIN
+  IF k = 1 THEN nn[3] := c[2] + c[3]; n[2] := nn[3]; END IF;
+  IF k = 2 THEN nn := NULL; END IF;
+  RETURN nn::text || c::text || coalesce(n::text, 'N');
+END $$;
+SELECT pa_decl(0), pa_decl(0), pa_decl(1), pa_decl(1);
+    pa_decl    |    pa_decl    |          pa_decl          |          pa_decl          
+---------------+---------------+---------------------------+---------------------------
+ {1,2}{5,6,7}N | {1,2}{5,6,7}N | {1,2,13}{5,6,7}[2:2]={13} | {1,2,13}{5,6,7}[2:2]={13}
+(1 row)
+
+SELECT pa_decl(2);  -- fail
+ERROR:  null value cannot be assigned to variable "nn" declared NOT NULL
+CONTEXT:  PL/pgSQL function pa_decl(integer) line 8 at assignment
+SELECT pa_decl(2);  -- fail
+ERROR:  null value cannot be assigned to variable "nn" declared NOT NULL
+CONTEXT:  PL/pgSQL function pa_decl(integer) line 8 at assignment
+SELECT pa_decl(1);
+          pa_decl          
+---------------------------
+ {1,2,13}{5,6,7}[2:2]={13}
+(1 row)
+
+SELECT pj_expect('pa_decl(int)', 'compiled') \gset
+SELECT pa_sum(NULL, 3), pa_idem(NULL) IS NULL AS n, pa_rw(NULL, 1, 1);
+ pa_sum | n |           pa_rw            
+--------+---+----------------------------
+        | t | {1} | NULL | 1 | NULL | 11
+(1 row)
+
