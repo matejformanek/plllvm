@@ -405,7 +405,13 @@ walk_stmt(PjScopeWalk *w, PLpgSQL_stmt *stmt)
 				/* the value of a parameter is printed as it is */
 				foreach_ptr(PLpgSQL_expr, param, raise->params)
 					scope_expr(w, param, param, InvalidOid, -1);
-				if (!raise_terminal(raise))
+
+				/*
+				 * A message is sent, or an output function ran before a later
+				 * parameter that a deopt could run again; whether it is
+				 * silent is not for us to say.
+				 */
+				if (!raise_terminal(raise) || list_length(raise->params) > 1)
 					w->scope->has_notice = true;
 				return NULL;
 			}

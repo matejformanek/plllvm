@@ -243,9 +243,9 @@ plllvm_pj_raise_param(PjCtx *ctx, Datum value, bool isnull, Oid type)
 	{
 		MemoryContext oldcxt = MemoryContextSwitchTo(lv->raise_cxt);
 		Oid			output;
-		bool varlena;
+		bool		isvarlena;
 
-		getTypeOutputInfo(type, &output, &varlena);
+		getTypeOutputInfo(type, &output, &isvarlena);
 		str = OidOutputFunctionCall(output, value);
 		MemoryContextSwitchTo(oldcxt);
 	}

@@ -178,7 +178,8 @@ typedef struct PjScope
 	int			nready;
 	int			nunplanned;
 	int			nnotsimple;
-	bool		has_notice;		/* a RAISE below ERROR can run */
+	bool		has_notice;		/* a RAISE may have an effect a deopt would
+								 * repeat */
 } PjScope;
 
 typedef enum PjSiteKind
