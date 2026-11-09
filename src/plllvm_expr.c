@@ -571,7 +571,9 @@ check_node(const Expr *e, CheckState *cs, plllvm_repr *repr)
 					cs->why = "node";
 					return false;
 				}
-				if (!plllvm_expr_type_repr(t->typeId, repr) || *repr != cs->caseval_repr)
+				if (!plllvm_expr_type_repr(t->typeId, repr))
+					*repr = PLLLVM_DATUM;
+				if (*repr != cs->caseval_repr)
 				{
 					cs->why = "type";
 					return false;

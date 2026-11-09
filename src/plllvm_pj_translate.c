@@ -116,6 +116,9 @@ typedef struct PjEmit
 	bool		in_return;		/* emitting the value of a RETURN */
 	bool		open;			/* the current block has no terminator yet */
 	bool		poll_pending;	/* poll after the next position store */
+	bool		hold_reset;		/* the value of the expression is stored
+								 * before the per-tuple memory is reset */
+	bool		reset_held;		/* a reset was left for the store */
 	int			nboxed;			/* boxed evaluations emitted so far */
 	int			next_expr;
 	int			cur;			/* position stored in this block, or -1 */
@@ -167,6 +170,8 @@ static bool funcs_callback(Oid funcid, void *context);
 static const char *harvest_expr(PLpgSQL_function *func, PjHarvest *h,
 								PjEnv *env, PjExpr *pe, List **funcs);
 static PLpgSQL_var *arg_var(PLpgSQL_function *func, int dno);
+static bool byref_type(Oid typid);
+static bool cast_cannot_raise(Oid srctype, Oid dsttype);
 
 static void emit_stmts(PjEmit *em, List *stmts);
 static void emit_stmt(PjEmit *em, PLpgSQL_stmt *stmt);
@@ -185,6 +190,8 @@ static void expr_value(PjEmit *em, const void *owner, const char **datum,
 static const char *expr_taken(PjEmit *em, const void *owner);
 static void store_var(PjEmit *em, int dno, const char *datum,
 					  const char *isnull);
+static void assign_var(PjEmit *em, PLpgSQL_var *var, const char *datum,
+					   const char *isnull, bool evaluated);
 static void check_not_null(PjEmit *em, PLpgSQL_var *var, const char *isnull);
 static void for_check(PjEmit *em, const char *failed, PjForError what);
 static void site_done(PjEmit *em, int index, const PjExpr *pe);
@@ -232,7 +239,8 @@ plllvm_pj_scope(PLpgSQL_function *func, PjScope *scope)
 			scope->reason = "datum:record";
 			return;
 		}
-		if (!((PLpgSQL_var *) datum)->datatype->typbyval)
+		if (!((PLpgSQL_var *) datum)->datatype->typbyval &&
+			!byref_type(((PLpgSQL_var *) datum)->datatype->typoid))
 		{
 			scope->reason = psprintf("datum:%s",
 									 ((PLpgSQL_var *) datum)->datatype->typname);
@@ -439,7 +447,8 @@ var_reason(PLpgSQL_function *func, int dno)
 		return "datum:record";
 
 	var = (PLpgSQL_var *) func->datums[dno];
-	if (!var->datatype->typbyval || var->datatype->typtype == TYPTYPE_DOMAIN)
+	if ((!var->datatype->typbyval && !byref_type(var->datatype->typoid)) ||
+		var->datatype->typtype == TYPTYPE_DOMAIN)
 		return psprintf("datum:%s", var->datatype->typname);
 
 	return NULL;
@@ -717,8 +726,8 @@ harvest_expr(PLpgSQL_function *func, PjHarvest *h, PjEnv *env, PjExpr *pe,
 	{
 		Const	   *c = (Const *) tree;
 
-		/* a datum of a type passed by reference is the executor's */
-		move = c->constisnull || c->constbyval;
+		/* a constant of a type passed by reference is copied at the store */
+		move = c->constisnull || c->constbyval || byref_type(c->consttype);
 		null_const = c->constisnull;
 	}
 
@@ -796,22 +805,24 @@ harvest_expr(PLpgSQL_function *func, PjHarvest *h, PjEnv *env, PjExpr *pe,
 	}
 
 	if (!plllvm_expr_type_repr(pe->type, &repr))
-		return "cast";
+		repr = PLLLVM_DATUM;
 	/* for the tests: a value of another representation than the placeholder */
 	if (plllvm_debug_inject == PLLLVM_INJECT_PJ_BAD_CAST_REPR)
 		repr = repr == PLLLVM_F64 ? PLLLVM_I64 : PLLLVM_F64;
 
 	/* only a cast that cannot fail: a failure is for PL/pgSQL's own code */
-	if (!((pe->type == INT4OID && (pe->dsttype == INT8OID ||
-								   pe->dsttype == FLOAT8OID)) ||
-		  (pe->type == INT8OID && pe->dsttype == FLOAT8OID)))
+	if (!cast_cannot_raise(pe->type, pe->dsttype))
 		return "cast";
 
 	initStringInfo(&key);
 	initStringInfo(&facts);
+	env->need = false;
+	env->ncalls = 0;
 	if (!plllvm_expr_check_cast(cast_tree, &env->base, repr, &key, &facts,
 								&why))
 		return "cast";
+	pe->cast_calls = env->ncalls;
+	pe->ncalls += env->ncalls;
 
 	oldcxt = MemoryContextSwitchTo(h->cxt);
 	pe->cast_tree = copyObject(cast_tree);
@@ -832,9 +843,34 @@ arg_var(PLpgSQL_function *func, int dno)
 	if (dno < 0 || dno >= func->ndatums)
 		return NULL;
 	var = (PLpgSQL_var *) func->datums[dno];
-	if (var->dtype != PLPGSQL_DTYPE_VAR || !var->datatype->typbyval)
+	if (var->dtype != PLPGSQL_DTYPE_VAR ||
+		(!var->datatype->typbyval && !byref_type(var->datatype->typoid)))
 		return NULL;
 	return var;
+}
+
+/*
+ * Can a variable of this type hold a copy of ours?  A built-in base type of
+ * the executor's ordinary datum, not an array or a refcursor
+ */
+static bool
+byref_type(Oid typid)
+{
+	return typid < FirstNormalObjectId && typid != REFCURSOROID &&
+		get_typtype(typid) == TYPTYPE_BASE &&
+		!OidIsValid(get_element_type(typid));
+}
+
+/* a cast of a pinned row that raises nothing but out of memory */
+static bool
+cast_cannot_raise(Oid srctype, Oid dsttype)
+{
+	if (srctype == INT4OID)
+		return dsttype == INT8OID || dsttype == FLOAT8OID ||
+			dsttype == NUMERICOID;
+	if (srctype == INT8OID)
+		return dsttype == FLOAT8OID || dsttype == NUMERICOID;
+	return srctype == NAMEOID && dsttype == TEXTOID;
 }
 
 static void
@@ -1242,8 +1278,7 @@ cast_fold(Expr *cast_tree, const Const *src, Oid dsttype)
 	bound = cast_bind((Node *) cast_tree, (void *) src);
 	result = (Const *) eval_const_expressions(NULL, bound);
 
-	if (!IsA(result, Const) || result->consttype != dsttype ||
-		(!result->constisnull && !result->constbyval))
+	if (!IsA(result, Const) || result->consttype != dsttype)
 		return NULL;
 
 	return result;
@@ -1341,6 +1376,8 @@ plllvm_pj_emit(PLpgSQL_function *func, PjHarvest *h, PjVariant *v)
 			continue;
 		plllvm_ir_emit(em.ir, "%%v%d = alloca i64", dno);
 		plllvm_ir_emit(em.ir, "%%n%d = alloca i1", dno);
+		if (!arg_var(func, dno)->datatype->typbyval)
+			plllvm_ir_emit(em.ir, "%%o%d = alloca i1", dno);
 	}
 	foreach_int(id, h->fori)
 	{
@@ -1357,6 +1394,8 @@ plllvm_pj_emit(PLpgSQL_function *func, PjHarvest *h, PjVariant *v)
 		plllvm_ir_emit(em.ir, "store i64 0, ptr %%v%d", dno);
 		plllvm_ir_emit(em.ir, "store i1 %s, ptr %%n%d",
 					   dno == func->found_varno ? "false" : "true", dno);
+		if (!arg_var(func, dno)->datatype->typbyval)
+			plllvm_ir_emit(em.ir, "store i1 false, ptr %%o%d", dno);
 
 		for (int i = 0; i < func->fn_nargs; i++)
 		{
@@ -1507,15 +1546,23 @@ emit_block(PjEmit *em, PLpgSQL_stmt_block *block)
 
 		set_pos(em, var->default_val != NULL ? em->h->nbase + em->next_expr :
 				func->nstatements + 1 + dno);
-		store_var(em, dno, "0", "true");
+		if (var->datatype->typbyval)
+			store_var(em, dno, "0", "true");
+		else
+			assign_var(em, var, "0", "true", false);
 		if (var->default_val != NULL)
 		{
 			const char *datum;
 			const char *isnull;
 
+			em->hold_reset = !var->datatype->typbyval;
 			expr_value(em, var->default_val, &datum, &isnull);
+			em->hold_reset = false;
 			check_not_null(em, var, isnull);
-			store_var(em, dno, datum, isnull);
+			if (var->datatype->typbyval)
+				store_var(em, dno, datum, isnull);
+			else
+				assign_var(em, var, datum, isnull, true);
 		}
 	}
 
@@ -1543,9 +1590,14 @@ emit_assign(PjEmit *em, PLpgSQL_stmt_assign *stmt)
 	const char *datum;
 	const char *isnull;
 
+	em->hold_reset = !var->datatype->typbyval;
 	expr_value(em, stmt->expr, &datum, &isnull);
+	em->hold_reset = false;
 	check_not_null(em, var, isnull);
-	store_var(em, stmt->varno, datum, isnull);
+	if (var->datatype->typbyval)
+		store_var(em, stmt->varno, datum, isnull);
+	else
+		assign_var(em, var, datum, isnull, true);
 }
 
 static void
@@ -1928,7 +1980,7 @@ expr_value(PjEmit *em, const void *owner, const char **datum,
 		else
 		{
 			plllvm_expr_emit(ir, pe->tree, &em->env.base, &val);
-			if (pe->ncalls > 0)
+			if (pe->ncalls > pe->cast_calls)
 				site_done(em, index, pe);
 		}
 
@@ -1937,6 +1989,8 @@ expr_value(PjEmit *em, const void *owner, const char **datum,
 			plllvm_value src = val;
 
 			plllvm_expr_emit_cast(ir, pe->cast_tree, &em->env.base, &src, &val);
+			if (pe->cast_calls > 0)
+				site_done(em, index, pe);
 		}
 		*datum = plllvm_expr_box(ir, &val);
 		*isnull = val.isnull;
@@ -2001,7 +2055,9 @@ boxed_value(PjEmit *em, int index, const PjExpr *pe, const char **datum,
 	plllvm_ir_emit(ir, "%s = load i8, ptr %s", flag,
 				   field_ptr(ir, "%ctx", offsetof(PjCtx, isnull)));
 	plllvm_ir_emit(ir, "%s = icmp ne i8 %s, 0", null, flag);
-	if (!em->in_return)
+	if (em->hold_reset)
+		em->reset_held = true;
+	else if (!em->in_return)
 		plllvm_ir_emit(ir, "call void @plllvm_pj_boxed_reset(ptr %%ctx)");
 
 	/* a poll before the next statement, as PL/pgSQL's */
@@ -2021,7 +2077,12 @@ boxed_value(PjEmit *em, int index, const PjExpr *pe, const char **datum,
 static void
 site_done(PjEmit *em, int index, const PjExpr *pe)
 {
-	int			flags = PJ_DONE_RECHECK | (em->in_return ? 0 : PJ_DONE_RESET);
+	int			flags = PJ_DONE_RECHECK;
+
+	if (em->hold_reset)
+		em->reset_held = true;
+	else if (!em->in_return)
+		flags |= PJ_DONE_RESET;
 
 	em->nboxed++;
 	em->poll_pending = true;
@@ -2056,7 +2117,47 @@ store_var(PjEmit *em, int dno, const char *datum, const char *isnull)
 	plllvm_ir_emit(em->ir, "store i1 %s, ptr %%n%d", isnull, dno);
 }
 
-/* a NOT NULL variable takes no NULL (exec_assign_value) */
+/*
+ * The value of an expression into a variable passed by reference
+ * (plllvm_pj_assign).  What the evaluation allocated is reset only now, as
+ * the value lives there.
+ */
+static void
+assign_var(PjEmit *em, PLpgSQL_var *var, const char *datum, const char *isnull,
+		   bool evaluated)
+{
+	plllvm_ir  *ir = em->ir;
+	int			dno = var->dno;
+	const char *old = plllvm_ir_tmp(ir);
+	const char *owned = plllvm_ir_tmp(ir);
+	const char *value = plllvm_ir_tmp(ir);
+	const char *kept = plllvm_ir_tmp(ir);
+
+	plllvm_ir_declare(ir,
+					  "declare i64 @plllvm_pj_assign(ptr, i64, i1, i64, i1, i32)");
+
+	/* the copy can fail: the error is the statement's, not the expression's */
+	if (evaluated)
+		set_pos(em, ((PjExpr *) list_nth(em->h->exprs, em->next_expr - 1))->pos);
+	plllvm_ir_emit(ir, "%s = load i64, ptr %%v%d", old, dno);
+	plllvm_ir_emit(ir, "%s = load i1, ptr %%o%d", owned, dno);
+	plllvm_ir_emit(ir,
+				   "%s = call i64 @plllvm_pj_assign(ptr %%ctx, i64 %s, i1 %s, i64 %s, i1 %s, i32 %d)",
+				   value, old, owned, datum, isnull, var->datatype->typlen);
+	plllvm_ir_emit(ir, "store i64 %s, ptr %%v%d", value, dno);
+	plllvm_ir_emit(ir, "store i1 %s, ptr %%n%d", isnull, dno);
+	plllvm_ir_emit(ir, "%s = xor i1 %s, true", kept, isnull);
+	plllvm_ir_emit(ir, "store i1 %s, ptr %%o%d", kept, dno);
+
+	if (em->reset_held)
+	{
+		plllvm_ir_declare(ir, "declare void @plllvm_pj_boxed_reset(ptr)");
+		plllvm_ir_emit(ir, "call void @plllvm_pj_boxed_reset(ptr %%ctx)");
+		em->reset_held = false;
+	}
+}
+
+/* a NOT NULL variable takes no NULL (exec_assign_value()) */
 static void
 check_not_null(PjEmit *em, PLpgSQL_var *var, const char *isnull)
 {

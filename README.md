@@ -216,15 +216,21 @@ second translates the function to LLVM IR if it is in scope, and later calls
 run the code. In scope so far: blocks with `DECLARE` (defaults, `NOT NULL`,
 `CONSTANT`), assignment to a variable, `IF`, `LOOP`, `WHILE`, `FOR` over
 integers (`REVERSE`, `BY`), `EXIT` and `CONTINUE` with labels, and `RETURN`,
-with arguments and variables of a type passed by value that is no domain,
-and a result of any type that no variable holds. An expression is a bare
+with arguments and variables of a type passed by value that is no domain, or
+of a built-in base type passed by reference that is no array (`text`,
+`varchar`, `numeric`, `name`, `uuid`, `interval`, `bytea`, `jsonb`, ...), and
+a result of any type that no variable holds. An expression is a bare
 variable or constant, or one of `bool`, `int4`, `int8` and `float8` as in the
 expression JIT; any other expression that PL/pgSQL plans as simple, calls of
 non-volatile functions included, is evaluated by the executor and costs what
 that costs. Its value converts to
 the type of its target only by a widening (`int4` to `int8` or `float8`,
-`int8` to `float8`), a pinned relabeling, or, for a constant, a conversion
-made when the function is translated. An expression that PL/pgSQL has not
+`int8` to `float8`, `int4` and `int8` to `numeric`), a pinned relabeling
+(`name` to `text` calls its function), or, for a constant, a conversion made
+when the function is translated; a `varchar(n)` or `numeric(p,s)` default
+declines, while an assignment to such a variable runs the coercion inside
+its own expression, so its error is raised from compiled code with the
+SQLSTATE and CONTEXT of PL/pgSQL. An expression that PL/pgSQL has not
 planned yet, as the branch that a first call did not reach, sends the call
 back to PL/pgSQL, and the function is translated again once it is planned;
 if the function has expressions for the executor, it runs in PL/pgSQL until
@@ -333,7 +339,7 @@ measures.
 
 v0.3 adds `LANGUAGE plpgsql_jit`. It compiles scalar statements and
 locals, and runs the other simple expressions of such a function through the
-executor; SQL statements, exceptions and by-reference variables follow.
+executor; SQL statements, exceptions and arrays follow.
 
 ## Building and testing
 

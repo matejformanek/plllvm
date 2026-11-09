@@ -51,12 +51,16 @@ PL/pgSQL raised 42501, else MISMATCH, except that a step where PL/pgSQL raises
 42501 and plpgsql_jit returns without an error, in a SECURITY DEFINER program
 after an earlier 42501 of plpgsql_jit in the same transaction, in a call
 that reaches a nested frame, is class stale-privilege.  XX000 or a lost connection is always a MISMATCH.
+--mode ref writes programs over text, varchar, numeric and integer variables,
+arguments and results, in the same steps as flat ones; a bit of the first
+argument inverts each condition, so that a few warm calls reach every branch.
+
 A third of the programs call f directly instead of through the wrapper.  The
 schema name is normalised.  Every statement of a script is a step.
 
 Usage: pj_fuzz.py --psql <psql> --host <dir> --port <port> [--n N] [--start I]
                   [--seed S] [--opt-level 0|2|3] [--out dir] [--floor 0.5]
-                  [--mode flat|rec]
+                  [--mode flat|rec|ref]
 """
 import argparse
 import os
@@ -574,7 +578,7 @@ def render(s, ind):
             o += "%sDECLARE\n" % p
             for n, ty, const, nn, d in s["decls"]:
                 o += "%s  %s %s%s%s%s;\n" % (
-                    p, n, "CONSTANT " if const else "", TYPES[ty],
+                    p, n, "CONSTANT " if const else "", TYPES.get(ty, ty),
                     " NOT NULL" if nn else "", " := " + d if d else "")
         return "%s%sBEGIN\n%s%sEND;\n" % (o, p, render_stmts(s["body"], ind + 1), p)
     raise ValueError(k)
@@ -753,6 +757,479 @@ class Program:
         add("ROLLBACK;")
 
 
+# ---- programs over text, varchar and numeric (--mode ref)
+
+RT = {"text": "text", "varchar": "varchar", "numeric": "numeric", "int4": "integer"}
+REF_POOL = ["text"] * 5 + ["varchar"] * 2 + ["numeric"] * 4 + ["int4"] * 3
+REF_HARMLESS = {"text": ["'abc'", "'Hello'", "'x y z'", "'a'", "'some more text'", "'bb'"],
+                "varchar": ["'abc'", "'Hello'", "'x y z'", "'a'", "'bb'"],
+                "numeric": ["1", "2", "3", "1.5", "4.25", "7"],
+                "int4": ["1", "2", "3", "5"]}
+REF_EDGE = {"text": ["''", "' '", "'  pad  '", "repeat('ab', 5000)", "'%_x'",
+                     "repeat(md5('1'), 400)", "'é'", "NULL"],
+            "varchar": ["''", "' '", "repeat('ab', 5000)", "'é'", "NULL"],
+            "numeric": ["0", "-1", "0.5", "'NaN'", "'Infinity'", "1e100", "-0.5",
+                        "123456789.123456789", "99999.995", "NULL"],
+            "int4": ["0", "-1", "-2", "2147483647", "-2147483648", "100", "NULL"]}
+REF_LITS = {"text": ["'abc'", "''", "' '", "'Hello World'", "'x'", "'aXb'", "'%a%'"],
+            "numeric": ["0", "1", "2", "(-1)", "1.5", "0.25", "100.125", "(-2.5)"],
+            "int4": ["0", "1", "2", "3", "(-1)", "5"]}
+REF_DECL = {"text": ["text"] * 5 + ["name"],
+            "varchar": ["varchar"] * 7 + ["varchar(6)"],
+            "numeric": ["numeric"] * 9 + ["numeric(8,2)"],
+            "int4": ["int4"]}
+
+
+class RefCat:
+    """Functions, operators and casts of text, numeric and integer as
+    regprocedure text, looked up when first used."""
+
+    def __init__(self, run_sql):
+        self.run = run_sql
+        self.cache = {}
+        self.oid = {t: int(run_sql("SELECT '%s'::regtype::oid" % t)[0])
+                    for t in ("text", "numeric", "integer", "boolean", "name",
+                              "character varying")}
+
+    def _one(self, key, q):
+        if key not in self.cache:
+            rows = self.run(q)
+            self.cache[key] = rows[0] if rows else None
+        return self.cache[key]
+
+    def fn(self, name, *types):
+        vec = " ".join(str(self.oid[t]) for t in types)
+        return self._one(("fn", name, vec),
+                         "SELECT oid::regprocedure FROM pg_proc WHERE pronamespace = "
+                         "'pg_catalog'::regnamespace AND proname = '%s' AND "
+                         "proargtypes::text = '%s'" % (name, vec))
+
+    def op(self, left, name, right):
+        return self._one(("op", left, name, right),
+                         "SELECT oprcode::regprocedure FROM pg_operator WHERE oprname = '%s' "
+                         "AND oprleft = '%s'::regtype AND oprright = '%s'::regtype"
+                         % (name, left, right))
+
+    def cast(self, src, dst):
+        return self._one(("cast", src, dst),
+                         "SELECT castfunc::regprocedure FROM pg_cast WHERE castsource = "
+                         "'%s'::regtype AND casttarget = '%s'::regtype AND castfunc <> 0"
+                         % (src, dst))
+
+
+class RefGen:
+    """Statements over variables of text, varchar, numeric and integer, where
+    every condition can be flipped by a bit of the first argument, so that a
+    few calls reach every branch."""
+
+    def __init__(self, rng, cat):
+        self.r = rng
+        self.cat = cat
+        self.procs = set()
+        self.nvar = 0
+        self.scope = []
+        self.extra = []
+        self.nbit = 0
+        self.nlabel = 0
+        self.loops = []
+
+    def use(self, f):
+        if f:
+            self.procs.add(f)
+
+    def base(self, ty):
+        return "text" if ty == "varchar" else ty
+
+    def var(self, kind):
+        seen = {}
+        for v in self.scope:
+            seen[v["name"]] = v
+        ok = ("text", "varchar") if kind == "text" else (kind,)
+        c = [v for v in seen.values() if v["ty"] in ok]
+        return self.r.choice(c) if c else None
+
+    def text(self, d):
+        r = self.r
+        if d <= 0 or r.random() < 0.25:
+            v = self.var("text") if r.random() < 0.75 else None
+            if v:
+                return v["name"]
+            return r.choice(REF_LITS["text"]) if r.random() < 0.92 else "NULL::text"
+        x = r.random()
+        c = self.cat
+        a = self.text(d - 1)
+        if x < 0.25:
+            b = self.text(d - 1)
+            self.use(c.op("text", "||", "text"))
+            return "(%s || %s)" % (a, b)
+        if x < 0.32:
+            n = self.num(d - 1)
+            self.use(c.op("text", "||", "text"))
+            return "(%s || (%s)::text)" % (a, n)
+        if x < 0.4:
+            f = r.choice(["upper", "lower", "initcap", "btrim", "reverse"])
+            self.use(c.fn(f, "text"))
+            return "%s(%s)" % (f, a)
+        if x < 0.5:
+            f = r.choice(["left", "right", "repeat"])
+            self.use(c.fn(f, "text", "integer"))
+            k = r.choice(["0", "1", "2", "3", "(-1)", "length(%s) %% 4" % a])
+            if "length" in k:
+                self.use(c.fn("length", "text"))
+                self.use(c.op("integer", "%", "integer"))
+            if f == "repeat":
+                k = r.choice(["0", "1", "2", "3"])
+            return "%s(%s, %s)" % (f, a, k)
+        if x < 0.6:
+            self.use(c.fn("substr", "text", "integer", "integer"))
+            return "substr(%s, %s, %s)" % (a, r.choice(["1", "2", "0", "(-1)"]),
+                                           r.choice(["1", "2", "3", "0", self.int(0)]))
+        if x < 0.66:
+            self.use(c.fn("replace", "text", "text", "text"))
+            return "replace(%s, 'a', %s)" % (a, r.choice(["'cc'", "''", "'a'"]))
+        if x < 0.72:
+            self.use(c.fn("lpad", "text", "integer", "text"))
+            return "lpad(%s, %s, 'x')" % (a, r.choice(["0", "1", "4", "6"]))
+        if x < 0.82:
+            b = self.text(d - 1)
+            return "COALESCE(%s, %s)" % (a, b)
+        if x < 0.88:
+            b = self.text(d - 1)
+            self.use(c.op("text", "=", "text"))
+            return "NULLIF(%s, %s)" % (a, b)
+        b = self.text(d - 1)
+        e = self.boolean(d - 1, flip=False)
+        return "CASE WHEN %s THEN %s ELSE %s END" % (e, a, b)
+
+    def num(self, d):
+        r = self.r
+        c = self.cat
+        if d <= 0 or r.random() < 0.25:
+            v = self.var("numeric") if r.random() < 0.7 else None
+            if v:
+                return v["name"]
+            return r.choice(REF_LITS["numeric"]) if r.random() < 0.93 else "NULL::numeric"
+        x = r.random()
+        a = self.num(d - 1)
+        if x < 0.45:
+            op = r.choice(["+", "-", "*", "/"])
+            b = self.num(d - 1)
+            if op == "/" and not b.startswith("p"):
+                self.use(c.fn("abs", "numeric"))
+                self.use(c.op("numeric", "+", "numeric"))
+                b = "(abs(%s) + 1)" % b
+            self.use(c.op("numeric", op, "numeric"))
+            return "(%s %s %s)" % (a, op, b)
+        if x < 0.55:
+            self.use(c.fn("round", "numeric", "integer"))
+            return "round(%s, %s)" % (a, r.choice(["0", "1", "2"]))
+        if x < 0.62:
+            self.use(c.fn("abs", "numeric"))
+            return "abs(%s)" % a
+        if x < 0.7:
+            i = self.int(d - 1)
+            self.use(c.cast("integer", "numeric"))
+            self.use(c.op("numeric", "+", "numeric"))
+            return "(%s + (%s)::numeric)" % (a, i)
+        if x < 0.76:
+            self.use(c.fn("sqrt", "numeric"))
+            self.use(c.fn("abs", "numeric"))
+            return "sqrt(abs(%s))" % a
+        if x < 0.84:
+            b = self.num(d - 1)
+            return "COALESCE(%s, %s)" % (a, b)
+        if x < 0.9:
+            t = self.text(d - 1)
+            self.use(c.fn("length", "text"))
+            self.use(c.cast("integer", "numeric"))
+            return "(length(%s))::numeric" % t
+        b = self.num(d - 1)
+        e = self.boolean(d - 1, flip=False)
+        return "CASE WHEN %s THEN %s ELSE %s END" % (e, a, b)
+
+    def int(self, d):
+        r = self.r
+        c = self.cat
+        if d <= 0 or r.random() < 0.3:
+            v = self.var("int4") if r.random() < 0.7 else None
+            if v:
+                return v["name"]
+            return r.choice(REF_LITS["int4"])
+        x = r.random()
+        if x < 0.4:
+            self.use(c.fn("length", "text"))
+            return "length(%s)" % self.text(d - 1)
+        if x < 0.55:
+            self.use(c.fn("strpos", "text", "text"))
+            return "strpos(%s, %s)" % (self.text(d - 1), self.text(d - 1))
+        op = r.choice(["+", "-", "*"])
+        self.use(c.op("integer", op, "integer"))
+        return "(%s %s %s)" % (self.int(d - 1), op, self.int(d - 1))
+
+    def boolean(self, d, flip=True):
+        """A condition.  With flip, one bit of sel inverts it."""
+        r = self.r
+        c = self.cat
+        x = r.random()
+        if d <= 0 or x < 0.3:
+            op = r.choice(["=", "<>", "<", ">="])
+            self.use(c.op("text", op, "text"))
+            e = "%s %s %s" % (self.text(d - 1), op, self.text(d - 1))
+        elif x < 0.5:
+            op = r.choice(["=", "<", ">", "<>"])
+            self.use(c.op("numeric", op, "numeric"))
+            e = "%s %s %s" % (self.num(d - 1), op, self.num(d - 1))
+        elif x < 0.65:
+            op = r.choice(["<", ">", "="])
+            self.use(c.op("integer", op, "integer"))
+            e = "%s %s %s" % (self.int(d - 1), op, r.choice(["0", "1", "2", "3"]))
+        elif x < 0.78:
+            e = "%s IS %sNULL" % (self.text(d - 1), r.choice(["", "NOT "]))
+        elif x < 0.88:
+            self.use(c.op("text", "~~", "text"))
+            e = "%s LIKE %s" % (self.text(d - 1), r.choice(["'%a%'", "'x%'", "'_'"]))
+        else:
+            a = self.boolean(d - 1, flip=False)
+            b = self.boolean(d - 1, flip=False)
+            e = "%s %s %s" % (a, r.choice(["AND", "OR"]), b)
+        e = "(%s)" % e
+        if not flip:
+            return e
+        bit = self.nbit
+        self.nbit += 1
+        for op in (">>", "&", "="):
+            self.use(c.op("integer", op, "integer"))
+        return "(COALESCE(%s, false) IS DISTINCT FROM ((sel >> %d) & 1 = 1))" % (e, bit)
+
+    def value(self, ty, d=2):
+        if ty in ("text", "varchar", "name"):
+            return self.text(d)
+        if ty == "numeric":
+            return self.num(d)
+        return self.int(d)
+
+    def assignable(self):
+        seen = {}
+        for v in self.scope:
+            seen[v["name"]] = v
+        return [v for v in seen.values() if v["assign"]]
+
+    def assign(self):
+        r = self.r
+        v = r.choice(self.assignable())
+        ty = v["ty"]
+        if v["ty"] == "int4" and r.random() < 0.08:
+            self.use(self.cat.cast("numeric", "integer"))
+            e = self.num(2)
+        elif ty == "numeric" and r.random() < 0.1:
+            self.use(self.cat.cast("integer", "numeric"))
+            e = self.int(2)
+        elif r.random() < 0.15 and ty in ("text", "varchar"):
+            o = self.var("text")
+            e = o["name"] if o else self.text(1)
+        else:
+            e = self.value(ty)
+        self.note_typmod(v)
+        return {"k": "assign", "v": v["name"], "e": e}
+
+    def note_typmod(self, v):
+        """The coercion function of an assignment to varchar(n) or numeric(p,s)
+        is in the tree, and a role without it is refused."""
+        decl = v.get("decl", "")
+        if decl.startswith("varchar("):
+            self.use(self.cat.fn("varchar", "character varying", "integer", "boolean"))
+        elif decl.startswith("numeric("):
+            self.use(self.cat.fn("numeric", "numeric", "integer"))
+
+    def stmts(self, depth, n):
+        return [self.stmt(depth) for _ in range(n)]
+
+    def stmt(self, depth):
+        r = self.r
+        x = r.random()
+        if depth <= 0 or x < 0.4:
+            return self.assign()
+        if x < 0.5:
+            a = self.assign()
+            v = self.var("text")
+            if v is None:
+                return a
+            # y := x; x := ...; the copy outlives the assignment to its source
+            y = r.choice(self.assignable())
+            body = [{"k": "assign", "v": y["name"], "e": v["name"]
+                     if y["ty"] in ("text", "varchar") else self.value(y["ty"])}, a]
+            return {"k": "block", "label": None, "decls": [], "body": body}
+        if x < 0.68:
+            node = {"k": "if", "c": self.boolean(2),
+                    "then": self.stmts(depth - 1, r.randint(1, 2)),
+                    "elifs": [], "else": None}
+            for _ in range(r.choice([0, 0, 1])):
+                node["elifs"].append((self.boolean(2),
+                                      self.stmts(depth - 1, r.randint(1, 2))))
+            if r.random() < 0.5:
+                node["else"] = self.stmts(depth - 1, r.randint(1, 2))
+            return node
+        if x < 0.84:
+            return self.loop(depth)
+        if x < 0.94:
+            return self.block(depth)
+        if r.random() < 0.5:
+            return {"k": "return", "e": self.value(self.rettype)}
+        return self.assign()
+
+    def label(self, p):
+        if self.r.random() < 0.4:
+            self.nlabel += 1
+            return "%s%d" % (p, self.nlabel)
+        return None
+
+    def loop(self, depth):
+        r = self.r
+        label = self.label("l")
+        kind = r.choice(["fori", "fori", "while", "loop"])
+        self.loops.append(label)
+        try:
+            if kind == "fori":
+                v = {"name": "i%d" % r.randint(1, 9), "ty": "int4", "assign": False}
+                self.scope.append(v)
+                body = self.stmts(depth - 1, r.randint(1, 3))
+                self.scope.pop()
+                hi = r.choice(["1", "2", "3", "3", "2", "0"] if r.random() < 0.1 else
+                              ["1", "2", "3"])
+                return {"k": "fori", "label": label, "var": v["name"],
+                        "rev": r.random() < 0.2, "lo": "1", "hi": hi, "step": None,
+                        "body": body}
+            cnt = "lc%d" % (len(self.extra) + 1)
+            self.extra.append(cnt)
+            body = self.stmts(depth - 1, r.randint(1, 3))
+            if kind == "loop":
+                return {"k": "loop", "label": label, "cnt": cnt, "limit": r.randint(1, 3),
+                        "cond": None, "body": body}
+            return {"k": "while", "label": label, "cnt": cnt, "limit": r.randint(1, 3),
+                    "cond": self.boolean(2), "body": body}
+        finally:
+            self.loops.pop()
+
+    def block(self, depth):
+        r = self.r
+        n = len(self.scope)
+        decls = [self.decl() for _ in range(r.randint(1, 2))]
+        body = self.stmts(depth - 1, r.randint(1, 3))
+        del self.scope[n:]
+        return {"k": "block", "label": None, "decls": decls, "body": body}
+
+    def decl(self):
+        r = self.r
+        ty = r.choice(REF_POOL)
+        decl = r.choice(REF_DECL[ty])
+        d = None
+        if r.random() < 0.75:
+            d = "NULL" if r.random() < 0.08 else self.value(ty, 1)
+            if decl == "name" and d != "NULL":
+                d = "'nm'"
+        notnull = d is not None and d != "NULL" and r.random() < 0.1
+        self.nvar += 1
+        v = {"name": "v%d" % self.nvar, "ty": ty, "assign": True, "decl": decl}
+        self.note_typmod(v)
+        self.scope.append(v)
+        if decl == "name":
+            v["ty"] = "text"
+        return (v["name"], decl, False, notnull, d)
+
+
+class RefProgram(Program):
+    """f(sel, ...) over text, varchar, numeric and integer arguments, locals
+    and results; w(), the steps and the walk are those of Program."""
+
+    def __init__(self, seed, cat):
+        r = random.Random(seed)
+        self.rng = r
+        self.seed = seed
+        self.cat = cat
+        g = RefGen(r, cat)
+        self.g = g
+        self.params = [{"name": "sel", "ty": "int4", "assign": False}]
+        for i in range(r.choice([1, 1, 2, 2, 3])):
+            v = {"name": "p%d" % (i + 1), "ty": r.choice(REF_POOL), "assign": True}
+            self.params.append(v)
+            g.scope.append(v)
+        self.rettype = r.choice(["text", "text", "numeric", "int4", "varchar"])
+        g.rettype = self.rettype
+        self.attrs = r.choice(["", "", "IMMUTABLE", "STABLE", "IMMUTABLE STRICT"])
+        self.decls = [g.decl() for _ in range(r.randint(1, 3))]
+        self.body = g.stmts(3, r.randint(2, 4))
+        self.ret = g.value(self.rettype, 2)
+        self.priv = r.random() < 0.5
+        self.real = {}
+        self.steps = self.make_steps()
+
+    def sig(self):
+        return "(%s)" % ",".join(RT[p["ty"]] for p in self.params)
+
+    def function(self):
+        o = "CREATE FUNCTION f(%s) RETURNS %s LANGUAGE :lang %s AS $f$\n" % (
+            ", ".join("%s %s" % (p["name"], RT[p["ty"]]) for p in self.params),
+            RT[self.rettype], self.attrs)
+        o += "DECLARE\n"
+        for n, ty, const, nn, d in self.decls:
+            o += "  %s %s%s%s;\n" % (n, ty, " NOT NULL" if nn else "",
+                                     " := " + d if d else "")
+        for c in self.g.extra:
+            o += "  %s int;\n" % c
+        o += "BEGIN\n" + render_stmts(self.body, 1)
+        return o + "  RETURN %s;\nEND\n$f$;\n" % self.ret
+
+    def wrapper(self):
+        a = ", ".join("%s %s" % (p["name"], RT[p["ty"]]) for p in self.params)
+        n = ", ".join(p["name"] for p in self.params)
+        return ("CREATE FUNCTION w(%s) RETURNS text LANGUAGE plpgsql AS $w$\n"
+                "BEGIN PERFORM f(%s); RETURN 'ok';\n"
+                "EXCEPTION WHEN OTHERS THEN RETURN format('%%s %%s', SQLSTATE, SQLERRM);\nEND $w$;\n"
+                % (a, n))
+
+    def args(self, kind, mask=None):
+        r = self.rng
+        nb = max(self.g.nbit, 1)
+        out = []
+        for p in self.params:
+            t = p["ty"]
+            if p["name"] == "sel":
+                v = str(r.randrange(1 << min(nb, 20)) if mask is None else mask)
+                if kind == "edge" and r.random() < 0.05:
+                    v = "NULL"
+            elif kind == "harmless":
+                v = r.choice(REF_HARMLESS[t])
+            else:
+                v = r.choice(REF_EDGE[t] + REF_HARMLESS[t])
+            out.append("(%s)::%s" % (v, RT[t]))
+        return ", ".join(out)
+
+    def make_steps(self):
+        r = self.rng
+        nb = min(max(self.g.nbit, 1), 20)
+        full = (1 << nb) - 1
+        st = ["@create", "@wrapper"]
+        # every condition both ways: a mask and its complement
+        st.append("SELECT f(%s);" % self.args("harmless", 0))
+        st.append("SELECT f(%s);" % self.args("harmless", full))
+        for _ in range(8):
+            m = r.randrange(full + 1)
+            st.append("SELECT f(%s);" % self.args("harmless", m))
+            st.append("SELECT f(%s);" % self.args("harmless", full ^ m))
+        for _ in range(r.randint(4, 8)):
+            st.append(self.call(r.choice(["harmless", "edge", "edge"])))
+        gs = ", ".join("%s::%s" % ("(i * 5)" if p["name"] == "sel" else
+                                   {"text": "('t' || i)", "varchar": "('v' || i)",
+                                    "numeric": "(i - 3)", "int4": "(i - 3)"}[p["ty"]],
+                                   RT[p["ty"]]) for p in self.params)
+        st.append("SELECT f(%s) FROM generate_series(1, 6) i;" % gs)
+        if not self.priv:
+            st.append(self.call("edge", "w"))
+            return st
+        self.walk(st)
+        return st
+
+
 # ---- recursive programs (--mode rec)
 
 # the recursive expression, a base case, and what f assigns before it
@@ -761,7 +1238,8 @@ REC_E = ["wr(n - 1, m - 1) / m + v", "wr(n - 1, m) + v", "wr(n - 1, m - 1) + 100
          "mod(wr(n - 1, m - 1), m) + v", "wr(n - 1, m) * 2 + abs(m) / (n + m)",
          "wr2(n - 1, m - 1) / m + v"]
 REC_BASE = ["10 / m", "10 / m + v", "abs(m) / m", "mod(n, m)", "v % 7", "1"]
-REC_ASG = ["v := 1;", "v := NULL;", "IF n = 3 THEN v := NULL; ELSE v := 1; END IF;",
+REC_ASG = ["v := 1;", "v := NULL;", "v := length(t);", "t := t || 'q'; v := length(t) % 3;",
+           "IF n = 2 THEN t := NULL; END IF; v := coalesce(length(t), 2);", "IF n = 3 THEN v := NULL; ELSE v := 1; END IF;",
            "v := abs(m);", "v := 5 / m;", "IF n = 2 THEN v := NULL; ELSE v := 1; END IF;"]
 REC_PRIV = ["int4mod(int4,int4)", "int4div(int4,int4)", "int4mul(int4,int4)",
             "int4pl(int4,int4)", "int4abs(int4)"]
@@ -803,7 +1281,8 @@ class RecProgram:
         e = r.choice(REC_E)
         guard = ("IF m IS NULL THEN RETURN 3; END IF;" if r.random() < 0.6
                  else "IF m IS NULL THEN m := 1; END IF;")
-        body = ("DECLARE v int; i int := 0;\nBEGIN\n  %s\n  IF n <= 0 THEN RETURN %s; END IF;\n"
+        body = ("DECLARE v int; i int := 0; t text := 'r';\nBEGIN\n  %s\n  t := upper(t) || n::text;\n"
+                "  IF n <= 0 THEN RETURN %s; END IF;\n"
                 "  %s\n  %s\nEND" % (guard, r.choice(REC_BASE), r.choice(REC_ASG),
                                       rec_shape(r, e)))
         sd = self.priv and r.random() < 0.5
@@ -1218,7 +1697,7 @@ def main():
     ap.add_argument("--opt-level", type=int, default=None)
     ap.add_argument("--out", default="results-fuzz")
     ap.add_argument("--floor", type=float, default=0.5)
-    ap.add_argument("--mode", choices=["flat", "rec"], default="flat")
+    ap.add_argument("--mode", choices=["flat", "rec", "ref"], default="flat")
     ap.add_argument("-v", action="store_true")
     args = ap.parse_args()
 
@@ -1227,12 +1706,16 @@ def main():
     if args.mode == "rec":
         sys.exit(main_rec(args))
     cat = load_catalog(lambda q: admin(args, q))
+    if args.mode == "ref":
+        universe = cat.universe
+        cat = RefCat(lambda q: admin(args, q, DB))
+        cat.universe = universe
     tally = Counter()
     reasons = Counter()
     failed = False
     for i in range(args.start, args.start + args.n):
         seed = "%d:%d" % (args.seed, i)
-        prog = Program(seed, cat)
+        prog = (RefProgram if args.mode == "ref" else Program)(seed, cat)
         a, b = run_pair(args, prog)
         verdict, step = compare(prog, a, b, tally)
         tally[verdict] += 1

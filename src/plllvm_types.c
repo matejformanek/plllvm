@@ -632,6 +632,7 @@ void	   *referenced_functions[] =
 	plllvm_pj_params,
 	plllvm_pj_boxed_eval,
 	plllvm_pj_boxed_reset,
+	plllvm_pj_assign,
 	plllvm_pj_site,
 	plllvm_pj_invoke_track,
 	plllvm_pj_io,

@@ -49,7 +49,8 @@ REGRESS = plllvm_setup $(REGRESS_FEATURES) $(REGRESS_KERNELS) expr_plugin \
 # files run against stock PL/pgSQL's output.  REGRESS_PJ_ONCE runs in one
 # variant only, REGRESS_PJ_OPT at opt level 3.
 REGRESS_PJ = pj_language pj_basic pj_errors pj_guards pj_execute pj_casts pj_sessions \
-		pj_control pj_kernels pj_ops pj_bounds pj_memory pj_boxed pj_abort pj_planfree pj_calls
+		pj_control pj_kernels pj_ops pj_bounds pj_memory pj_boxed pj_abort pj_planfree pj_calls \
+		pj_byref pj_udf
 REGRESS_PJ_ONCE = pj_states pj_discard pj_execute_diff pj_arms pj_ctxraw \
 		pj_sessions_midcall
 REGRESS_PJ_OPT = pj_kernels pj_ops
@@ -442,11 +443,13 @@ check-pj-ir: port-ok
 	  --port $(PLLLVM_PORT) --opt '$(LLVM)/bin/opt' --kernels examples/kernels
 
 # The differential fuzzer: N programs from SEED, as plpgsql and as plpgsql_jit
-# at opt level 0 and 2, and NREC recursive ones, in the throwaway database pj_fuzz.  A difference is
-# reported by seed, with the program and both outputs in results-fuzz/.  Not part of
-# installcheck or verify.
+# at opt level 0 and 2, NREC recursive ones and NREF over text and numeric,
+# in the throwaway database pj_fuzz.  A difference is reported by seed, with
+# the program and both outputs in results-fuzz/.  Not part of installcheck or
+# verify.
 N ?= 2000
 NREC ?= 500
+NREF ?= 500
 SEED ?= 1
 
 .PHONY: fuzz-pj
@@ -461,6 +464,8 @@ fuzz-pj: port-ok
 	    --n $(N) --seed $(SEED) --opt-level $$o --out results-fuzz/O$$o || rc=1; \
 	  python3 -I tools/pj_fuzz.py --psql '$(bindir)/psql' --host /tmp --port $(PLLLVM_PORT) \
 	    --mode rec --n $(NREC) --seed $(SEED) --opt-level $$o --out results-fuzz/rec-O$$o || rc=1; \
+	  python3 -I tools/pj_fuzz.py --psql '$(bindir)/psql' --host /tmp --port $(PLLLVM_PORT) \
+	    --mode ref --n $(NREF) --seed $(SEED) --opt-level $$o --out results-fuzz/ref-O$$o || rc=1; \
 	done; exit $$rc
 
 #

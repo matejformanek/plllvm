@@ -1,4 +1,6 @@
 # Build artefacts
+__pycache__/
+*.pyc
 *.o
 *.so
 *.so.[0-9]

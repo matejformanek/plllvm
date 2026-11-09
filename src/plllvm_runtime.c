@@ -50,6 +50,7 @@ const plllvm_host_symbol plllvm_host_symbols[] =
 	{"plllvm_pj_params", (void *) plllvm_pj_params},
 	{"plllvm_pj_boxed_eval", (void *) plllvm_pj_boxed_eval},
 	{"plllvm_pj_boxed_reset", (void *) plllvm_pj_boxed_reset},
+	{"plllvm_pj_assign", (void *) plllvm_pj_assign},
 	{"plllvm_pj_site", (void *) plllvm_pj_site},
 	{"plllvm_pj_invoke_track", (void *) plllvm_pj_invoke_track},
 	{"plllvm_pj_io", (void *) plllvm_pj_io},

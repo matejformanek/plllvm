@@ -40,6 +40,28 @@ BEGIN
 END
 $$;
 
+-- the same body compiled from PL/pgSQL
+CREATE FUNCTION line_net_pj(qty integer, price numeric, disc numeric,
+                            tax numeric, region integer) RETURNS numeric
+LANGUAGE plpgsql_jit IMMUTABLE AS $$
+DECLARE
+  gross numeric;
+  net numeric;
+BEGIN
+  gross := qty * price;
+  IF qty >= 50 THEN
+    gross := gross * 0.95;
+  ELSIF qty >= 20 THEN
+    gross := gross * 0.98;
+  END IF;
+  net := round(gross * (1 - disc) * (1 + tax), 2);
+  IF region = 3 THEN
+    net := net + 1.50;
+  END IF;
+  RETURN net;
+END
+$$;
+
 -- each branch, and NULL in each argument
 SELECT a.*, line_net_ll(qty, price, disc, tax, region) AS ll,
        line_net_ll(qty, price, disc, tax, region)
@@ -64,9 +86,18 @@ FROM udf_rows WHERE id <= 20000;
 -- the query of EXP-001
 SELECT sum(line_net_ll(qty, price, disc, tax, region)) FROM udf_rows;
 
+-- the compiled PL/pgSQL gives it too, on every row, and ran compiled
+SELECT sum(line_net_pj(qty, price, disc, tax, region)) FROM udf_rows;
+SELECT count(*) FILTER (WHERE line_net_pj(qty, price, disc, tax, region)
+                              IS DISTINCT FROM line_net_ll(qty, price, disc, tax, region)) AS differ
+FROM udf_rows;
+SELECT last_path, compiled_calls > 2000000 AS compiled, deopts
+  FROM plllvm_pj_status('line_net_pj(integer,numeric,numeric,numeric,integer)');
+
 SELECT frame FROM plllvm_code_cache()
  WHERE owner_oid = 'line_net_ll(integer,numeric,numeric,numeric,integer)'::regprocedure;
 
 DROP FUNCTION line_net_ll(integer, numeric, numeric, numeric, integer);
+DROP FUNCTION line_net_pj(integer, numeric, numeric, numeric, integer);
 DROP FUNCTION line_net_pl(integer, numeric, numeric, numeric, integer);
 DROP TABLE udf_rows;

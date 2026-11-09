@@ -157,7 +157,9 @@ typedef struct PjExpr
 	PjPath		path;
 	Bitmapset  *params;			/* datums the tree reads, if boxed */
 	bool		need;			/* a snapshot of our own, if boxed */
-	int			ncalls;			/* calls the compiled code makes, if native */
+	int			ncalls;			/* calls the compiled code makes, cast
+								 * included */
+	int			cast_calls;		/* those of the cast */
 	Expr	   *cast_tree;		/* NULL: none, or no code */
 	PjCast	   *cast;			/* guard of the cast, if there is one */
 	uint64		cast_gen;
@@ -243,6 +245,8 @@ typedef struct PjLevel
 	PjVariant  *variant;
 	dlist_node	node;			/* of the live levels */
 	MemoryContext cxt;			/* NULL: none in this transaction */
+	MemoryContext datum_cxt;	/* the copies in variables passed by
+								 * reference, under cxt */
 	ExprContext *econtext;
 	ParamListInfo params;
 	PjSlot	   *slots;			/* by expression */

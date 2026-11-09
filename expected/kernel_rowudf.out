@@ -35,6 +35,27 @@ BEGIN
   RETURN net;
 END
 $$;
+-- the same body compiled from PL/pgSQL
+CREATE FUNCTION line_net_pj(qty integer, price numeric, disc numeric,
+                            tax numeric, region integer) RETURNS numeric
+LANGUAGE plpgsql_jit IMMUTABLE AS $$
+DECLARE
+  gross numeric;
+  net numeric;
+BEGIN
+  gross := qty * price;
+  IF qty >= 50 THEN
+    gross := gross * 0.95;
+  ELSIF qty >= 20 THEN
+    gross := gross * 0.98;
+  END IF;
+  net := round(gross * (1 - disc) * (1 + tax), 2);
+  IF region = 3 THEN
+    net := net + 1.50;
+  END IF;
+  RETURN net;
+END
+$$;
 -- each branch, and NULL in each argument
 SELECT a.*, line_net_ll(qty, price, disc, tax, region) AS ll,
        line_net_ll(qty, price, disc, tax, region)
@@ -79,6 +100,28 @@ SELECT sum(line_net_ll(qty, price, disc, tax, region)) FROM udf_rows;
  17596392261.47
 (1 row)
 
+-- the compiled PL/pgSQL gives it too, on every row, and ran compiled
+SELECT sum(line_net_pj(qty, price, disc, tax, region)) FROM udf_rows;
+      sum       
+----------------
+ 17596392261.47
+(1 row)
+
+SELECT count(*) FILTER (WHERE line_net_pj(qty, price, disc, tax, region)
+                              IS DISTINCT FROM line_net_ll(qty, price, disc, tax, region)) AS differ
+FROM udf_rows;
+ differ 
+--------
+      0
+(1 row)
+
+SELECT last_path, compiled_calls > 2000000 AS compiled, deopts
+  FROM plllvm_pj_status('line_net_pj(integer,numeric,numeric,numeric,integer)');
+ last_path | compiled | deopts 
+-----------+----------+--------
+ compiled  | t        |      0
+(1 row)
+
 SELECT frame FROM plllvm_code_cache()
  WHERE owner_oid = 'line_net_ll(integer,numeric,numeric,numeric,integer)'::regprocedure;
  frame 
@@ -87,5 +130,6 @@ SELECT frame FROM plllvm_code_cache()
 (1 row)
 
 DROP FUNCTION line_net_ll(integer, numeric, numeric, numeric, integer);
+DROP FUNCTION line_net_pj(integer, numeric, numeric, numeric, integer);
 DROP FUNCTION line_net_pl(integer, numeric, numeric, numeric, integer);
 DROP TABLE udf_rows;
