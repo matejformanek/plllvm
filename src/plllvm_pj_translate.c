@@ -20,8 +20,9 @@
  * 2) The value of an expression converts to its target as exec_cast_value()
  *    does, by a tree over a CaseTestExpr bound to the value.  Only a cast that
  *    cannot raise compiles, or is folded into a constant, so every cast
- *    error comes from PL/pgSQL; but for the typmod of a numeric(p,s), whose
- *    error is raised at the position of the statement.
+ *    error comes from PL/pgSQL.  The one exception is the typmod of a
+ *    numeric(p,s): its error is raised by the code, at the position of the
+ *    statement.
  *
  * 3) The statements are walked twice, in the same order and skipping the
  *    same unreachable ones: plllvm_pj_scope() collects the expressions and

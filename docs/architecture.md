@@ -298,10 +298,12 @@ Only `plllvm_jit.c` and `plllvm_error.cpp` include LLVM headers.
   instead of trusting a pointer whose plan SPI may have freed.
 * Differences from PL/pgSQL, kept: a failed `numeric(p,s)` conversion of a
   compiled frame leaves no mark in the cast state of PL/pgSQL, which a failed
-  cast there leaves to be built and checked again at its next use. After a
-  caught overflow, a role that has lost `EXECUTE` on `numeric(numeric,int4)`
-  passes PL/pgSQL's next reach of the cast in the same transaction, where
-  PL/pgSQL raises 42501.
+  cast there leaves to be built and checked again at its next use. That state
+  is shared by all PL/pgSQL functions. After a caught compiled overflow, a
+  role without `EXECUTE` on `numeric(numeric,int4)` (lost, or never held, as
+  a SECURITY DEFINER owner) passes any PL/pgSQL function's next reach of the
+  cast in the same transaction, plain `plpgsql` included, where PL/pgSQL
+  raises 42501. The result is a stale privilege, never a wrong value.
 * Differences from PL/pgSQL, kept: a compiled inner frame of a recursion
   through an expression evaluates it on the simple path, where PL/pgSQL's
   takes SPI, so values can follow the generic plan rather than the custom ones
