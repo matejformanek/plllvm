@@ -1170,7 +1170,7 @@ class RefProgram(Program):
         n = ", ".join(p["name"] for p in self.params)
         return ("CREATE FUNCTION w(%s) RETURNS text LANGUAGE plpgsql AS $w$\n"
                 "BEGIN PERFORM f(%s); RETURN 'ok';\n"
-                "EXCEPTION WHEN OTHERS THEN RETURN SQLSTATE || ' ' || SQLERRM;\nEND $w$;\n"
+                "EXCEPTION WHEN OTHERS THEN RETURN format('%%s %%s', SQLSTATE, SQLERRM);\nEND $w$;\n"
                 % (a, n))
 
     def args(self, kind, mask=None):
