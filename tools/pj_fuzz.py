@@ -53,8 +53,9 @@ after an earlier 42501 of plpgsql_jit in the same transaction, in a call
 that reaches a nested frame, is class stale-privilege.  XX000 or a lost connection is always a MISMATCH.
 --mode ref writes programs over text, varchar, numeric and integer variables,
 arguments and results, and int4[] locals with element stores, appends,
-slices and subscripts past the ends, in the same steps as flat ones; a bit of the first
-argument inverts each condition, so that a few warm calls reach every branch.
+slices and subscripts past the ends, in the same steps as flat ones; a bit
+of the first argument inverts each condition, so that a few warm calls reach
+every branch.
 
 A third of the programs call f directly instead of through the wrapper.  The
 schema name is normalised.  Every statement of a script is a step.
@@ -1075,7 +1076,7 @@ class RefGen:
             self.use(self.cat.fn("numeric", "numeric", "integer"))
 
     def subscript(self):
-        """A subscript of a small array: below, inside and past its ends."""
+        # below, inside and past the ends of a small array
         r = self.r
         if r.random() < 0.6:
             return r.choice(["1", "2", "3", "4", "0", "(-1)"])
@@ -1084,7 +1085,6 @@ class RefGen:
         return "(COALESCE(%s, 2) %% 4 + 1)" % self.int(1)
 
     def arr_stmt(self):
-        """An element stored, an array appended to or rebuilt, a slice."""
         r = self.r
         a = self.var("arr")["name"]
         x = r.random()

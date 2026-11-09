@@ -182,8 +182,10 @@ SELECT fib_k(28);
 
 SELECT pj_delta(1028457, 0, 0, 0, 1) \gset
 SELECT pj_expect('fib_k(int)', 'compiled') \gset
--- the array kernels of the bench: arrays of float8 and of text, element
--- stores, and loops around them
+-- The array kernels nbody_k, spectralnorm_k, revcomp_k and tokenize_k are
+-- PL/pgSQL transcriptions of the Computer Language Benchmarks Game programs
+-- (tokenize_k is our own design); see LICENSES/BENCHMARKS-GAME-BSD-3.md.
+--   Copyright (c) 2004-2008 Brent Fulgham, 2005-2024 Isaac Gouy.
 CREATE FUNCTION nbody_k(n integer) RETURNS text
 LANGUAGE :pj_lang IMMUTABLE AS $$
 DECLARE
@@ -198,26 +200,36 @@ DECLARE
   vx float8[]; vy float8[]; vz float8[];
   m float8[];
   i integer; j integer; s integer;
-  dx float8; dy float8; dz float8; d2 float8; mag float8; mi float8; mj float8;
+  dx float8; dy float8; dz float8; d2 float8; mag float8; mi float8;
+      mj float8;
   px float8 := 0; py float8 := 0; pz float8 := 0;
   e float8;
   e0 float8;
 BEGIN
   solar_mass := 4 * pi * pi;
-  --          sun   jupiter                 saturn                  uranus                  neptune
-  x  := ARRAY[zero, 4.84143144246472090e+00, 8.34336671824457987e+00, 1.28943695621391310e+01, 1.53796971148509165e+01]::float8[];
-  y  := ARRAY[zero, -1.16032004402742839e+00, 4.12479856412430479e+00, -1.51111514016986312e+01, -2.59193146099879641e+01]::float8[];
-  z  := ARRAY[zero, -1.03622044471123109e-01, -4.03523417114321381e-01, -2.23307578892655734e-01, 1.79258772950371181e-01]::float8[];
-  vx := ARRAY[zero, 1.66007664274403694e-03 * days_per_year, -2.76742510726862411e-03 * days_per_year,
-              2.96460137564761618e-03 * days_per_year, 2.68067772490389322e-03 * days_per_year]::float8[];
-  vy := ARRAY[zero, 7.69901118419740425e-03 * days_per_year, 4.99852801234917238e-03 * days_per_year,
-              2.37847173959480950e-03 * days_per_year, 1.62824170038242295e-03 * days_per_year]::float8[];
-  vz := ARRAY[zero, -6.90460016972063023e-05 * days_per_year, 2.30417297573763929e-05 * days_per_year,
-              -2.96589568540237556e-05 * days_per_year, -9.51592254519715870e-05 * days_per_year]::float8[];
-  m  := ARRAY[solar_mass, 9.54791938424326609e-04 * solar_mass, 2.85885980666130812e-04 * solar_mass,
-              4.36624404335156298e-05 * solar_mass, 5.15138902046611451e-05 * solar_mass]::float8[];
+  x  := ARRAY[zero, 4.84143144246472090e+00, 8.34336671824457987e+00,
+      1.28943695621391310e+01, 1.53796971148509165e+01]::float8[];
+  y  := ARRAY[zero, -1.16032004402742839e+00, 4.12479856412430479e+00,
+      -1.51111514016986312e+01, -2.59193146099879641e+01]::float8[];
+  z  := ARRAY[zero, -1.03622044471123109e-01, -4.03523417114321381e-01,
+      -2.23307578892655734e-01, 1.79258772950371181e-01]::float8[];
+  vx := ARRAY[zero, 1.66007664274403694e-03 * days_per_year,
+      -2.76742510726862411e-03 * days_per_year,
+              2.96460137564761618e-03 * days_per_year,
+                  2.68067772490389322e-03 * days_per_year]::float8[];
+  vy := ARRAY[zero, 7.69901118419740425e-03 * days_per_year,
+      4.99852801234917238e-03 * days_per_year,
+              2.37847173959480950e-03 * days_per_year,
+                  1.62824170038242295e-03 * days_per_year]::float8[];
+  vz := ARRAY[zero, -6.90460016972063023e-05 * days_per_year,
+      2.30417297573763929e-05 * days_per_year,
+              -2.96589568540237556e-05 * days_per_year,
+                  -9.51592254519715870e-05 * days_per_year]::float8[];
+  m  := ARRAY[solar_mass, 9.54791938424326609e-04 * solar_mass,
+      2.85885980666130812e-04 * solar_mass,
+              4.36624404335156298e-05 * solar_mass,
+                  5.15138902046611451e-05 * solar_mass]::float8[];
 
-  -- offset momentum
   FOR i IN 1..nb LOOP
     px := px + vx[i] * m[i];
     py := py + vy[i] * m[i];
@@ -227,7 +239,6 @@ BEGIN
   vy[1] := - py / solar_mass;
   vz[1] := - pz / solar_mass;
 
-  -- energy (before)
   e := zero;
   FOR i IN 1..nb LOOP
     e := e + half * m[i] * (vx[i]*vx[i] + vy[i]*vy[i] + vz[i]*vz[i]);
@@ -238,7 +249,6 @@ BEGIN
   END LOOP;
   e0 := e;
 
-  -- advance n steps
   FOR s IN 1..n LOOP
     FOR i IN 1..nb LOOP
       FOR j IN i+1..nb LOOP
@@ -264,7 +274,6 @@ BEGIN
     END LOOP;
   END LOOP;
 
-  -- energy (after)
   e := zero;
   FOR i IN 1..nb LOOP
     e := e + half * m[i] * (vx[i]*vx[i] + vy[i]*vy[i] + vz[i]*vz[i]);
@@ -290,7 +299,6 @@ BEGIN
   v := array_fill(0.0::float8, ARRAY[n]);
   t := array_fill(0.0::float8, ARRAY[n]);
   FOR k IN 1..10 LOOP
-    -- v := AtA(u):  t := A u ; v := At t
     FOR i IN 0..n-1 LOOP
       s := 0;
       FOR j IN 0..n-1 LOOP
@@ -307,7 +315,6 @@ BEGIN
       END LOOP;
       v[i+1] := s;
     END LOOP;
-    -- u := AtA(v)
     FOR i IN 0..n-1 LOOP
       s := 0;
       FOR j IN 0..n-1 LOOP
@@ -344,14 +351,12 @@ DECLARE
   i integer; j integer; n integer;
   ngc integer := 0;
 BEGIN
-  -- fasta-style generation: first half IUB codes, second half homo sapiens
   FOR i IN 1..nlines LOOP
     line := '';
     FOR j IN 1..60 LOOP
       seed := (seed * 3877 + 29573) % 139968;
       r := seed / im;
       IF i <= nlines / 2 THEN
-        -- IUB (cumulative)
         IF    r < 0.27 THEN c := 'a';
         ELSIF r < 0.39 THEN c := 'c';
         ELSIF r < 0.51 THEN c := 'g';
@@ -369,7 +374,6 @@ BEGIN
         ELSE                c := 'Y';
         END IF;
       ELSE
-        -- homo sapiens (cumulative)
         IF    r < 0.3029549426680 THEN c := 'a';
         ELSIF r < 0.5009432431601 THEN c := 'c';
         ELSIF r < 0.6984905497992 THEN c := 'g';
@@ -381,7 +385,6 @@ BEGIN
     lines := lines || line;
   END LOOP;
 
-  -- reverse complement, one character at a time
   n := array_length(lines, 1);
   FOR i IN REVERSE n..1 LOOP
     line := lines[i];
@@ -389,10 +392,14 @@ BEGIN
     FOR j IN REVERSE length(line)..1 LOOP
       c := upper(substr(line, j, 1));
       c := CASE c
-             WHEN 'A' THEN 'T' WHEN 'C' THEN 'G' WHEN 'G' THEN 'C' WHEN 'T' THEN 'A'
-             WHEN 'U' THEN 'A' WHEN 'M' THEN 'K' WHEN 'R' THEN 'Y' WHEN 'W' THEN 'W'
-             WHEN 'S' THEN 'S' WHEN 'Y' THEN 'R' WHEN 'K' THEN 'M' WHEN 'V' THEN 'B'
-             WHEN 'H' THEN 'D' WHEN 'D' THEN 'H' WHEN 'B' THEN 'V' WHEN 'N' THEN 'N'
+             WHEN 'A' THEN 'T' WHEN 'C' THEN 'G' WHEN 'G' THEN 'C' WHEN 'T'
+                 THEN 'A'
+             WHEN 'U' THEN 'A' WHEN 'M' THEN 'K' WHEN 'R' THEN 'Y' WHEN 'W'
+                 THEN 'W'
+             WHEN 'S' THEN 'S' WHEN 'Y' THEN 'R' WHEN 'K' THEN 'M' WHEN 'V'
+                 THEN 'B'
+             WHEN 'H' THEN 'D' WHEN 'D' THEN 'H' WHEN 'B' THEN 'V' WHEN 'N'
+                 THEN 'N'
              ELSE c END;
       IF c = 'G' OR c = 'C' THEN
         ngc := ngc + 1;
@@ -407,20 +414,23 @@ $$;
 CREATE FUNCTION tokenize_k(nlines integer) RETURNS text
 LANGUAGE :pj_lang IMMUTABLE AS $$
 DECLARE
-  syl CONSTANT text[] := ARRAY['ka','lo','ren','ti','sa','mu','be','xor','qui','on','al','de','the','and','of'];
+  syl CONSTANT text[] := ARRAY['ka','lo','ren','ti','sa','mu','be','xor',
+    'qui','on','al','de','the','and','of'];
   punct CONSTANT text[] := ARRAY[',', '.', ';', '(', ')', '!', '-'];
-  letters CONSTANT text := 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ';
+  letters CONSTANT text :=
+    'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ';
   stop CONSTANT text := ' the and of on al de ';
   seed bigint := 12345;
   lines text[] := '{}';
   line text; w text; tok text; c text;
-  i integer; j integer; k integer; nsyl integer; ntok integer; len integer; pos integer;
+  i integer; j integer; k integer; nsyl integer; ntok integer; len integer;
+      pos integer;
   num bigint; innum boolean;
-  nwords integer := 0; ncap integer := 0; nstop integer := 0; nnum integer := 0; npunct integer := 0;
+  nwords integer := 0; ncap integer := 0; nstop integer := 0;
+      nnum integer := 0; npunct integer := 0;
   numsum bigint := 0; longest integer := 0;
   h bigint := 7;
 BEGIN
-  -- phase 1: generate
   FOR i IN 1..nlines LOOP
     line := '';
     seed := (seed * 1103515245 + 12345) % 2147483648;
@@ -450,7 +460,6 @@ BEGIN
     lines := lines || line;
   END LOOP;
 
-  -- phase 2: scan
   FOR i IN 1..nlines LOOP
     line := lines[i] || ' ';
     len := length(line);
@@ -466,7 +475,6 @@ BEGIN
         innum := true;
         num := num * 10 + (ascii(c) - 48);
       ELSE
-        -- flush pending word
         IF tok <> '' THEN
           nwords := nwords + 1;
           IF upper(substr(tok, 1, 1)) = substr(tok, 1, 1) THEN
@@ -482,7 +490,6 @@ BEGIN
           h := (h * 131 + length(tok) * 17 + ascii(tok)) % 1000000007;
           tok := '';
         END IF;
-        -- flush pending number
         IF innum THEN
           nnum := nnum + 1;
           numsum := numsum + num;
@@ -498,7 +505,8 @@ BEGIN
       pos := pos + 1;
     END LOOP;
   END LOOP;
-  RETURN nwords || '/' || ncap || '/' || nstop || '/' || nnum || '/' || numsum || '/'
+  RETURN nwords || '/' || ncap || '/' || nstop || '/' || nnum || '/'
+      || numsum || '/'
          || npunct || '/' || longest || '/' || h;
 END
 $$;
@@ -565,13 +573,13 @@ SELECT pj_expect('tokenize_k(int)', 'compiled') \gset
 -- an error in the middle of a kernel, and the kernel again
 SELECT nbody_k(NULL);  -- fail
 ERROR:  upper bound of FOR loop cannot be null
-CONTEXT:  PL/pgSQL function nbody_k(integer) line 55 at FOR with integer loop variable
+CONTEXT:  PL/pgSQL function nbody_k(integer) line 63 at FOR with integer loop variable
 SELECT revcomp_k(NULL);  -- fail
 ERROR:  upper bound of FOR loop cannot be null
-CONTEXT:  PL/pgSQL function revcomp_k(integer) line 13 at FOR with integer loop variable
+CONTEXT:  PL/pgSQL function revcomp_k(integer) line 12 at FOR with integer loop variable
 SELECT tokenize_k(NULL);  -- fail
 ERROR:  upper bound of FOR loop cannot be null
-CONTEXT:  PL/pgSQL function tokenize_k(integer) line 17 at FOR with integer loop variable
+CONTEXT:  PL/pgSQL function tokenize_k(integer) line 20 at FOR with integer loop variable
 SELECT spectralnorm_k(-1);  -- fail
 ERROR:  array size exceeds the maximum allowed (134217727)
 CONTEXT:  PL/pgSQL function spectralnorm_k(integer) line 9 at assignment

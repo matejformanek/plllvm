@@ -203,10 +203,12 @@ plllvm_pj_param_ro(Datum value, bool isnull)
 	return MakeExpandedObjectReadOnly(value, isnull, -1);
 }
 
+/* read/write only for an expanded object that is ours, else as above */
 Datum
 plllvm_pj_param_rw(Datum value, bool isnull, bool owned)
 {
-	if (isnull || !owned || !VARATT_IS_EXTERNAL_EXPANDED_RW(DatumGetPointer(value)))
+	if (isnull || !owned ||
+		!VARATT_IS_EXTERNAL_EXPANDED_RW(DatumGetPointer(value)))
 		return MakeExpandedObjectReadOnly(value, isnull, -1);
 	return value;
 }

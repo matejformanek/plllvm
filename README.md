@@ -399,7 +399,9 @@ PostgreSQL Licence, see `LICENSE`; `src/plllvm_pj.c` and `src/plllvm_pj_translat
 handler (Portions Copyright PostgreSQL Global Development Group).
 
 The kernels derived from the Computer
-Language Benchmarks Game are under `LICENSES/BENCHMARKS-GAME-BSD-3.md`.
+Language Benchmarks Game, in `examples/kernels/` and in the tests
+(`sql/pj_kernels.sql`, `sql/kernel_*.sql`), are under
+`LICENSES/BENCHMARKS-GAME-BSD-3.md`.
 
 ## Trademarks
 

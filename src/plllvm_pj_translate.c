@@ -180,6 +180,7 @@ static const char *harvest_expr(PLpgSQL_function *func, PjHarvest *h,
 static PLpgSQL_var *arg_var(PLpgSQL_function *func, int dno);
 static bool byref_type(Oid typid);
 static Param *rw_param(PLpgSQL_expr *expr, Expr *tree, int paramid);
+static bool fold_array_ok(PjExpr *pe);
 static Const *fold_array_in(PjExpr *pe);
 static bool cast_cannot_raise(Oid srctype, Oid dsttype);
 static bool cast_numeric_typmod(const PjExpr *pe);
@@ -508,6 +509,7 @@ scope_expr(PjScopeWalk *w, const void *owner, PLpgSQL_expr *expr,
 	pe->expr = expr;
 	pe->owner = owner;
 	pe->retvarno = -1;
+	pe->rw = -1;
 	pe->dsttype = dsttype;
 	pe->dsttypmod = dsttypmod;
 	pe->pos = w->cur_pos;
@@ -785,7 +787,6 @@ harvest_expr(PLpgSQL_function *func, PjHarvest *h, PjEnv *env, PjExpr *pe,
 	bool		dst_domain;
 	bool		pinned;
 	bool		typmod_cast;
-	Const	   *arr;
 	Expr	   *cast_tree;
 	plllvm_repr repr;
 	StringInfoData key;
@@ -845,8 +846,7 @@ harvest_expr(PLpgSQL_function *func, PjHarvest *h, PjEnv *env, PjExpr *pe,
 		(pe->typmod == pe->dsttypmod || pe->dsttypmod == -1))
 		return NULL;
 
-	arr = fold_array_in(pe);
-	if (arr != NULL)
+	if (fold_array_ok(pe))
 	{
 		/* the conversion is the I/O one, and a cast made later replaces it */
 		pe->cast = cast_get(pe->type, pe->typmod, pe->dsttype, pe->dsttypmod,
@@ -855,7 +855,7 @@ harvest_expr(PLpgSQL_function *func, PjHarvest *h, PjEnv *env, PjExpr *pe,
 		if (cast_tree != NULL && IsA(cast_tree, CoerceViaIO))
 		{
 			oldcxt = MemoryContextSwitchTo(h->cxt);
-			pe->folded = copyObject(arr);
+			pe->folded = copyObject(fold_array_in(pe));
 			MemoryContextSwitchTo(oldcxt);
 			pe->path = PJ_PATH_FOLD;
 			return NULL;
@@ -1030,32 +1030,41 @@ rw_param(PLpgSQL_expr *expr, Expr *tree, int paramid)
 
 /*
  * A constant text as an array of a built-in type, folded when the function is
- * translated.  Only types whose input function reads no setting (that of a
+ * translated: fold_array_ok() says whether it may be, fold_array_in() does
+ * it.  Only types whose input function reads no setting (that of a
  * date reads DateStyle), so the value is the one every call would get; an
  * error declines the function, and PL/pgSQL raises it at the declaration.
  */
-static Const *
-fold_array_in(PjExpr *pe)
+static bool
+fold_array_ok(PjExpr *pe)
 {
 	Const	   *c = (Const *) pe->tree;
 	Oid			elem;
 	Oid			input;
 	Oid			ioparam;
-	Datum		d;
 
 	if (!IsA(c, Const) || c->constisnull || pe->type != TEXTOID ||
 		pe->dsttypmod != -1 || !byref_type(pe->dsttype) ||
 		!type_is_array(pe->dsttype))
-		return NULL;
+		return false;
 	elem = get_element_type(pe->dsttype);
 	if (elem != BOOLOID && elem != INT2OID && elem != INT4OID &&
 		elem != INT8OID && elem != FLOAT4OID && elem != FLOAT8OID &&
 		elem != NUMERICOID && elem != TEXTOID)
-		return NULL;
+		return false;
 	getTypeInputInfo(pe->dsttype, &input, &ioparam);
-	if (input != F_ARRAY_IN)
-		return NULL;
+	return input == F_ARRAY_IN;
+}
 
+static Const *
+fold_array_in(PjExpr *pe)
+{
+	Const	   *c = (Const *) pe->tree;
+	Oid			input;
+	Oid			ioparam;
+	Datum		d;
+
+	getTypeInputInfo(pe->dsttype, &input, &ioparam);
 	d = OidInputFunctionCall(input, TextDatumGetCString(c->constvalue),
 							 ioparam, -1);
 	return makeConst(pe->dsttype, -1, get_typcollation(pe->dsttype), -1, d,
@@ -1633,7 +1642,8 @@ plllvm_pj_emit(PLpgSQL_function *func, PjHarvest *h, PjVariant *v)
 				const char *expanded = plllvm_ir_tmp(em.ir);
 
 				plllvm_ir_declare(em.ir, "declare i64 @plllvm_pj_arg_array(ptr, i64)");
-				plllvm_ir_emit(em.ir, "%s = call i64 @plllvm_pj_arg_array(ptr %%ctx, i64 %s)",
+				plllvm_ir_emit(em.ir,
+							   "%s = call i64 @plllvm_pj_arg_array(ptr %%ctx, i64 %s)",
 							   expanded, value);
 				value = expanded;
 				plllvm_ir_emit(em.ir, "store i1 true, ptr %%o%d", dno);
@@ -2413,11 +2423,13 @@ boxed_value(PjEmit *em, int index, const PjExpr *pe, const char **datum,
 				{
 					const char *own = plllvm_ir_tmp(ir);
 					const char *rw = plllvm_ir_tmp(ir);
-					size_t		twin = (em->func->ndatums + dno) * sizeof(ParamExternData);
+					size_t		twin = (em->func->ndatums + dno) *
+						sizeof(ParamExternData);
 
 					plllvm_ir_declare(ir, "declare i64 @plllvm_pj_param_rw(i64, i1, i1)");
 					plllvm_ir_emit(ir, "%s = load i1, ptr %%o%d", own, dno);
-					plllvm_ir_emit(ir, "%s = call i64 @plllvm_pj_param_rw(i64 %s, i1 %s, i1 %s)",
+					plllvm_ir_emit(ir,
+								   "%s = call i64 @plllvm_pj_param_rw(i64 %s, i1 %s, i1 %s)",
 								   rw, value, n, own);
 					plllvm_ir_emit(ir, "store i64 %s, ptr %s", rw,
 								   field_ptr(ir, params,
