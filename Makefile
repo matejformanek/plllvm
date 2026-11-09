@@ -184,7 +184,7 @@ endif
 .PHONY: port-ok doctor stage cluster-init cluster-start cluster-stop pgindent \
 	installcheck-discard installcheck-opt installcheck-hazard installcheck-plpgsql \
 	installcheck-expr installcheck-pj installcheck-pj-once installcheck-pj-opt \
-	installcheck-plpgsql-pj check-pj-ir verify check-host-api kernels check-kernels
+	installcheck-plpgsql-pj check-pj-ir check-pj-cmodule verify check-host-api kernels check-kernels
 
 # 5432, 5433 belong to pg-claude, 5444 to the perf cluster
 port-ok:
@@ -335,7 +335,8 @@ installcheck-plpgsql: port-ok
 # of :pj_lang, plpgsql unless PJ_LANG says otherwise, so one expected output
 # is stock PL/pgSQL's.  Every variant has plllvm preloaded: pj_expect takes a
 # session without plllvm.plpgsql_jit for stock.  Under cache flushes only
-# pj_stats runs, as installcheck-expr does with expr_stats.
+# pj_guards, pj_array and pj_stats run, as installcheck-expr does with
+# expr_stats.
 #
 PJ_FIXTURE = plllvm_setup pj_setup
 
@@ -348,7 +349,7 @@ installcheck-pj:
 	$(call pj_run,$(PLPGSQL_LOAD) -c plllvm.pj_opt_level=2,$(PJ_FIXTURE) $(REGRESS_PJ) pj_stats)
 	$(call pj_run,$(PLPGSQL_LOAD) -c plllvm.pj_codegen=v1,$(PJ_FIXTURE) $(REGRESS_PJ) pj_stats)
 	$(call pj_run,$(EXPR_JIT) -c plllvm.expr_eager=on,$(PJ_FIXTURE) $(REGRESS_PJ) pj_stats)
-	$(call pj_run,$(PLPGSQL_LOAD) -c debug_discard_caches=1,$(PJ_FIXTURE) pj_guards pj_stats)
+	$(call pj_run,$(PLPGSQL_LOAD) -c debug_discard_caches=1,$(PJ_FIXTURE) pj_guards pj_array pj_stats)
 
 # expected from plllvm, so not against stock
 installcheck-pj-once:
@@ -442,6 +443,11 @@ check-pj-ir: port-ok
 	python3 -I tools/pj_ircheck.py --psql '$(bindir)/psql' --host /tmp \
 	  --port $(PLLLVM_PORT) --opt '$(LLVM)/bin/opt' --kernels examples/kernels
 
+# Pins that load a C module (tools/pj_cmodule_pins.sh): skipped, with the
+# reason printed, where no module can be built
+check-pj-cmodule: port-ok
+	sh tools/pj_cmodule_pins.sh '$(bindir)' $(PLLLVM_PORT)
+
 # The differential fuzzer: N programs from SEED, as plpgsql and as plpgsql_jit
 # at opt level 0 and 2, NREC recursive ones and NREF over text and numeric,
 # in the throwaway database pj_fuzz.  A difference is reported by seed, with
@@ -484,7 +490,7 @@ verify: port-ok
 	for t in installcheck installcheck-opt installcheck-discard installcheck-hazard \
 	  check-host-api pgindent doctor installcheck-expr installcheck-plpgsql \
 	  installcheck-pj installcheck-pj-once installcheck-pj-opt installcheck-plpgsql-pj \
-	  check-pj-ir; do \
+	  check-pj-ir check-pj-cmodule; do \
 	  step $(MAKE) $$t; \
 	  [ $$t != pgindent ] || step git diff --exit-code; \
 	done; \

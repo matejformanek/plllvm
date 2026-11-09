@@ -735,6 +735,7 @@ plllvm_pj_harvest(PLpgSQL_function *func, const PjScope *scope, PjHarvest *h)
 			}
 			MemoryContextSwitchTo(oldcxt);
 
+			/* 0 is a datum: only rw_param() below may set this */
 			copy->rw = -1;
 			if (reason == NULL)
 				reason = harvest_expr(func, h, &env, copy, &funcs);

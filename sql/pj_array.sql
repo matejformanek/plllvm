@@ -35,33 +35,56 @@ BEGIN
   FOR i IN 1..n LOOP s := s + a[i * 7]; END LOOP;
   RETURN s;
 END $$;
-SELECT pa_sum(v, 10), pa_sum(v, 100) FROM pa_big;
-SELECT pa_sum(v, 10), pa_sum(v, 100), pa_sum(v, 1000), pa_sum(v,
-    14285) FROM pa_big;
+-- a flush of the caches makes every evaluation of PL/pgSQL read the argument
+-- again, so there the loops are short
+SELECT current_setting('debug_discard_caches')::int > 0 AS dd \gset
+SELECT CASE WHEN :'dd'::bool THEN 3 ELSE 10 END AS n1,
+       CASE WHEN :'dd'::bool THEN 8 ELSE 100 END AS n2,
+       CASE WHEN :'dd'::bool THEN 10 ELSE 1000 END AS n3,
+       CASE WHEN :'dd'::bool THEN 20 ELSE 14285 END AS n4,
+       CASE WHEN :'dd'::bool THEN 5 ELSE 1000 END AS n6,
+       CASE WHEN :'dd'::bool THEN 20 ELSE 100000 END AS n7 \gset
+SELECT pa_sum(v, :n1) = 3.5 * :n1 * (:n1 + 1) / 2 AS sum1,
+       pa_sum(v, :n2) = 3.5 * :n2 * (:n2 + 1) / 2 AS sum2 FROM pa_big;
+SELECT pa_sum(v, :n1) = 3.5 * :n1 * (:n1 + 1) / 2 AS sum1,
+       pa_sum(v, :n2) = 3.5 * :n2 * (:n2 + 1) / 2 AS sum2,
+       pa_sum(v, :n3) = 3.5 * :n3 * (:n3 + 1) / 2 AS sum3,
+       pa_sum(v, :n4) = 3.5 * :n4 * (:n4 + 1) / 2 AS sum4 FROM pa_big;
 SELECT pj_expect('pa_sum(float8[],int)', 'compiled') \gset
 SELECT pa_peak() < 65536 AS peak_small_arg;
 
--- an element store changes the array in place, it is not copied: 4000
--- stores in an array of 32 MB take milliseconds, a copy of each would not
--- finish within the time given
-CREATE FUNCTION pa_store(n int) RETURNS float8 LANGUAGE :pj_lang AS $$
-DECLARE a float8[] := array_fill(1.5::float8, ARRAY[4000000]); i int;
+-- an element store changes the array in place, it is not copied: 4000 stores
+-- in an array of 32 MB cost less than 100 copies of it, where a copy of each
+-- would cost 4000.  Both are timed in the same call, so a slow host moves
+-- them together.  (A volatile callee would keep the function interpreted, so
+-- the clock is labelled STABLE.)
+CREATE FUNCTION pa_clock() RETURNS timestamptz LANGUAGE plpgsql STABLE AS $$
+BEGIN RETURN clock_timestamp(); END $$;
+CREATE FUNCTION pa_store(n int, copies int) RETURNS bool LANGUAGE :pj_lang AS $$
+DECLARE a float8[] := array_fill(1.5::float8, ARRAY[4000000]);
+  b float8[]; i int; t0 timestamptz; t1 timestamptz; t2 timestamptz;
 BEGIN
+  a[1] := 0;
+  t0 := pa_clock();
+  FOR i IN 1..copies LOOP b := array_append(a, 1.5::float8); END LOOP;
+  t1 := pa_clock();
   FOR i IN 1..n LOOP
     a[1 + i % 4000000] := a[1 + i % 4000000] + i;
   END LOOP;
-  RETURN a[1] + a[4000000] + a[7];
+  t2 := pa_clock();
+  IF a[7] <> 1.5 + 6 OR a[4000000] <> 1.5 OR a[1] <> 0 THEN
+    RAISE 'wrong element';
+  END IF;
+  RETURN t2 - t1 < 100 * (t1 - t0) / copies;
 END $$;
-SELECT pa_store(10), pa_store(10);
-SET statement_timeout = '1s';
-SELECT pa_store(4000);
-RESET statement_timeout;
-SELECT pj_expect('pa_store(int)', 'compiled') \gset
+SELECT pa_store(10, 3), pa_store(10, 3);
+SELECT CASE WHEN :'dd'::bool THEN true ELSE pa_store(4000, 3) END AS in_place;
+SELECT pj_expect('pa_store(int,int)', 'compiled') \gset
 
 -- and its arrays are given up when the call ends
 BEGIN;
 SELECT pa_mem() AS m0 \gset
-SELECT pa_store(10);
+SELECT pa_store(10, 1);
 SELECT pa_mem() - :m0 < 4194304 AS released;
 COMMIT;
 
@@ -334,9 +357,28 @@ SELECT pa_transfer(5, 0), pa_transfer(5, 1), pa_transfer(5, 2),
 SELECT pa_transfer(5, 5), pa_transfer(5, 4), pa_transfer(5, 3),
     pa_transfer(5, 2),
        pa_transfer(5, 1), pa_transfer(5, 0);
-SELECT pa_transfer(200, 1), pa_transfer(200, 2), pa_transfer(30, 3),
-       pa_transfer(20, 4), pa_transfer(200, 5);
+SELECT CASE WHEN :'dd'::bool THEN true
+       ELSE md5(concat_ws('|', pa_transfer(200, 1), pa_transfer(200, 2),
+       pa_transfer(30, 3), pa_transfer(20, 4), pa_transfer(200, 5))) =
+       'e530d5dd369c31c2b17284c24718f1ad' END AS long_chains;
 SELECT pj_expect('pa_transfer(int,int)', 'compiled') \gset
+
+-- an array that no assignment targets is read-only in every expression, in
+-- the first slot of the function as in any other
+CREATE FUNCTION pa_ro0(a int[], k int) RETURNS text LANGUAGE :pj_lang AS $$
+DECLARE b int[];
+BEGIN
+  b := pa_take(a);
+  IF k = 1 THEN b := array_append(b, pa_first(a)); END IF;
+  IF k = 2 THEN b := pa_give(a); END IF;
+  IF k = 3 THEN b := array_append(a, 9); END IF;
+  RETURN a::text || b::text;
+END $$;
+SELECT pa_ro0('{1,2,3}', 0), pa_ro0('{1,2,3}', 1), pa_ro0('{1,2,3}', 2),
+       pa_ro0('{1,2,3}', 3);
+SELECT pa_ro0('{1,2,3}', 0), pa_ro0('{1,2,3}', 1), pa_ro0('{1,2,3}', 2),
+       pa_ro0('{1,2,3}', 3);
+SELECT pj_expect('pa_ro0(int[],int)', 'compiled') \gset
 
 -- a variable assigned to itself or to another: PL/pgSQL copies the value
 -- first and frees the old one only if it is not the same object
@@ -457,8 +499,8 @@ BEGIN
   RETURN m2 - m1;
 END $$;
 SELECT pa_loop(10, 5) IS NOT NULL;
-SELECT pa_loop(100000, 1000) < 2097152 AS flat_100k;
-SELECT pa_loop(100000, 1000) < 2097152 AS flat_100k_again;
+SELECT pa_loop(:n7, :n6) < 2097152 AS flat_100k;
+SELECT pa_loop(:n7, :n6) < 2097152 AS flat_100k_again;
 SELECT pj_expect('pa_loop(int,int)', 'compiled') \gset
 
 -- over many calls of one function
@@ -469,17 +511,17 @@ BEGIN
   a := array_append(a, length(t));
   RETURN a[2] + a[4];
 END $$;
-CREATE FUNCTION pa_calls(n int) RETURNS bigint LANGUAGE plpgsql AS $$
+CREATE FUNCTION pa_calls(n int, probe int) RETURNS bigint LANGUAGE plpgsql AS $$
 DECLARE m bigint; s bigint := 0; i int;
 BEGIN
   FOR i IN 1..n LOOP
     s := s + pa_small(i);
-    IF i = 1000 THEN m := pa_mem(); END IF;
+    IF i = probe THEN m := pa_mem(); END IF;
   END LOOP;
   RETURN pa_mem() - m + 0 * s;
 END $$;
-SELECT pa_calls(1001) IS NOT NULL;
-SELECT pa_calls(100000) < 2097152 AS flat;
+SELECT pa_calls(:n6 + 1, :n6) IS NOT NULL;
+SELECT pa_calls(:n7, :n6) < 2097152 AS flat;
 SELECT pa_small(5), pa_small(6);
 SELECT pj_expect('pa_small(int)', 'compiled') \gset
 
@@ -502,7 +544,7 @@ SELECT pa_cancel(2000000000);  -- fail
 SELECT pa_cancel(2000000000);  -- fail
 \set SHOW_CONTEXT always
 RESET statement_timeout;
-SELECT pa_cancel(1000), pa_cancel(1000);
+SELECT pa_cancel(:n6) = :n6, pa_cancel(:n6) = :n6;
 SELECT pa_mem() - :m0 < 2097152 AS flat_after_cancel;
 SELECT pj_expect('pa_cancel(int)', 'compiled') \gset
 
