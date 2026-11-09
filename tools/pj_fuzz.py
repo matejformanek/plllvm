@@ -3,8 +3,8 @@
 
 A seeded generator writes a PL/pgSQL function over the statements and types
 that plpgsql_jit compiles (assignment, IF, LOOP, WHILE, FOR over integers,
-EXIT and CONTINUE, nested blocks, RETURN; smallint, integer, bigint, real,
-double precision, boolean) and a script that calls it: warm calls, then edge
+EXIT and CONTINUE, nested blocks, RAISE at every level, RETURN; smallint,
+integer, bigint, real, double precision, boolean) and a script that calls it: warm calls, then edge
 arguments.  Most programs then open a transaction and walk through role
 switches, REVOKE and GRANT of the functions the body calls (operators, casts,
 abs, sqrt, mod), a group membership that is revoked, savepoints and
@@ -394,9 +394,33 @@ class Gen:
     def stmts(self, depth, n):
         return [self.stmt(depth) for _ in range(n)]
 
+    def raise_stmt(self):
+        """RAISE at some level, with a message, a condition or nothing; the
+        arguments are expressions, which can fail at any level."""
+        r = self.r
+        level = r.choice(["DEBUG", "LOG", "INFO", "NOTICE", "NOTICE", "WARNING",
+                          "EXCEPTION"])
+        x = r.random()
+        if x < 0.03:
+            return {"k": "raise", "text": "RAISE"}
+        if x < 0.15:
+            cond = r.choice(["division_by_zero", "SQLSTATE '22012'",
+                             "unique_violation", "SQLSTATE '01000'"])
+            return {"k": "raise", "text": "RAISE %s %s" % (level, cond)}
+        args = [self.expr(r.choice(POOL), 1)[0] for _ in range(r.choice([0, 1, 1, 2, 3]))]
+        msg = "r%d" % r.randint(0, 99)
+        for a in args:
+            msg += r.choice([" %", ": %", "%%%", " (%)"])
+        if r.random() < 0.2:
+            msg += " %%"
+        return {"k": "raise", "text": "RAISE %s '%s'%s" % (
+            level, msg, "".join(", " + a for a in args))}
+
     def stmt(self, depth):
         r = self.r
         x = r.random()
+        if depth > 0 and r.random() < 0.08:
+            return self.raise_stmt()
         av = self.assignable()
         if depth <= 0 or x < 0.35:
             if av:
@@ -545,6 +569,8 @@ def render(s, ind):
         return "%s%s := %s;\n" % (p, s["v"], s["e"])
     if k == "return":
         return "%sRETURN %s;\n" % (p, s["e"])
+    if k == "raise":
+        return "%s%s;\n" % (p, s["text"])
     if k == "exit":
         return "%s%s%s%s;\n" % (p, "CONTINUE" if s["cont"] else "EXIT",
                                 " " + s["label"] if s["label"] else "",
@@ -1241,6 +1267,9 @@ REC_BASE = ["10 / m", "10 / m + v", "abs(m) / m", "mod(n, m)", "v % 7", "1"]
 REC_ASG = ["v := 1;", "v := NULL;", "v := length(t);", "t := t || 'q'; v := length(t) % 3;",
            "IF n = 2 THEN t := NULL; END IF; v := coalesce(length(t), 2);", "IF n = 3 THEN v := NULL; ELSE v := 1; END IF;",
            "v := abs(m);", "v := 5 / m;", "IF n = 2 THEN v := NULL; ELSE v := 1; END IF;"]
+REC_RAISE = ["", "", "", "RAISE NOTICE 'f % %', n, m;", "RAISE WARNING 'w %', n + m;",
+             "RAISE INFO 'i %', t;", "RAISE DEBUG 'd %', n / m;", "RAISE LOG 'l %', v;",
+             "IF n = 2 THEN RAISE NOTICE 'two % %%', n, t; END IF;"]
 REC_PRIV = ["int4mod(int4,int4)", "int4div(int4,int4)", "int4mul(int4,int4)",
             "int4pl(int4,int4)", "int4abs(int4)"]
 
@@ -1282,9 +1311,9 @@ class RecProgram:
         guard = ("IF m IS NULL THEN RETURN 3; END IF;" if r.random() < 0.6
                  else "IF m IS NULL THEN m := 1; END IF;")
         body = ("DECLARE v int; i int := 0; t text := 'r';\nBEGIN\n  %s\n  t := upper(t) || n::text;\n"
-                "  IF n <= 0 THEN RETURN %s; END IF;\n"
-                "  %s\n  %s\nEND" % (guard, r.choice(REC_BASE), r.choice(REC_ASG),
-                                      rec_shape(r, e)))
+                "  %s\n  IF n <= 0 THEN RETURN %s; END IF;\n"
+                "  %s\n  %s\nEND" % (guard, r.choice(REC_RAISE), r.choice(REC_BASE),
+                                      r.choice(REC_ASG), rec_shape(r, e)))
         sd = self.priv and r.random() < 0.5
         self.direct = r.random() < 0.3
         if self.direct:
