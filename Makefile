@@ -50,7 +50,7 @@ REGRESS = plllvm_setup $(REGRESS_FEATURES) $(REGRESS_KERNELS) expr_plugin \
 # variant only, REGRESS_PJ_OPT at opt level 3.
 REGRESS_PJ = pj_language pj_basic pj_errors pj_guards pj_execute pj_casts pj_sessions \
 		pj_control pj_kernels pj_ops pj_bounds pj_memory pj_boxed pj_abort pj_planfree pj_calls \
-		pj_byref pj_udf
+		pj_byref pj_udf pj_raise
 REGRESS_PJ_ONCE = pj_states pj_discard pj_execute_diff pj_arms pj_ctxraw \
 		pj_sessions_midcall
 REGRESS_PJ_OPT = pj_kernels pj_ops
