@@ -20,7 +20,9 @@
  * 2) The value of an expression converts to its target as exec_cast_value()
  *    does, by a tree over a CaseTestExpr bound to the value.  Only a cast that
  *    cannot raise compiles, or is folded into a constant, so every cast
- *    error comes from PL/pgSQL.
+ *    error comes from PL/pgSQL.  The one exception is the typmod of a
+ *    numeric(p,s): its error is raised by the code, at the position of the
+ *    statement.
  *
  * 3) The statements are walked twice, in the same order and skipping the
  *    same unreachable ones: plllvm_pj_scope() collects the expressions and
@@ -79,6 +81,7 @@ typedef struct PjCastKey
 	Oid			srctype;
 	int32		srctypmod;
 	Oid			dsttype;
+	int32		dsttypmod;
 } PjCastKey;
 
 typedef struct PjCastEntry
@@ -156,7 +159,7 @@ static void call_emit(plllvm_expr_env *base, plllvm_ir *ir, const Node *node,
 static const char *bare_emit(plllvm_expr_env *base, plllvm_ir *ir, Oid funcid,
 							 const char *const *args, int nargs);
 static PjCast *cast_get(Oid srctype, int32 srctypmod, Oid dsttype,
-						Expr **tree);
+						int32 dsttypmod, Expr **tree);
 static bool cast_pinned(Oid srctype, Oid dsttype);
 static Const *cast_fold(Expr *cast_tree, const Const *src, Oid dsttype);
 static bool cast_has_io(Node *node, void *context);
@@ -174,6 +177,7 @@ static const char *harvest_expr(PLpgSQL_function *func, PjHarvest *h,
 static PLpgSQL_var *arg_var(PLpgSQL_function *func, int dno);
 static bool byref_type(Oid typid);
 static bool cast_cannot_raise(Oid srctype, Oid dsttype);
+static bool cast_numeric_typmod(const PjExpr *pe);
 
 static void emit_stmts(PjEmit *em, List *stmts);
 static void emit_stmt(PjEmit *em, PLpgSQL_stmt *stmt);
@@ -743,8 +747,8 @@ plllvm_pj_harvest(PLpgSQL_function *func, const PjScope *scope, PjHarvest *h)
 /*
  * How the value of one expression is computed and converted, decided
  * against the type of the value as exec_cast_value() is.  A conversion
- * compiles only if it cannot raise; the guard of its cast is kept even when
- * it needs no code.
+ * compiles only if it cannot raise, or is the typmod of a numeric; the guard
+ * of its cast is kept even when it needs no code.
  */
 static const char *
 harvest_expr(PLpgSQL_function *func, PjHarvest *h, PjEnv *env, PjExpr *pe,
@@ -755,6 +759,7 @@ harvest_expr(PLpgSQL_function *func, PjHarvest *h, PjEnv *env, PjExpr *pe,
 	bool		null_const = false;
 	bool		dst_domain;
 	bool		pinned;
+	bool		typmod_cast;
 	Expr	   *cast_tree;
 	plllvm_repr repr;
 	StringInfoData key;
@@ -814,11 +819,14 @@ harvest_expr(PLpgSQL_function *func, PjHarvest *h, PjEnv *env, PjExpr *pe,
 		return NULL;
 
 	dst_domain = get_typtype(pe->dsttype) == TYPTYPE_DOMAIN;
-	pinned = cast_pinned(pe->type, pe->dsttype);
-	if (dst_domain || pe->dsttypmod != -1 || (!pinned && !null_const))
+	typmod_cast = cast_numeric_typmod(pe);
+	pinned = pe->type == pe->dsttype || cast_pinned(pe->type, pe->dsttype);
+	if (dst_domain || (pe->dsttypmod != -1 && !typmod_cast) ||
+		(!pinned && !null_const))
 		return "cast";
 
-	pe->cast = cast_get(pe->type, pe->typmod, pe->dsttype, &cast_tree);
+	pe->cast = cast_get(pe->type, pe->typmod, pe->dsttype, pe->dsttypmod,
+						&cast_tree);
 	pe->cast_gen = pe->cast->gen;
 
 	/* a mere relabeling needs no code: the value is the same Datum */
@@ -862,9 +870,13 @@ harvest_expr(PLpgSQL_function *func, PjHarvest *h, PjEnv *env, PjExpr *pe,
 	if (plllvm_debug_inject == PLLLVM_INJECT_PJ_BAD_CAST_REPR)
 		repr = repr == PLLLVM_F64 ? PLLLVM_I64 : PLLLVM_F64;
 
-	/* only a cast that cannot fail: a failure is for PL/pgSQL's own code */
-	if (!cast_cannot_raise(pe->type, pe->dsttype))
+	/*
+	 * Only a cast that cannot fail, or the typmod of a numeric, whose failure
+	 * is raised from the code at the position of the statement
+	 */
+	if (!typmod_cast && !cast_cannot_raise(pe->type, pe->dsttype))
 		return "cast";
+	pe->cast_raises = typmod_cast;
 
 	initStringInfo(&key);
 	initStringInfo(&facts);
@@ -923,6 +935,18 @@ cast_cannot_raise(Oid srctype, Oid dsttype)
 	if (srctype == INT8OID)
 		return dsttype == FLOAT8OID || dsttype == NUMERICOID;
 	return srctype == NAMEOID && dsttype == TEXTOID;
+}
+
+/*
+ * A numeric(p,s) target of a numeric or an integer, whose function can raise
+ * an overflow; its source is converted by a cast that cannot
+ */
+static bool
+cast_numeric_typmod(const PjExpr *pe)
+{
+	return pe->dsttype == NUMERICOID && pe->dsttypmod != -1 &&
+		(pe->type == NUMERICOID || pe->type == INT4OID ||
+		 pe->type == INT8OID);
 }
 
 static void
@@ -1195,9 +1219,10 @@ cast_pinned(Oid srctype, Oid dsttype)
  * would at the cast.
  */
 static PjCast *
-cast_get(Oid srctype, int32 srctypmod, Oid dsttype, Expr **tree)
+cast_get(Oid srctype, int32 srctypmod, Oid dsttype, int32 dsttypmod,
+		 Expr **tree)
 {
-	PjCastKey	key = {srctype, srctypmod, dsttype};
+	PjCastKey	key = {srctype, srctypmod, dsttype, dsttypmod};
 	PjCastEntry *entry;
 	bool		found;
 
@@ -1229,7 +1254,7 @@ cast_get(Oid srctype, int32 srctypmod, Oid dsttype, Expr **tree)
 		placeholder->collation = get_typcollation(srctype);
 
 		cast_expr = coerce_to_target_type(NULL, (Node *) placeholder,
-										  srctype, dsttype, -1,
+										  srctype, dsttype, dsttypmod,
 										  COERCION_PLPGSQL,
 										  COERCE_IMPLICIT_CAST, -1);
 		if (cast_expr == NULL)
@@ -2171,6 +2196,9 @@ expr_value(PjEmit *em, const void *owner, const char **datum,
 		{
 			plllvm_value src = val;
 
+			/* the expression is done: the error is the statement's */
+			if (pe->cast_raises)
+				set_pos(em, pe->pos);
 			plllvm_expr_emit_cast(ir, pe->cast_tree, &em->env.base, &src, &val);
 			if (pe->cast_calls > 0)
 				site_done(em, index, pe);

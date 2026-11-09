@@ -162,6 +162,7 @@ typedef struct PjExpr
 								 * included */
 	int			cast_calls;		/* those of the cast */
 	Expr	   *cast_tree;		/* NULL: none, or no code */
+	bool		cast_raises;	/* it may raise: numeric(p,s) */
 	PjCast	   *cast;			/* guard of the cast, if there is one */
 	uint64		cast_gen;
 	Const	   *folded;
