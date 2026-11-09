@@ -1,0 +1,315 @@
+--
+-- pj_typmod: a value converted to numeric(p,s), which can fail; compiled, it
+-- gives the answer of PL/pgSQL
+--
+\getenv pj_lang PJ_LANG
+\if :{?pj_lang}
+\else
+  \set pj_lang plpgsql
+\endif
+\set SHOW_CONTEXT always
+-- the default of a variable, from a numeric, an int4 and an int8: rounding,
+-- a negative scale and NaN
+CREATE FUNCTION pt_n(x numeric) RETURNS numeric LANGUAGE :pj_lang AS $$
+DECLARE n numeric(5,2) := x;
+BEGIN RETURN n; END $$;
+CREATE FUNCTION pt_i4(x int) RETURNS numeric LANGUAGE :pj_lang AS $$
+DECLARE n numeric(5,2) := x;
+BEGIN RETURN n; END $$;
+CREATE FUNCTION pt_i8(x bigint) RETURNS numeric LANGUAGE :pj_lang AS $$
+DECLARE n numeric(5,2) := x;
+BEGIN RETURN n; END $$;
+CREATE FUNCTION pt_neg(x numeric) RETURNS numeric LANGUAGE :pj_lang AS $$
+DECLARE n numeric(3,-2) := x;
+BEGIN RETURN n; END $$;
+CREATE FUNCTION pt_p(x numeric) RETURNS numeric LANGUAGE :pj_lang AS $$
+DECLARE n numeric(4) := x;
+BEGIN RETURN n; END $$;
+SELECT pt_n(1.234), pt_n(1.235), pt_n(-0.005), pt_n(999.994), pt_n('NaN'),
+       pt_i4(7), pt_i8(-999), pt_neg(12345), pt_neg(-150), pt_p(1234.4);
+ pt_n | pt_n | pt_n  |  pt_n  | pt_n | pt_i4 |  pt_i8  | pt_neg | pt_neg | pt_p 
+------+------+-------+--------+------+-------+---------+--------+--------+------
+ 1.23 | 1.24 | -0.01 | 999.99 |  NaN |  7.00 | -999.00 |  12300 |   -200 | 1234
+(1 row)
+
+SELECT pt_n(1.234), pt_n(1.235), pt_n(-0.005), pt_n(999.994), pt_n('NaN'),
+       pt_i4(7), pt_i8(-999), pt_neg(12345), pt_neg(-150), pt_p(1234.4);
+ pt_n | pt_n | pt_n  |  pt_n  | pt_n | pt_i4 |  pt_i8  | pt_neg | pt_neg | pt_p 
+------+------+-------+--------+------+-------+---------+--------+--------+------
+ 1.23 | 1.24 | -0.01 | 999.99 |  NaN |  7.00 | -999.00 |  12300 |   -200 | 1234
+(1 row)
+
+SELECT pt_n(1.234), pt_n(1.235), pt_n(-0.005), pt_n(999.994), pt_n('NaN'),
+       pt_i4(7), pt_i8(-999), pt_neg(12345), pt_neg(-150), pt_p(1234.4);
+ pt_n | pt_n | pt_n  |  pt_n  | pt_n | pt_i4 |  pt_i8  | pt_neg | pt_neg | pt_p 
+------+------+-------+--------+------+-------+---------+--------+--------+------
+ 1.23 | 1.24 | -0.01 | 999.99 |  NaN |  7.00 | -999.00 |  12300 |   -200 | 1234
+(1 row)
+
+SELECT pj_expect('pt_n(numeric)', 'compiled') \gset
+SELECT pj_expect('pt_i4(int)', 'compiled') \gset
+SELECT pj_expect('pt_i8(bigint)', 'compiled') \gset
+SELECT pj_expect('pt_neg(numeric)', 'compiled') \gset
+SELECT pj_expect('pt_p(numeric)', 'compiled') \gset
+-- an argument that is NULL goes to PL/pgSQL; a NULL that is computed does not
+CREATE FUNCTION pt_null(x numeric) RETURNS numeric LANGUAGE :pj_lang AS $$
+DECLARE n numeric(5,2) := nullif(x, 1);
+BEGIN RETURN n; END $$;
+SELECT pt_null(1), pt_null(2.345);
+ pt_null | pt_null 
+---------+---------
+         |    2.35
+(1 row)
+
+SELECT pt_null(1), pt_null(2.345);
+ pt_null | pt_null 
+---------+---------
+         |    2.35
+(1 row)
+
+SELECT pt_null(1), pt_null(2.345);
+ pt_null | pt_null 
+---------+---------
+         |    2.35
+(1 row)
+
+SELECT pj_expect('pt_null(numeric)', 'compiled') \gset
+-- the failures, with the position of PL/pgSQL's
+SELECT pt_n(1000);  -- fail
+ERROR:  numeric field overflow
+DETAIL:  A field with precision 5, scale 2 must round to an absolute value less than 10^3.
+CONTEXT:  PL/pgSQL function pt_n(numeric) line 2 during statement block local variable initialization
+SELECT pt_n(999.995);  -- fail
+ERROR:  numeric field overflow
+DETAIL:  A field with precision 5, scale 2 must round to an absolute value less than 10^3.
+CONTEXT:  PL/pgSQL function pt_n(numeric) line 2 during statement block local variable initialization
+SELECT pt_n(-1000);  -- fail
+ERROR:  numeric field overflow
+DETAIL:  A field with precision 5, scale 2 must round to an absolute value less than 10^3.
+CONTEXT:  PL/pgSQL function pt_n(numeric) line 2 during statement block local variable initialization
+SELECT pt_n('Infinity');  -- fail
+ERROR:  numeric field overflow
+DETAIL:  A field with precision 5, scale 2 cannot hold an infinite value.
+CONTEXT:  PL/pgSQL function pt_n(numeric) line 2 during statement block local variable initialization
+SELECT pt_n('-Infinity');  -- fail
+ERROR:  numeric field overflow
+DETAIL:  A field with precision 5, scale 2 cannot hold an infinite value.
+CONTEXT:  PL/pgSQL function pt_n(numeric) line 2 during statement block local variable initialization
+SELECT pt_i4(1000);  -- fail
+ERROR:  numeric field overflow
+DETAIL:  A field with precision 5, scale 2 must round to an absolute value less than 10^3.
+CONTEXT:  PL/pgSQL function pt_i4(integer) line 2 during statement block local variable initialization
+SELECT pt_i8(100000);  -- fail
+ERROR:  numeric field overflow
+DETAIL:  A field with precision 5, scale 2 must round to an absolute value less than 10^3.
+CONTEXT:  PL/pgSQL function pt_i8(bigint) line 2 during statement block local variable initialization
+SELECT pt_neg(100000);  -- fail
+ERROR:  numeric field overflow
+DETAIL:  A field with precision 3, scale -2 must round to an absolute value less than 10^5.
+CONTEXT:  PL/pgSQL function pt_neg(numeric) line 2 during statement block local variable initialization
+SELECT pt_p(10000);  -- fail
+ERROR:  numeric field overflow
+DETAIL:  A field with precision 4, scale 0 must round to an absolute value less than 10^4.
+CONTEXT:  PL/pgSQL function pt_p(numeric) line 2 during statement block local variable initialization
+SELECT pt_n(1000);  -- fail
+ERROR:  numeric field overflow
+DETAIL:  A field with precision 5, scale 2 must round to an absolute value less than 10^3.
+CONTEXT:  PL/pgSQL function pt_n(numeric) line 2 during statement block local variable initialization
+SELECT pt_n(2.5);
+ pt_n 
+------
+ 2.50
+(1 row)
+
+SELECT pj_expect('pt_n(numeric)', 'compiled') \gset
+SELECT pj_expect('pt_i4(int)', 'compiled') \gset
+-- a failure leaves no mark on the expression: in the same transaction the
+-- next call still runs compiled.  PL/pgSQL fails in its cast, and the
+-- expression it evaluated before is not busy.
+BEGIN;
+SAVEPOINT s;
+SELECT pt_n(1000);  -- fail
+ERROR:  numeric field overflow
+DETAIL:  A field with precision 5, scale 2 must round to an absolute value less than 10^3.
+CONTEXT:  PL/pgSQL function pt_n(numeric) line 2 during statement block local variable initialization
+ROLLBACK TO s;
+SELECT pt_n(3.456);
+ pt_n 
+------
+ 3.46
+(1 row)
+
+SELECT pj_expect('pt_n(numeric)', 'compiled') \gset
+SAVEPOINT s;
+SELECT pt_i8(1000);  -- fail
+ERROR:  numeric field overflow
+DETAIL:  A field with precision 5, scale 2 must round to an absolute value less than 10^3.
+CONTEXT:  PL/pgSQL function pt_i8(bigint) line 2 during statement block local variable initialization
+ROLLBACK TO s;
+SELECT pt_i8(3), pt_n(4.567);
+ pt_i8 | pt_n 
+-------+------
+  3.00 | 4.57
+(1 row)
+
+SELECT pj_expect('pt_i8(bigint)', 'compiled') \gset
+SELECT pj_expect('pt_n(numeric)', 'compiled') \gset
+ROLLBACK;
+-- the same in a loop, with other variables around it
+CREATE FUNCTION pt_loop(n int, lim numeric) RETURNS text LANGUAGE :pj_lang AS $$
+DECLARE
+  tot numeric(8,2) := 0;
+  step numeric(5,2) := lim;
+  last numeric(6,1);
+BEGIN
+  FOR i IN 1..n LOOP
+    DECLARE v numeric(5,1) := i * step;
+    BEGIN
+      tot := tot + v;
+      last := v;
+    END;
+  END LOOP;
+  RETURN tot || '/' || last;
+END $$;
+SELECT pt_loop(5, 1.25), pt_loop(3, 7);
+  pt_loop  |  pt_loop   
+-----------+------------
+ 18.90/6.3 | 42.00/21.0
+(1 row)
+
+SELECT pt_loop(5, 1.25), pt_loop(3, 7);
+  pt_loop  |  pt_loop   
+-----------+------------
+ 18.90/6.3 | 42.00/21.0
+(1 row)
+
+SELECT pt_loop(5, 1.25), pt_loop(3, 7);
+  pt_loop  |  pt_loop   
+-----------+------------
+ 18.90/6.3 | 42.00/21.0
+(1 row)
+
+SELECT pt_loop(60, 1.25);
+   pt_loop    
+--------------
+ 2289.00/75.0
+(1 row)
+
+SELECT pt_loop(200, 99);  -- fail
+ERROR:  numeric field overflow
+DETAIL:  A field with precision 5, scale 1 must round to an absolute value less than 10^4.
+CONTEXT:  PL/pgSQL function pt_loop(integer,numeric) line 8 during statement block local variable initialization
+SELECT pt_loop(5, 1.25), pt_loop(0, 2);
+  pt_loop  | pt_loop 
+-----------+---------
+ 18.90/6.3 | 
+(1 row)
+
+SELECT pj_expect('pt_loop(int,numeric)', 'compiled') \gset
+-- a constant is cast when the function is translated; one that cannot be
+-- stays for PL/pgSQL to fail on, every call
+CREATE FUNCTION pt_k() RETURNS numeric LANGUAGE :pj_lang AS $$
+DECLARE n numeric(5,2) := 3; m numeric(9,4) := 1.00005;
+BEGIN RETURN n + m; END $$;
+CREATE FUNCTION pt_kbad(x int) RETURNS numeric LANGUAGE :pj_lang AS $$
+DECLARE n numeric(2,1) := 99;
+BEGIN RETURN n + x; END $$;
+SELECT pt_k(), pt_k(), pt_k();
+  pt_k  |  pt_k  |  pt_k  
+--------+--------+--------
+ 4.0001 | 4.0001 | 4.0001
+(1 row)
+
+SELECT pj_expect('pt_k()', 'compiled') \gset
+SELECT pt_kbad(1);  -- fail
+ERROR:  numeric field overflow
+DETAIL:  A field with precision 2, scale 1 must round to an absolute value less than 10^1.
+CONTEXT:  PL/pgSQL function pt_kbad(integer) line 2 during statement block local variable initialization
+SELECT pt_kbad(1);  -- fail
+ERROR:  numeric field overflow
+DETAIL:  A field with precision 2, scale 1 must round to an absolute value less than 10^1.
+CONTEXT:  PL/pgSQL function pt_kbad(integer) line 2 during statement block local variable initialization
+SELECT pt_kbad(1);  -- fail
+ERROR:  numeric field overflow
+DETAIL:  A field with precision 2, scale 1 must round to an absolute value less than 10^1.
+CONTEXT:  PL/pgSQL function pt_kbad(integer) line 2 during statement block local variable initialization
+SELECT pj_expect('pt_kbad(int)', 'declined:22003: numeric field overflow') \gset
+-- the assignment of a computed value; the coercion is a part of its tree
+CREATE FUNCTION pt_asg(x numeric, y int) RETURNS numeric LANGUAGE :pj_lang AS $$
+DECLARE n numeric(5,2); m numeric(6,1);
+BEGIN
+  n := x * y;
+  m := n + 0.049;
+  RETURN n + m;
+END $$;
+SELECT pt_asg(1.111, 3), pt_asg(0.5, 7);
+ pt_asg | pt_asg 
+--------+--------
+   6.73 |   7.00
+(1 row)
+
+SELECT pt_asg(1.111, 3), pt_asg(0.5, 7);
+ pt_asg | pt_asg 
+--------+--------
+   6.73 |   7.00
+(1 row)
+
+SELECT pt_asg(1.111, 3), pt_asg(0.5, 7);
+ pt_asg | pt_asg 
+--------+--------
+   6.73 |   7.00
+(1 row)
+
+SELECT pj_expect('pt_asg(numeric,int)', 'compiled') \gset
+SELECT pt_asg(100, 100);  -- fail
+ERROR:  numeric field overflow
+DETAIL:  A field with precision 5, scale 2 must round to an absolute value less than 10^3.
+CONTEXT:  PL/pgSQL function pt_asg(numeric,integer) line 4 at assignment
+SELECT pt_asg(1.111, 3);
+ pt_asg 
+--------
+   6.73
+(1 row)
+
+-- what is still not ours: another source type, another target
+CREATE FUNCTION pt_f8(x float8) RETURNS numeric LANGUAGE :pj_lang AS $$
+DECLARE n numeric(5,2) := x;
+BEGIN RETURN n; END $$;
+CREATE FUNCTION pt_txt(x text) RETURNS numeric LANGUAGE :pj_lang AS $$
+DECLARE n numeric(5,2) := x;
+BEGIN RETURN n; END $$;
+CREATE FUNCTION pt_vc(x numeric) RETURNS varchar LANGUAGE :pj_lang AS $$
+DECLARE v varchar(4) := x;
+BEGIN RETURN v; END $$;
+SELECT pt_f8(1.5), pt_txt('2.25'), pt_vc(1.5);
+ pt_f8 | pt_txt | pt_vc 
+-------+--------+-------
+  1.50 |   2.25 | 1.5
+(1 row)
+
+SELECT pt_f8(1.5), pt_txt('2.25'), pt_vc(1.5);
+ pt_f8 | pt_txt | pt_vc 
+-------+--------+-------
+  1.50 |   2.25 | 1.5
+(1 row)
+
+SELECT pt_f8(1.5), pt_txt('2.25'), pt_vc(1.5);
+ pt_f8 | pt_txt | pt_vc 
+-------+--------+-------
+  1.50 |   2.25 | 1.5
+(1 row)
+
+SELECT pj_expect('pt_f8(float8)', 'declined:cast') \gset
+SELECT pj_expect('pt_txt(text)', 'declined:cast') \gset
+SELECT pj_expect('pt_vc(numeric)', 'declined:cast') \gset
+SELECT pt_f8(1000);  -- fail
+ERROR:  numeric field overflow
+DETAIL:  A field with precision 5, scale 2 must round to an absolute value less than 10^3.
+CONTEXT:  PL/pgSQL function pt_f8(double precision) line 2 during statement block local variable initialization
+SELECT pt_txt('1000');  -- fail
+ERROR:  numeric field overflow
+DETAIL:  A field with precision 5, scale 2 must round to an absolute value less than 10^3.
+CONTEXT:  PL/pgSQL function pt_txt(text) line 2 during statement block local variable initialization
+SELECT pt_vc(12345.6);  -- fail
+ERROR:  value too long for type character varying(4)
+CONTEXT:  PL/pgSQL function pt_vc(numeric) line 2 during statement block local variable initialization

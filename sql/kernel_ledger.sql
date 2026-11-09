@@ -62,6 +62,59 @@ BEGIN
 END
 $$;
 
+-- the same body compiled from PL/pgSQL
+CREATE FUNCTION ledger_pj(nloans integer, months integer) RETURNS text
+LANGUAGE plpgsql_jit IMMUTABLE AS $$
+DECLARE
+  k integer; mth integer;
+  seed bigint := 42;
+  principal numeric(12,2);
+  balance numeric(12,2);
+  payment numeric(12,2);
+  interest numeric(12,2);
+  princ_part numeric(12,2);
+  fee numeric(12,2);
+  rate numeric(10,6);
+  mrate numeric(14,10);
+  f numeric(24,12);
+  total_interest numeric(18,2) := 0;
+  total_paid numeric(18,2) := 0;
+  nfees integer := 0;
+BEGIN
+  FOR k IN 1..nloans LOOP
+    seed := (seed * 1103515245 + 12345) % 2147483648;
+    principal := 5000 + (seed % 495001);
+    rate := 0.02 + (seed % 800) / 10000.0;
+    mrate := rate / 12;
+    f := 1;
+    FOR mth IN 1..months LOOP
+      f := round(f * (1 + mrate), 12);
+    END LOOP;
+    payment := round(principal * mrate * f / (f - 1), 2);
+    balance := principal;
+    FOR mth IN 1..months LOOP
+      interest := round(balance * mrate, 2);
+      IF mth = months OR payment - interest > balance THEN
+        princ_part := balance;
+      ELSE
+        princ_part := payment - interest;
+      END IF;
+      IF (k + mth) % 13 = 0 THEN
+        fee := round(balance * 0.0015, 2) + 5.00;
+        nfees := nfees + 1;
+      ELSE
+        fee := 0;
+      END IF;
+      balance := balance - princ_part;
+      total_interest := total_interest + interest + fee;
+      total_paid := total_paid + princ_part + interest + fee;
+      EXIT WHEN balance <= 0;
+    END LOOP;
+  END LOOP;
+  RETURN total_interest::text || '/' || total_paid::text || '/' || nfees::text;
+END
+$$;
+
 SELECT s.n, s.m, ledger_ll(s.n, s.m) AS ll, ledger_ll(s.n, s.m) = ledger_pl(s.n, s.m) AS ok
 FROM (SELECT n, m FROM (VALUES (0, 12), (1, 13), (3, 12), (10, 24), (25, 360), (0, NULL)) v(n, m)
       OFFSET 0) s
@@ -77,6 +130,15 @@ FROM (VALUES (NULL::int, 12), (1, NULL::int), (NULL::int, NULL::int), (1, 0)) s(
 -- the size of EXP-001
 SELECT ledger_ll(2400, 360);
 
+-- the compiled PL/pgSQL gives it too, and ran compiled
+SELECT ledger_pj(2400, 360) = ledger_ll(2400, 360) AS same,
+       ledger_pj(2400, 360) = ledger_pl(2400, 360) AS stock;
+SELECT s.n, s.m, ledger_pj(s.n, s.m) IS NOT DISTINCT FROM ledger_pl(s.n, s.m) AS ok
+FROM (VALUES (0, 12), (1, 13), (3, 12), (10, 24), (25, 360)) s(n, m);
+SELECT sqlstate_of('SELECT ledger_pj(1, 0)') AS pj, sqlstate_of('SELECT ledger_pl(1, 0)') AS pl;
+SELECT last_path, compiled_calls > 2 AS compiled, deopts
+  FROM plllvm_pj_status('ledger_pj(integer,integer)');
+
 SELECT bool_and(ready) AS ready, bool_and(NOT busy) AS idle
 FROM plllvm_call_sites()
 WHERE owner = 'ledger_ll(integer,integer)'::regprocedure;
@@ -84,4 +146,5 @@ WHERE owner = 'ledger_ll(integer,integer)'::regprocedure;
 SELECT state FROM plllvm_function_status('ledger_ll(integer,integer)');
 
 DROP FUNCTION ledger_ll(integer, integer);
+DROP FUNCTION ledger_pj(integer, integer);
 DROP FUNCTION ledger_pl(integer, integer);

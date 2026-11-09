@@ -190,13 +190,17 @@ Only `plllvm_jit.c` and `plllvm_error.cpp` include LLVM headers.
   variable. Before each step that can raise it stores an index of a position
   table in `ctx`, from which the handler writes the error context of
   `plpgsql_exec_error_callback`. A value is converted to the result type by
-  the cast tree PL/pgSQL would build, cached per pair of types, but only by
-  a cast that cannot raise: widening int4 to int8 or float8, int8 to float8,
-  int4 or int8 to numeric, name to text, or a relabeling through a pinned
-  `pg_cast` row; or, for a constant, a
+  the cast tree PL/pgSQL would build, cached per pair of types and typmods,
+  but only by a cast that cannot raise: widening int4 to int8 or float8, int8
+  to float8, int4 or int8 to numeric, name to text, or a relabeling through a
+  pinned `pg_cast` row; or, for a constant, a
   conversion of built-in immutable functions that runs when the function is
-  translated (an error there declines the function). Any other cast declines
-  (`cast`), so the cast of a default or a RETURN that fails is PL/pgSQL's own.
+  translated (an error there declines the function). The one that can raise
+  is `numeric(numeric,int4)` of a `numeric(p,s)` target, from a numeric, int4
+  or int8. The code stores the position of the statement or variable before
+  it, naming no expression: PL/pgSQL fails in its cast after the expression is
+  done, and leaves that expression idle. Any other cast declines (`cast`), so
+  the cast of a default or a RETURN that fails is PL/pgSQL's own.
   The coercion of `:=` to `varchar(n)` or `numeric(p,s)` is a function in the
   assignment's own expression: it runs as a callee and raises from compiled
   code with PL/pgSQL's SQLSTATE and CONTEXT, and a caught error marks the
@@ -292,6 +296,12 @@ Only `plllvm_jit.c` and `plllvm_error.cpp` include LLVM headers.
   use of the plan in a transaction, a compiled frame never does, so a mark
   forgets the plan pointer unless PL/pgSQL has one, and PL/pgSQL replans
   instead of trusting a pointer whose plan SPI may have freed.
+* Differences from PL/pgSQL, kept: a failed `numeric(p,s)` conversion of a
+  compiled frame leaves no mark in the cast state of PL/pgSQL, which a failed
+  cast there leaves to be built and checked again at its next use. After a
+  caught overflow, a role that has lost `EXECUTE` on `numeric(numeric,int4)`
+  passes PL/pgSQL's next reach of the cast in the same transaction, where
+  PL/pgSQL raises 42501.
 * Differences from PL/pgSQL, kept: a compiled inner frame of a recursion
   through an expression evaluates it on the simple path, where PL/pgSQL's
   takes SPI, so values can follow the generic plan rather than the custom ones

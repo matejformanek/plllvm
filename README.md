@@ -227,10 +227,11 @@ that costs. Its value converts to
 the type of its target only by a widening (`int4` to `int8` or `float8`,
 `int8` to `float8`, `int4` and `int8` to `numeric`), a pinned relabeling
 (`name` to `text` calls its function), or, for a constant, a conversion made
-when the function is translated; a `varchar(n)` or `numeric(p,s)` default
+when the function is translated, or a `numeric(p,s)` from a `numeric`,
+`int4` or `int8`, whose overflow is raised from compiled code with the
+SQLSTATE and CONTEXT of PL/pgSQL; a `varchar(n)` or `char(n)` default
 declines, while an assignment to such a variable runs the coercion inside
-its own expression, so its error is raised from compiled code with the
-SQLSTATE and CONTEXT of PL/pgSQL. An expression that PL/pgSQL has not
+its own expression, so its error is raised from compiled code too. An expression that PL/pgSQL has not
 planned yet, as the branch that a first call did not reach, sends the call
 back to PL/pgSQL, and the function is translated again once it is planned;
 if the function has expressions for the executor, it runs in PL/pgSQL until
@@ -245,6 +246,12 @@ The language is untrusted: only a superuser creates functions in it
 (`GRANT USAGE` on an untrusted language is refused). `SET
 plllvm.plpgsql_jit = off` sends every call straight to PL/pgSQL. A
 PL/pgSQL function and a `plpgsql_jit` one call each other freely.
+
+A failed `numeric(p,s)` conversion in compiled code leaves no mark in the
+state PL/pgSQL keeps for its casts, which a failed cast in PL/pgSQL does. So
+after an overflow that was caught, a role that has since lost `EXECUTE` on
+`numeric(numeric, int4)` can pass PL/pgSQL's next use of that cast in the same
+transaction, where PL/pgSQL builds the cast again and raises 42501.
 
 ## Configuration
 
