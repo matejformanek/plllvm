@@ -443,11 +443,13 @@ check-pj-ir: port-ok
 	  --port $(PLLLVM_PORT) --opt '$(LLVM)/bin/opt' --kernels examples/kernels
 
 # The differential fuzzer: N programs from SEED, as plpgsql and as plpgsql_jit
-# at opt level 0 and 2, and NREC recursive ones, in the throwaway database pj_fuzz.  A difference is
+# at opt level 0 and 2, NREC recursive ones and NREF over text and numeric,
+# in the throwaway database pj_fuzz.  A difference is
 # reported by seed, with the program and both outputs in results-fuzz/.  Not part of
 # installcheck or verify.
 N ?= 2000
 NREC ?= 500
+NREF ?= 500
 SEED ?= 1
 
 .PHONY: fuzz-pj
@@ -462,6 +464,8 @@ fuzz-pj: port-ok
 	    --n $(N) --seed $(SEED) --opt-level $$o --out results-fuzz/O$$o || rc=1; \
 	  python3 -I tools/pj_fuzz.py --psql '$(bindir)/psql' --host /tmp --port $(PLLLVM_PORT) \
 	    --mode rec --n $(NREC) --seed $(SEED) --opt-level $$o --out results-fuzz/rec-O$$o || rc=1; \
+	  python3 -I tools/pj_fuzz.py --psql '$(bindir)/psql' --host /tmp --port $(PLLLVM_PORT) \
+	    --mode ref --n $(NREF) --seed $(SEED) --opt-level $$o --out results-fuzz/ref-O$$o || rc=1; \
 	done; exit $$rc
 
 #
