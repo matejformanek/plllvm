@@ -1,0 +1,227 @@
+--
+-- pj_udf: per-row functions over numeric and text columns, of the shapes of
+-- the bench's line_net and of a word counter and an instr
+--
+\getenv pj_lang PJ_LANG
+\if :{?pj_lang}
+\else
+  \set pj_lang plpgsql
+\endif
+CREATE TABLE pu_rows (
+  id integer, qty integer, price numeric(8,2), disc numeric(4,4), tax numeric(4,4),
+  region integer, txt text);
+INSERT INTO pu_rows
+SELECT g, 1 + (g::bigint * 37) % 60, 1.00 + ((g::bigint * 7907) % 99901) / 100.0,
+       ((g::bigint * 13) % 11) / 100.0, ((g::bigint * 17) % 9) / 100.0, g % 5,
+       CASE g % 7 WHEN 0 THEN '' WHEN 1 THEN 'one' WHEN 2 THEN ' two  words '
+                  WHEN 3 THEN repeat('ab ', 1 + g % 13) WHEN 4 THEN 'x'
+                  WHEN 5 THEN repeat('word ', 20) ELSE 'a  b   c' END
+FROM generate_series(1, 5000) g;
+CREATE FUNCTION pu_line_net(qty integer, price numeric, disc numeric,
+                            tax numeric, region integer) RETURNS numeric
+LANGUAGE :pj_lang IMMUTABLE AS $$
+DECLARE
+  gross numeric;
+  net numeric;
+BEGIN
+  gross := qty * price;
+  IF qty >= 50 THEN
+    gross := gross * 0.95;
+  ELSIF qty >= 20 THEN
+    gross := gross * 0.98;
+  END IF;
+  net := round(gross * (1 - disc) * (1 + tax), 2);
+  IF region = 3 THEN
+    net := net + 1.50;
+  END IF;
+  RETURN net;
+END
+$$;
+SELECT pu_line_net(10, 12.34, 0.05, 0.08, 1), pu_line_net(60, 999.99, 0.10, 0.00, 3);
+ pu_line_net | pu_line_net 
+-------------+-------------
+      126.61 |    51300.99
+(1 row)
+
+SELECT sum(pu_line_net(qty, price, disc, tax, region)), count(*) FILTER (WHERE region = 3)
+  FROM pu_rows WHERE id <= 40;
+    sum    | count 
+-----------+-------
+ 598572.39 |     8
+(1 row)
+
+SELECT pj_mark() \gset
+SELECT sum(pu_line_net(qty, price, disc, tax, region)), count(pu_line_net(qty, price, disc, tax, region))
+  FROM pu_rows;
+     sum     | count 
+-------------+-------
+ 73210573.02 |  5000
+(1 row)
+
+SELECT pj_delta(NULL, NULL, NULL, 0, NULL) \gset
+SELECT pj_expect('pu_line_net(int,numeric,numeric,numeric,int)', 'compiled') \gset
+-- the NULLs are PL/pgSQL's
+SELECT pu_line_net(NULL, 12.34, 0.05, 0.08, 1), pu_line_net(10, NULL, 0.05, 0.08, 1),
+       pu_line_net(10, 12.34, NULL, 0.08, 1), pu_line_net(10, 12.34, 0.05, NULL, 1),
+       pu_line_net(10, 12.34, 0.05, 0.08, NULL);
+ pu_line_net | pu_line_net | pu_line_net | pu_line_net | pu_line_net 
+-------------+-------------+-------------+-------------+-------------
+             |             |             |             |      126.61
+(1 row)
+
+SELECT sum(pu_line_net(qty, price, disc, tax, region)) FROM pu_rows;
+     sum     
+-------------
+ 73210573.02
+(1 row)
+
+SELECT pj_expect('pu_line_net(int,numeric,numeric,numeric,int)', 'compiled') \gset
+-- a word counter: the NULL and the empty string are branches of their own, and
+-- the loop body is a substring, a comparison and two flags
+CREATE FUNCTION pu_words(s varchar) RETURNS integer LANGUAGE :pj_lang AS $$
+DECLARE
+  ch varchar;
+  in_word boolean := false;
+  n integer := 0;
+  len integer;
+BEGIN
+  IF s IS NULL THEN
+    RETURN -1;
+  END IF;
+  len := char_length(s);
+  IF len = 0 THEN
+    RETURN 0;
+  END IF;
+  FOR i IN 1..len LOOP
+    ch := substr(s, i, 1);
+    IF ch = ' ' THEN
+      in_word := false;
+    ELSIF NOT in_word THEN
+      in_word := true;
+      n := n + 1;
+    END IF;
+  END LOOP;
+  RETURN n;
+END
+$$;
+SELECT pu_words('hello wide world');
+ pu_words 
+----------
+        3
+(1 row)
+
+SELECT pu_words(' two  words ');
+ pu_words 
+----------
+        2
+(1 row)
+
+-- two arms were never taken: the function waits for their plans
+SELECT pj_expect('pu_words(varchar)', 'waiting') \gset
+SELECT pu_words(NULL), pu_words('');
+ pu_words | pu_words 
+----------+----------
+       -1 |        0
+(1 row)
+
+SELECT pu_words('x');
+ pu_words 
+----------
+        1
+(1 row)
+
+SELECT pu_words('hello wide world');
+ pu_words 
+----------
+        3
+(1 row)
+
+SELECT pj_expect('pu_words(varchar)', 'compiled') \gset
+SELECT pj_mark() \gset
+SELECT sum(pu_words(txt)), count(*) FILTER (WHERE pu_words(txt) = 0) FROM pu_rows;
+  sum  | count 
+-------+-------
+ 24276 |   714
+(1 row)
+
+SELECT pj_delta(NULL, NULL, NULL, 0, 0) \gset
+SELECT pj_expect('pu_words(varchar)', 'compiled') \gset
+SELECT id, pu_words(txt) FROM pu_rows WHERE id <= 8 ORDER BY id;
+ id | pu_words 
+----+----------
+  1 |        1
+  2 |        2
+  3 |        4
+  4 |        1
+  5 |       20
+  6 |        3
+  7 |        0
+  8 |        1
+(8 rows)
+
+-- instr
+CREATE FUNCTION pu_instr(str varchar, sub varchar, beg integer) RETURNS integer
+LANGUAGE :pj_lang AS $$
+DECLARE
+  pos integer NOT NULL DEFAULT 0;
+  rest varchar;
+  p integer;
+BEGIN
+  IF beg > 0 THEN
+    rest := substring(str FROM beg);
+    pos := position(sub IN rest);
+    IF pos = 0 THEN
+      RETURN 0;
+    END IF;
+    RETURN pos + beg - 1;
+  END IF;
+  p := char_length(str) + beg - char_length(sub) + 2;
+  WHILE p > 0 LOOP
+    rest := substring(str FROM p FOR char_length(sub));
+    pos := position(sub IN rest);
+    IF pos > 0 THEN
+      RETURN p;
+    END IF;
+    p := p - 1;
+  END LOOP;
+  RETURN 0;
+END
+$$;
+SELECT pu_instr('hello world', 'o', 1), pu_instr('hello world', 'o', 6), pu_instr('hello', 'z', 1);
+ pu_instr | pu_instr | pu_instr 
+----------+----------+----------
+        5 |        8 |        0
+(1 row)
+
+SELECT pu_instr('hello world', 'o', -1), pu_instr('hello world', 'l', -4), pu_instr('hello', 'z', -1);
+ pu_instr | pu_instr | pu_instr 
+----------+----------+----------
+        8 |        4 |        0
+(1 row)
+
+SELECT pu_instr('hello world', 'o', 1), pu_instr('hello world', 'o', 6), pu_instr('hello', 'z', 1);
+ pu_instr | pu_instr | pu_instr 
+----------+----------+----------
+        5 |        8 |        0
+(1 row)
+
+SELECT pu_instr('hello world', 'o', -1), pu_instr('hello world', 'l', -4), pu_instr('hello', 'z', -1);
+ pu_instr | pu_instr | pu_instr 
+----------+----------+----------
+        8 |        4 |        0
+(1 row)
+
+SELECT pu_instr('hello world', 'o', 1), pu_instr('hello', 'z', -1);
+ pu_instr | pu_instr 
+----------+----------
+        5 |        0
+(1 row)
+
+SELECT pj_expect('pu_instr(varchar,varchar,int)', 'compiled') \gset
+SELECT sum(pu_instr(txt, 'o', 1)), sum(pu_instr(txt, 'b', -2)) FROM pu_rows;
+ sum  |  sum  
+------+-------
+ 5003 | 17127
+(1 row)
+
+SELECT pj_expect('pu_instr(varchar,varchar,int)', 'compiled') \gset
