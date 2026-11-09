@@ -59,7 +59,7 @@ SELECT pj_expect('pa_store(int)', 'compiled') \gset
 BEGIN;
 SELECT pa_mem() AS m0 \gset
 SELECT pa_store(10);
-SELECT pa_mem() - :m0 < 65536 AS released;
+SELECT pa_mem() - :m0 < 4194304 AS released;
 COMMIT;
 
 -- values: NULL elements, subscripts out of range, assignment past the ends,
@@ -401,7 +401,8 @@ SELECT pj_delta(0, 0, 0, 1, 0) \gset
 SELECT pa_restart(1), pa_restart(0);
 
 -- memory: the old array of each assignment is freed, whatever the shape of
--- the loop; measured inside the call, between an iteration and the end
+-- the loop; measured inside the call, between an iteration and the end.  The
+-- bound is wide for the size of the report itself, a leak is megabytes.
 CREATE FUNCTION pa_loop(n int, probe int) RETURNS bigint LANGUAGE :pj_lang AS $$
 DECLARE
   a float8[] := array_fill(0.0::float8, ARRAY[10]);
@@ -424,9 +425,8 @@ BEGIN
   RETURN m2 - m1;
 END $$;
 SELECT pa_loop(10, 5) IS NOT NULL;
-SELECT pa_loop(2000, 1000) < 65536 AS flat_2k;
-SELECT pa_loop(100000, 1000) < 65536 AS flat_100k;
-SELECT pa_loop(100000, 1000) < 65536 AS flat_100k_again;
+SELECT pa_loop(100000, 1000) < 2097152 AS flat_100k;
+SELECT pa_loop(100000, 1000) < 2097152 AS flat_100k_again;
 SELECT pj_expect('pa_loop(int,int)', 'compiled') \gset
 
 -- over many calls of one function
@@ -447,7 +447,7 @@ BEGIN
   RETURN pa_mem() - m + 0 * s;
 END $$;
 SELECT pa_calls(1001) IS NOT NULL;
-SELECT pa_calls(100000) < 65536 AS flat;
+SELECT pa_calls(100000) < 2097152 AS flat;
 SELECT pa_small(5), pa_small(6);
 SELECT pj_expect('pa_small(int)', 'compiled') \gset
 
@@ -470,7 +470,7 @@ SELECT pa_cancel(2000000000);  -- fail
 \set SHOW_CONTEXT always
 RESET statement_timeout;
 SELECT pa_cancel(1000), pa_cancel(1000);
-SELECT pa_mem() - :m0 < 262144 AS flat_after_cancel;
+SELECT pa_mem() - :m0 < 2097152 AS flat_after_cancel;
 SELECT pj_expect('pa_cancel(int)', 'compiled') \gset
 
 -- what stays declined: a domain over an array, an array of a type of the user

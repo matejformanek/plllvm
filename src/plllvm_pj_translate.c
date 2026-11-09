@@ -848,11 +848,19 @@ harvest_expr(PLpgSQL_function *func, PjHarvest *h, PjEnv *env, PjExpr *pe,
 	arr = fold_array_in(pe);
 	if (arr != NULL)
 	{
-		oldcxt = MemoryContextSwitchTo(h->cxt);
-		pe->folded = copyObject(arr);
-		MemoryContextSwitchTo(oldcxt);
-		pe->path = PJ_PATH_FOLD;
-		return NULL;
+		/* the conversion is the I/O one, and a cast made later replaces it */
+		pe->cast = cast_get(pe->type, pe->typmod, pe->dsttype, pe->dsttypmod,
+							&cast_tree);
+		pe->cast_gen = pe->cast->gen;
+		if (cast_tree != NULL && IsA(cast_tree, CoerceViaIO))
+		{
+			oldcxt = MemoryContextSwitchTo(h->cxt);
+			pe->folded = copyObject(arr);
+			MemoryContextSwitchTo(oldcxt);
+			pe->path = PJ_PATH_FOLD;
+			return NULL;
+		}
+		pe->cast = NULL;
 	}
 
 	dst_domain = get_typtype(pe->dsttype) == TYPTYPE_DOMAIN;
