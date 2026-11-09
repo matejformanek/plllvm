@@ -23,6 +23,9 @@ A step is one of
               something else, or both raise it at different expressions; the
               role must really lack a function the body needs at that step,
               else it is a MISMATCH
+  stale-privilege  plpgsql raises 42501 and plpgsql_jit does not, after a call
+              that plpgsql_jit refused with 42501 where plpgsql went on, and
+              plpgsql without that call answers as plpgsql_jit does (L2)
   PERMISSIVE  plpgsql raises 42501 and plpgsql_jit does not: a bug
   MISMATCH    anything else
 
@@ -43,14 +46,19 @@ compiled frames do not.  So a step may differ from PL/pgSQL, and is the stated
 difference only if plpgsql_jit gives what PL/pgSQL gives under
 plan_cache_mode = force_generic_plan or force_custom_plan, each step by
 itself, so that a history of one then the other is allowed, or a 42501 for
-the function the program revoked (stricter).  Any other step is searched for
-a history: each call run by PL/pgSQL under auto, generic or custom, or not at
-all (only a call plpgsql_jit answered with that 42501).
+the function the program revoked (stricter).  A step may also be a mix: an
+answer that one of the modes gives, with the effects (NOTICE and the like) of
+the custom plan as a subsequence of them and they of the generic plan's, as
+frames that took the custom plan and frames that took the generic one give;
+the class is frame-mix.  Any other step is searched for a history: each call
+run by PL/pgSQL under auto, generic or custom, or not at all (only a call
+plpgsql_jit answered with that 42501).
 One that is found is class "history" and printed.  Not found: PERMISSIVE if
 PL/pgSQL raised 42501, else MISMATCH, except that a step where PL/pgSQL raises
 42501 and plpgsql_jit returns without an error, in a SECURITY DEFINER program
 after an earlier 42501 of plpgsql_jit in the same transaction, in a call
-that reaches a nested frame, is class stale-privilege.  XX000 or a lost connection is always a MISMATCH.
+that reaches a nested frame, is class stale-privilege.  XX000 or a lost
+connection is always a MISMATCH.
 --mode ref writes programs over text, varchar, numeric and integer variables,
 arguments and results, and int4[] locals with element stores, appends,
 slices and subscripts past the ends, in the same steps as flat ones; a bit
@@ -1539,11 +1547,57 @@ def stale_shape(prog, sb, bad):
     return False
 
 
+EFFECT = re.compile(r"^(NOTICE|INFO|WARNING|LOG|DEBUG[1-5]):  ")
+
+
+def effects(lines):
+    """The effects of a step (messages) and its answer (the rest)."""
+    return ([l for l in lines if EFFECT.match(l)], [l for l in lines if not EFFECT.match(l)])
+
+
+def subseq(a, b):
+    it = iter(b)
+    return all(l in it for l in a)
+
+
+def frame_mix(j, a, c, g):
+    """Is the output j of plpgsql_jit what a recursion gets when some frames
+    take SPI's custom plan and others the generic one?  Its answer is that of
+    auto, custom or generic, and its effects lie between the custom plan's
+    and the generic plan's: those of custom are a subsequence of them, and
+    they a subsequence of those of generic.  A wrong value, or an effect that
+    no mode has, is not a mix."""
+    if c is None or g is None:
+        return False
+    je, ja = effects(j)
+    ce, ca = effects(c)
+    ge, ga = effects(g)
+    return ja in (effects(a)[1], ca, ga) and subseq(ce, je) and subseq(je, ge)
+
+
+def selftest():
+    """The shapes of fuzz cases 21:597 and the reduction minA2, and the
+    mutants that must not pass."""
+    n = lambda *v: ["NOTICE:  00000: mb %d" % i for i in v]
+    c, g = n(4, 3) + ["N"], n(4, 3, 2, 1, 0) + ["ERROR:  22012: division by zero"]
+    ok = [(n(4, 3, 2) + ["N"], c, c, g), (n(4, 3, 2, 1, 0) + ["ERROR:  22012: division by zero"], g, c, g),
+          (n(4, 3) + ["N"], c, c, g)]
+    bad = [(n(4, 3, 2) + ["7"], c, c, g),                 # a wrong value
+           (n(4, 3, 2, 9) + ["N"], c, c, g),              # an effect no mode has
+           (n(4, 2) + ["N"], c, c, g),                    # custom's effects lost
+           (n(4, 3, 2, 1, 0, 0) + ["N"], c, c, g),        # more than generic's
+           (n(4, 3, 2) + ["ERROR:  22003: x"], c, c, g)]  # an error no mode raises
+    assert all(frame_mix(*t) for t in ok), "frame-mix refused a mix"
+    assert not any(frame_mix(*t) for t in bad), "frame-mix accepted a mutant"
+    print("pj_fuzz: selftest ok")
+
+
 def rec_compare(args, prog, a, b, tally):
     """The verdict of a program and the step of it that decides.  equal;
     plan-choice, when every step that differs is what PL/pgSQL gives under
     force_generic_plan or force_custom_plan or a 42501 for the revoked
-    function; history, when a history of PL/pgSQL gives all of them; stale-privilege;
+    function; frame-mix, when a step that does not is a mix of the two (see
+    frame_mix); history, when a history of PL/pgSQL gives all of them; stale-privilege;
     otherwise PERMISSIVE or MISMATCH.  XX000 and a lost connection are
     MISMATCH at once."""
     sa, sb = rec_split(a, SCHEMAS["plpgsql"]), rec_split(b, SCHEMAS["plpgsql_jit"])
@@ -1560,7 +1614,7 @@ def rec_compare(args, prog, a, b, tally):
         out = run_psql(args, rec_script(prog, "plpgsql"),
                        extra=" -c plan_cache_mode=force_%s_plan" % mode)
         forced[mode] = rec_split(out, SCHEMAS["plpgsql"])
-    bad = None
+    bad, mixed = None, False
     for i in diff:
         x, y = sa.get(str(i), []), sb.get(str(i), [])
         if y == forced["generic"].get(str(i)):
@@ -1569,11 +1623,14 @@ def rec_compare(args, prog, a, b, tally):
             tally["custom-steps"] += 1
         elif denied_fn(prog, y):
             tally["stricter-steps"] += 1
+        elif frame_mix(y, x, forced["custom"].get(str(i)), forced["generic"].get(str(i))):
+            tally["mix-steps"] += 1
+            mixed = True
         else:
             bad = i
             break
     if bad is None:
-        return "plan-choice", diff[0]
+        return ("frame-mix" if mixed else "plan-choice"), diff[0]
     h = history(args, prog, sb)
     if h is not None:
         print("  history of seed %s: %s" % (prog.seed, h))
@@ -1605,7 +1662,8 @@ def main_rec(args):
         m = re.search(r"@@ status\n(.*)", b, re.S)
         st = m.group(1).strip().split("\n")[0].split("|") if m else []
         tally["compiled"] += len(st) == 4 and int(st[2]) > 0
-        if args.v or verdict not in ("equal", "plan-choice", "history", "stale-privilege"):
+        if args.v or verdict not in ("equal", "plan-choice", "frame-mix", "history",
+                                     "stale-privilege"):
             print("seed %s: %s%s" % (seed, verdict, "" if step is None else " at step %d" % step))
         if verdict in ("MISMATCH", "PERMISSIVE"):
             failed = True
@@ -1618,14 +1676,16 @@ def main_rec(args):
                             rec_script(prog, "plpgsql_jit", True), a, b))
             print("  program and outputs: %s" % f)
     print("pj_fuzz rec: seed=%d programs=%d opt_level=%s equal=%d plan-choice=%d mismatch=%d "
-          "history=%d stale-privilege=%d permissive=%d compiled=%d (%.1f%%)"
+          "frame-mix=%d history=%d stale-privilege=%d permissive=%d compiled=%d (%.1f%%)"
           % (args.seed, args.n, args.opt_level, tally["equal"], tally["plan-choice"],
-             tally["MISMATCH"], tally["history"], tally["stale-privilege"], tally["PERMISSIVE"],
+             tally["MISMATCH"], tally["frame-mix"], tally["history"], tally["stale-privilege"],
+             tally["PERMISSIVE"],
              tally["compiled"],
              100.0 * tally["compiled"] / max(args.n, 1)))
     print("pj_fuzz rec: steps that differ, as plpgsql_jit gives under force_generic_plan %d, "
-          "force_custom_plan %d, 42501 where plpgsql has a value %d"
-          % (tally["generic-steps"], tally["custom-steps"], tally["stricter-steps"]))
+          "force_custom_plan %d, in between %d, 42501 where plpgsql has a value %d"
+          % (tally["generic-steps"], tally["custom-steps"], tally["mix-steps"],
+             tally["stricter-steps"]))
     if tally["compiled"] < args.floor * args.n:
         print("pj_fuzz: compiled fraction below the floor of %.0f%%" % (100 * args.floor))
         failed = True
@@ -1723,30 +1783,60 @@ def split(out, schema):
     return steps
 
 
-def compare(prog, a, b, tally):
+def replay_without(args, prog, drop):
+    """The output of plpgsql with the calls of steps drop left out."""
+    base = list(prog.steps)
+    prog.steps = ["SELECT 'dropped';" if i in drop else s for i, s in enumerate(base)]
+    try:
+        return split(run_psql(args, script(prog, "plpgsql")), SCHEMAS["plpgsql"])
+    finally:
+        prog.steps = base
+
+
+def compare(args, prog, a, b, tally):
     """The verdict of the program and the first step of it; the first
-    PERMISSIVE or MISMATCH ends the comparison, a stricter step does not."""
+    PERMISSIVE or MISMATCH ends the comparison, a stricter step does not.
+    A PERMISSIVE step after calls that plpgsql_jit refused with 42501 where
+    plpgsql went on is looked up in a run of plpgsql without those calls (L2):
+    if plpgsql then answers as plpgsql_jit does, the program is
+    stale-privilege, and the comparison goes on against that run."""
     sa, sb = split(a, SCHEMAS["plpgsql"]), split(b, SCHEMAS["plpgsql_jit"])
     verdict, first = "equal", None
-    for i in range(len(prog.steps)):
+    refused, skip = [], set()
+    i = 0
+    while i < len(prog.steps):
         x, y = sa.get(str(i), []), sb.get(str(i), [])
         if i in prog.real:
             tally["walk-calls"] += 1
             tally["walk-calls-aborted"] += any("25P02" in l for l in x)
-        if x == y:
+        if i in skip or x == y:
+            i += 1
             continue
         x2 = [l for l in x if not EXPRCTX.match(l)]
         y2 = [l for l in y if not EXPRCTX.match(l)]
         if x2 == y2:
             tally["allowed-context"] += 1
+            i += 1
             continue
         ex = any(l.startswith(DENIED) for l in x)
         ey = any(l.startswith(DENIED) for l in y)
         if ex and not ey:
-            return "PERMISSIVE", i
+            if not refused or skip:
+                return "PERMISSIVE", i
+            sa = replay_without(args, prog, set(refused))
+            skip = set(refused)
+            if [l for l in sa.get(str(i), []) if not EXPRCTX.match(l)] != y2:
+                return "PERMISSIVE", i
+            verdict, first = "stale-privilege", i
+            i += 1
+            continue
         if ey and (ex or prog.real.get(i)):
             tally["stricter-steps"] += 1
-            verdict, first = "stricter", i if first is None else first
+            if not ex:
+                refused.append(i)
+            if verdict == "equal":
+                verdict, first = "stricter", i
+            i += 1
             continue
         return "MISMATCH", i
     return verdict, first
@@ -1764,9 +1854,9 @@ def run_pair(args, prog):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--psql", required=True)
+    ap.add_argument("--psql")
     ap.add_argument("--host", default="/tmp")
-    ap.add_argument("--port", type=int, required=True)
+    ap.add_argument("--port", type=int)
     ap.add_argument("--n", type=int, default=100)
     ap.add_argument("--start", type=int, default=0, help="index of the first program")
     ap.add_argument("--seed", type=int, default=1)
@@ -1775,7 +1865,12 @@ def main():
     ap.add_argument("--floor", type=float, default=0.5)
     ap.add_argument("--mode", choices=["flat", "rec", "ref"], default="flat")
     ap.add_argument("-v", action="store_true")
+    ap.add_argument("--selftest", action="store_true", help="check frame_mix, no cluster")
     args = ap.parse_args()
+    if args.selftest:
+        return selftest()
+    if args.psql is None or args.port is None:
+        ap.error("--psql and --port are required")
 
     os.makedirs(args.out, exist_ok=True)
     setup(args)
@@ -1793,7 +1888,7 @@ def main():
         seed = "%d:%d" % (args.seed, i)
         prog = (RefProgram if args.mode == "ref" else Program)(seed, cat)
         a, b = run_pair(args, prog)
-        verdict, step = compare(prog, a, b, tally)
+        verdict, step = compare(args, prog, a, b, tally)
         tally[verdict] += 1
         tally["walk-programs"] += prog.priv
         tally["stock-42501"] += a.count("ERROR:  42501") + a.count("\n42501 ")
@@ -1817,10 +1912,11 @@ def main():
                             script(prog, "plpgsql_jit", True), a, b))
             print("  program and outputs: %s" % f)
     comp = tally["compiled"]
-    print("pj_fuzz: seed=%d programs=%d opt_level=%s equal=%d stricter=%d permissive=%d "
-          "mismatch=%d compiled=%d (%.1f%%)"
+    print("pj_fuzz: seed=%d programs=%d opt_level=%s equal=%d stricter=%d stale-privilege=%d "
+          "permissive=%d mismatch=%d compiled=%d (%.1f%%)"
           % (args.seed, args.n, args.opt_level, tally["equal"], tally["stricter"],
-             tally["PERMISSIVE"], tally["MISMATCH"], comp, 100.0 * comp / max(args.n, 1)))
+             tally["stale-privilege"], tally["PERMISSIVE"], tally["MISMATCH"], comp,
+             100.0 * comp / max(args.n, 1)))
     print("pj_fuzz: 42501 raised: stock %d, plpgsql_jit %d; stricter steps %d; "
           "steps equal but for the SPI CONTEXT line %d"
           % (tally["stock-42501"], tally["jit-42501"], tally["stricter-steps"],

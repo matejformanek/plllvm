@@ -318,6 +318,38 @@ GRANT EXECUTE ON FUNCTION int4pl(int4, int4), int4div(int4, int4) TO PUBLIC;
 DROP OWNED BY regress_pj_pown;
 DROP ROLE regress_pj_pown;
 
+-- L2, widened: a role without the function runs it after a 42501 of ours, with
+-- no SECURITY DEFINER frame in the way.  Call 2 is refused by us (42501);
+-- PL/pgSQL runs its stale state, overflows (22003), and marks the expression
+-- busy.  Call 3, a NULL argument as the superuser, goes to the interpreter,
+-- which builds the state as the superuser.  Call 4, under the role without
+-- float8mul: we refuse the entry (E1) and fall back, and the interpreter
+-- reuses that state and runs float8pl and float8mul.  PL/pgSQL goes through
+-- SPI (busy), rechecks, and raises 42501.  So PL/pgSQL answers 22003, ok,
+-- 42501; here the answers are 42501, ok, 22003.
+CREATE FUNCTION pdd_mf(p1 float8) RETURNS int LANGUAGE plpgsql_jit AS $$
+BEGIN
+  p1 := (p1 + p1) + (p1 * p1);
+  RETURN 0;
+END $$;
+CREATE FUNCTION pdd_mw(p1 float8) RETURNS text LANGUAGE plpgsql AS $$
+BEGIN PERFORM pdd_mf(p1); RETURN 'ok';
+EXCEPTION WHEN OTHERS THEN RETURN SQLSTATE || ' ' || SQLERRM; END $$;
+SELECT pdd_mf(1), pdd_mf(1), pdd_mf(1);
+SELECT pj_expect('pdd_mf(float8)', 'compiled') \gset
+BEGIN;
+SELECT pdd_mf(1);
+REVOKE EXECUTE ON FUNCTION float8mul(float8, float8) FROM PUBLIC;
+SET ROLE regress_pj_r1;
+SELECT pdd_mw(1e200);
+RESET ROLE;
+SELECT pdd_mw(NULL);
+SET ROLE regress_pj_r1;
+SELECT pdd_mw(1e200);
+ROLLBACK;
+RESET ROLE;
+GRANT EXECUTE ON FUNCTION float8mul(float8, float8) TO PUBLIC;
+
 -- an overflow in the typmod cast of a numeric, caught: compiled code leaves no
 -- mark in the cast state of PL/pgSQL, which a failed cast leaves to be built
 -- again, and checked again, at its next use.  The role that lost the function

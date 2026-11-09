@@ -458,7 +458,7 @@ NREC ?= 500
 NREF ?= 500
 SEED ?= 1
 
-.PHONY: fuzz-pj
+.PHONY: fuzz-pj check-pj-fuzz
 
 fuzz-pj: port-ok
 	@case "$(origin PLLLVM_PORT):$(PLLLVM_PORT)" in file:*|*:|*:544[2-5]) \
@@ -473,6 +473,18 @@ fuzz-pj: port-ok
 	  python3 -I tools/pj_fuzz.py --psql '$(bindir)/psql' --host /tmp --port $(PLLLVM_PORT) \
 	    --mode ref --n $(NREF) --seed $(SEED) --opt-level $$o --out results-fuzz/ref-O$$o || rc=1; \
 	done; exit $$rc
+
+# The classes of the fuzzer on programs of known shape: seed 22:745 is
+# stale-privilege (L2), seed 21:597 frame-mix ((g)); and frame_mix refuses a
+# wrong value
+check-pj-fuzz: port-ok
+	python3 -I tools/pj_fuzz.py --selftest
+	python3 -I tools/pj_fuzz.py --psql '$(bindir)/psql' --host /tmp --port $(PLLLVM_PORT) \
+	  --seed 22 --start 745 --n 1 --opt-level 0 --out results-fuzz/unit | \
+	  tee /dev/stderr | grep -q 'stale-privilege=1 permissive=0 mismatch=0'
+	python3 -I tools/pj_fuzz.py --psql '$(bindir)/psql' --host /tmp --port $(PLLLVM_PORT) \
+	  --mode rec --seed 21 --start 597 --n 1 --opt-level 2 --out results-fuzz/unit | \
+	  tee /dev/stderr | grep -q 'frame-mix=1 history=0 stale-privilege=0 permissive=0'
 
 #
 # Every suite of a PR in order; the commit and each exit code go to
@@ -490,7 +502,7 @@ verify: port-ok
 	for t in installcheck installcheck-opt installcheck-discard installcheck-hazard \
 	  check-host-api pgindent doctor installcheck-expr installcheck-plpgsql \
 	  installcheck-pj installcheck-pj-once installcheck-pj-opt installcheck-plpgsql-pj \
-	  check-pj-ir check-pj-cmodule; do \
+	  check-pj-ir check-pj-cmodule check-pj-fuzz; do \
 	  step $(MAKE) $$t; \
 	  [ $$t != pgindent ] || step git diff --exit-code; \
 	done; \
