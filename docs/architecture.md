@@ -337,6 +337,11 @@ Only `plllvm_jit.c` and `plllvm_error.cpp` include LLVM headers.
   use of the plan in a transaction, a compiled frame never does, so a mark
   forgets the plan pointer unless PL/pgSQL has one, and PL/pgSQL replans
   instead of trusting a pointer whose plan SPI may have freed.
+* Differences from PL/pgSQL, kept: the check of `EXECUTE` at the entry of a
+  call covers every function of the planned expressions, and runs the
+  function execute hook for each, so a hook that raises for a function the
+  call does not reach (an unreached branch) fails the call where PL/pgSQL
+  returns. Pinned by `tools/pj_cmodule_pins.sh` (`make check-pj-cmodule`).
 * Differences from PL/pgSQL, kept: a failed `numeric(p,s)` conversion of a
   compiled frame leaves no mark in the cast state of PL/pgSQL, which a failed
   cast there leaves to be built and checked again at its next use. That state
