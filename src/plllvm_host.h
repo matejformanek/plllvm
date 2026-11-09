@@ -104,6 +104,11 @@ extern Datum plllvm_pj_boxed_eval(struct PjCtx *ctx, int32 idx);
 extern void plllvm_pj_boxed_reset(struct PjCtx *ctx);
 extern Datum plllvm_pj_assign(struct PjCtx *ctx, Datum old, bool owned,
 							  Datum value, bool isnull, int32 typlen);
+extern Datum plllvm_pj_assign_array(struct PjCtx *ctx, Datum old, bool owned,
+									Datum value, bool isnull);
+extern Datum plllvm_pj_arg_array(struct PjCtx *ctx, Datum value);
+extern Datum plllvm_pj_param_ro(Datum value, bool isnull);
+extern Datum plllvm_pj_param_rw(Datum value, bool isnull, bool owned);
 extern void plllvm_pj_raise_start(struct PjCtx *ctx);
 extern void plllvm_pj_raise_text(struct PjCtx *ctx, const char *text);
 extern void plllvm_pj_raise_param(struct PjCtx *ctx, Datum value, bool isnull,

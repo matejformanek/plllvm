@@ -42,10 +42,13 @@
 #include "lib/stringinfo.h"
 #include "nodes/makefuncs.h"
 #include "nodes/nodeFuncs.h"
+#include "nodes/supportnodes.h"
 #include "optimizer/optimizer.h"
 #include "parser/parse_coerce.h"
 #include "plpgsql.h"
+#include "utils/array.h"
 #include "utils/builtins.h"
+#include "utils/fmgroids.h"
 #include "utils/hsearch.h"
 #include "utils/lsyscache.h"
 #include "utils/memutils.h"
@@ -176,6 +179,9 @@ static const char *harvest_expr(PLpgSQL_function *func, PjHarvest *h,
 								PjEnv *env, PjExpr *pe, List **funcs);
 static PLpgSQL_var *arg_var(PLpgSQL_function *func, int dno);
 static bool byref_type(Oid typid);
+static Param *rw_param(PLpgSQL_expr *expr, Expr *tree, int paramid);
+static bool fold_array_ok(PjExpr *pe);
+static Const *fold_array_in(PjExpr *pe);
 static bool cast_cannot_raise(Oid srctype, Oid dsttype);
 static bool cast_numeric_typmod(const PjExpr *pe);
 
@@ -503,6 +509,7 @@ scope_expr(PjScopeWalk *w, const void *owner, PLpgSQL_expr *expr,
 	pe->expr = expr;
 	pe->owner = owner;
 	pe->retvarno = -1;
+	pe->rw = -1;
 	pe->dsttype = dsttype;
 	pe->dsttypmod = dsttypmod;
 	pe->pos = w->cur_pos;
@@ -681,13 +688,15 @@ plllvm_pj_harvest(PLpgSQL_function *func, const PjScope *scope, PjHarvest *h)
 	}
 	h->fori = list_copy(scope->fori);
 	h->ndatums = func->ndatums;
-	h->ptypes = palloc0_array(Oid, func->ndatums);
+	h->nparams = 2 * func->ndatums;
+	h->ptypes = palloc0_array(Oid, h->nparams);
 	for (int dno = 0; dno < func->ndatums; dno++)
 	{
 		PLpgSQL_var *var = arg_var(func, dno);
 
 		if (var != NULL)
-			h->ptypes[dno] = var->datatype->typoid;
+			h->ptypes[dno] = h->ptypes[func->ndatums + dno] =
+				var->datatype->typoid;
 	}
 	MemoryContextSwitchTo(oldcxt);
 
@@ -726,8 +735,26 @@ plllvm_pj_harvest(PLpgSQL_function *func, const PjScope *scope, PjHarvest *h)
 			}
 			MemoryContextSwitchTo(oldcxt);
 
+			copy->rw = -1;
 			if (reason == NULL)
 				reason = harvest_expr(func, h, &env, copy, &funcs);
+
+			/* the one Param that may change the target in place */
+			if (reason == NULL && pe->expr != NULL &&
+				copy->path == PJ_PATH_BOXED && pe->expr->target_param >= 0)
+			{
+				PLpgSQL_var *target = arg_var(func, pe->expr->target_param);
+				Param	   *rw = NULL;
+
+				if (target != NULL && target->datatype->typisarray)
+					rw = rw_param(pe->expr, copy->tree,
+								  pe->expr->target_param + 1);
+				if (rw != NULL)
+				{
+					rw->paramid = func->ndatums + pe->expr->target_param + 1;
+					copy->rw = pe->expr->target_param;
+				}
+			}
 		}
 		else
 			h->nunplanned++;
@@ -773,7 +800,8 @@ harvest_expr(PLpgSQL_function *func, PjHarvest *h, PjEnv *env, PjExpr *pe,
 		PLpgSQL_var *var = p->paramkind == PARAM_EXTERN ?
 			arg_var(func, p->paramid - 1) : NULL;
 
-		move = var != NULL && var->datatype->typoid == p->paramtype;
+		move = var != NULL && var->datatype->typoid == p->paramtype &&
+			(!var->datatype->typisarray || pe->retvarno >= 0);
 	}
 	else if (IsA(tree, Const))
 	{
@@ -817,6 +845,23 @@ harvest_expr(PLpgSQL_function *func, PjHarvest *h, PjEnv *env, PjExpr *pe,
 	if (pe->type == pe->dsttype &&
 		(pe->typmod == pe->dsttypmod || pe->dsttypmod == -1))
 		return NULL;
+
+	if (fold_array_ok(pe))
+	{
+		/* the conversion is the I/O one, and a cast made later replaces it */
+		pe->cast = cast_get(pe->type, pe->typmod, pe->dsttype, pe->dsttypmod,
+							&cast_tree);
+		pe->cast_gen = pe->cast->gen;
+		if (cast_tree != NULL && IsA(cast_tree, CoerceViaIO))
+		{
+			oldcxt = MemoryContextSwitchTo(h->cxt);
+			pe->folded = copyObject(fold_array_in(pe));
+			MemoryContextSwitchTo(oldcxt);
+			pe->path = PJ_PATH_FOLD;
+			return NULL;
+		}
+		pe->cast = NULL;
+	}
 
 	dst_domain = get_typtype(pe->dsttype) == TYPTYPE_DOMAIN;
 	typmod_cast = cast_numeric_typmod(pe);
@@ -915,14 +960,115 @@ arg_var(PLpgSQL_function *func, int dno)
 
 /*
  * Can a variable of this type hold a copy of ours?  A built-in base type of
- * the executor's ordinary datum, not an array or a refcursor
+ * the executor's ordinary datum, or an array of one, not a refcursor
  */
 static bool
 byref_type(Oid typid)
 {
-	return typid < FirstNormalObjectId && typid != REFCURSOROID &&
-		get_typtype(typid) == TYPTYPE_BASE &&
-		!OidIsValid(get_element_type(typid));
+	Oid			elem;
+
+	if (typid >= FirstNormalObjectId || typid == REFCURSOROID ||
+		get_typtype(typid) != TYPTYPE_BASE)
+		return false;
+	elem = get_element_type(typid);
+	return !OidIsValid(elem) ||
+		(elem < FirstNormalObjectId && get_typtype(elem) == TYPTYPE_BASE);
+}
+
+/*
+ * exec_check_rw_parameter() on our copy of the tree: the Param of the
+ * assignment target that may be passed as read/write, or NULL.  Only its
+ * in-place rule: the top-level function is trusted to change the object and
+ * return it, never to keep or free it.  The other rule hands the object to
+ * any function that has the only reference, which then owns it; our slot
+ * keeps its array, so it is not ours to apply.
+ */
+static Param *
+rw_param(PLpgSQL_expr *expr, Expr *tree, int paramid)
+{
+	Expr	   *sexpr = tree;
+	Oid			funcid;
+	List	   *fargs;
+	Oid			prosupport;
+
+	if (IsA(sexpr, RelabelType))
+		sexpr = ((RelabelType *) sexpr)->arg;
+	if (IsA(sexpr, FuncExpr))
+	{
+		funcid = ((FuncExpr *) sexpr)->funcid;
+		fargs = ((FuncExpr *) sexpr)->args;
+	}
+	else if (IsA(sexpr, OpExpr))
+	{
+		funcid = ((OpExpr *) sexpr)->opfuncid;
+		fargs = ((OpExpr *) sexpr)->args;
+	}
+	else if (IsA(sexpr, SubscriptingRef))
+	{
+		SubscriptingRef *sbsref = (SubscriptingRef *) sexpr;
+
+		funcid = get_typsubscript(sbsref->refcontainertype, NULL);
+		fargs = list_make2(sbsref->refexpr, sbsref->refassgnexpr);
+	}
+	else
+		return NULL;
+
+	prosupport = get_func_support(funcid);
+	if (OidIsValid(prosupport))
+	{
+		SupportRequestModifyInPlace req;
+
+		req.type = T_SupportRequestModifyInPlace;
+		req.funcid = funcid;
+		req.args = fargs;
+		req.paramid = paramid;
+		return (Param *) DatumGetPointer(OidFunctionCall1(prosupport,
+														  PointerGetDatum(&req)));
+	}
+	return NULL;
+}
+
+/*
+ * A constant text as an array of a built-in type, folded when the function is
+ * translated: fold_array_ok() says whether it may be, fold_array_in() does
+ * it.  Only types whose input function reads no setting (that of a
+ * date reads DateStyle), so the value is the one every call would get; an
+ * error declines the function, and PL/pgSQL raises it at the declaration.
+ */
+static bool
+fold_array_ok(PjExpr *pe)
+{
+	Const	   *c = (Const *) pe->tree;
+	Oid			elem;
+	Oid			input;
+	Oid			ioparam;
+
+	if (!IsA(c, Const) || c->constisnull || pe->type != TEXTOID ||
+		pe->dsttypmod != -1 || !byref_type(pe->dsttype) ||
+		!type_is_array(pe->dsttype))
+		return false;
+	elem = get_element_type(pe->dsttype);
+	if (elem != BOOLOID && elem != INT2OID && elem != INT4OID &&
+		elem != INT8OID && elem != FLOAT4OID && elem != FLOAT8OID &&
+		elem != NUMERICOID && elem != TEXTOID)
+		return false;
+	getTypeInputInfo(pe->dsttype, &input, &ioparam);
+	return input == F_ARRAY_IN;
+}
+
+static Const *
+fold_array_in(PjExpr *pe)
+{
+	Const	   *c = (Const *) pe->tree;
+	Oid			input;
+	Oid			ioparam;
+	Datum		d;
+
+	getTypeInputInfo(pe->dsttype, &input, &ioparam);
+	d = OidInputFunctionCall(input, TextDatumGetCString(c->constvalue),
+							 ioparam, -1);
+	return makeConst(pe->dsttype, -1, get_typcollation(pe->dsttype), -1, d,
+					 false, false);
 }
 
 /* a cast of a pinned row that raises nothing but out of memory */
@@ -965,7 +1111,8 @@ env_init(PjEnv *env, PLpgSQL_function *func, PjHarvest *h)
 
 /*
  * A Param is compilable when the interpreter would read one of our slots:
- * a variable of the type of the Param, passed by value
+ * a variable of the type of the Param, not an array, which the executor must
+ * be given read-only
  */
 static bool
 param_check(plllvm_expr_env *base, const Param *p, StringInfo facts)
@@ -976,7 +1123,8 @@ param_check(plllvm_expr_env *base, const Param *p, StringInfo facts)
 	if (p->paramkind != PARAM_EXTERN)
 		return false;
 	var = arg_var(env->func, p->paramid - 1);
-	if (var == NULL || var->datatype->typoid != p->paramtype)
+	if (var == NULL || var->datatype->typoid != p->paramtype ||
+		var->datatype->typisarray)
 		return false;
 	appendStringInfo(facts, "%d:%u ", p->paramid, p->paramtype);
 	return true;
@@ -1488,6 +1636,18 @@ plllvm_pj_emit(PLpgSQL_function *func, PjHarvest *h, PjVariant *v)
 							 offsetof(NullableDatum, value));
 			value = plllvm_ir_tmp(em.ir);
 			plllvm_ir_emit(em.ir, "%s = load i64, ptr %s", value, slot);
+			/* an array is expanded once, and the copy is ours */
+			if (arg_var(func, dno)->datatype->typisarray)
+			{
+				const char *expanded = plllvm_ir_tmp(em.ir);
+
+				plllvm_ir_declare(em.ir, "declare i64 @plllvm_pj_arg_array(ptr, i64)");
+				plllvm_ir_emit(em.ir,
+							   "%s = call i64 @plllvm_pj_arg_array(ptr %%ctx, i64 %s)",
+							   expanded, value);
+				value = expanded;
+				plllvm_ir_emit(em.ir, "store i1 true, ptr %%o%d", dno);
+			}
 			plllvm_ir_emit(em.ir, "store i64 %s, ptr %%v%d", value, dno);
 			/* the handler dispatched NULL arguments to the interpreter */
 			plllvm_ir_emit(em.ir, "store i1 false, ptr %%n%d", dno);
@@ -2250,11 +2410,39 @@ boxed_value(PjEmit *em, int index, const PjExpr *pe, const char **datum,
 			size_t		at = dno * sizeof(ParamExternData);
 
 			plllvm_ir_emit(ir, "%s = load i64, ptr %%v%d", value, dno);
+			plllvm_ir_emit(ir, "%s = load i1, ptr %%n%d", n, dno);
+			plllvm_ir_emit(ir, "%s = zext i1 %s to i8", z, n);
+			if (((PLpgSQL_var *) em->func->datums[dno])->datatype->typisarray)
+			{
+				const char *ro = plllvm_ir_tmp(ir);
+
+				plllvm_ir_declare(ir, "declare i64 @plllvm_pj_param_ro(i64, i1)");
+				plllvm_ir_emit(ir, "%s = call i64 @plllvm_pj_param_ro(i64 %s, i1 %s)",
+							   ro, value, n);
+				if (dno == pe->rw)
+				{
+					const char *own = plllvm_ir_tmp(ir);
+					const char *rw = plllvm_ir_tmp(ir);
+					size_t		twin = (em->func->ndatums + dno) *
+						sizeof(ParamExternData);
+
+					plllvm_ir_declare(ir, "declare i64 @plllvm_pj_param_rw(i64, i1, i1)");
+					plllvm_ir_emit(ir, "%s = load i1, ptr %%o%d", own, dno);
+					plllvm_ir_emit(ir,
+								   "%s = call i64 @plllvm_pj_param_rw(i64 %s, i1 %s, i1 %s)",
+								   rw, value, n, own);
+					plllvm_ir_emit(ir, "store i64 %s, ptr %s", rw,
+								   field_ptr(ir, params,
+											 twin + offsetof(ParamExternData, value)));
+					plllvm_ir_emit(ir, "store i8 %s, ptr %s", z,
+								   field_ptr(ir, params,
+											 twin + offsetof(ParamExternData, isnull)));
+				}
+				value = ro;
+			}
 			plllvm_ir_emit(ir, "store i64 %s, ptr %s", value,
 						   field_ptr(ir, params,
 									 at + offsetof(ParamExternData, value)));
-			plllvm_ir_emit(ir, "%s = load i1, ptr %%n%d", n, dno);
-			plllvm_ir_emit(ir, "%s = zext i1 %s to i8", z, n);
 			plllvm_ir_emit(ir, "store i8 %s, ptr %s", z,
 						   field_ptr(ir, params,
 									 at + offsetof(ParamExternData, isnull)));
@@ -2344,17 +2532,27 @@ assign_var(PjEmit *em, PLpgSQL_var *var, const char *datum, const char *isnull,
 	const char *value = plllvm_ir_tmp(ir);
 	const char *kept = plllvm_ir_tmp(ir);
 
-	plllvm_ir_declare(ir,
-					  "declare i64 @plllvm_pj_assign(ptr, i64, i1, i64, i1, i32)");
-
 	/* the copy can fail: the error is the statement's, not the expression's */
 	if (evaluated)
 		set_pos(em, ((PjExpr *) list_nth(em->h->exprs, em->next_expr - 1))->pos);
 	plllvm_ir_emit(ir, "%s = load i64, ptr %%v%d", old, dno);
 	plllvm_ir_emit(ir, "%s = load i1, ptr %%o%d", owned, dno);
-	plllvm_ir_emit(ir,
-				   "%s = call i64 @plllvm_pj_assign(ptr %%ctx, i64 %s, i1 %s, i64 %s, i1 %s, i32 %d)",
-				   value, old, owned, datum, isnull, var->datatype->typlen);
+	if (var->datatype->typisarray)
+	{
+		plllvm_ir_declare(ir,
+						  "declare i64 @plllvm_pj_assign_array(ptr, i64, i1, i64, i1)");
+		plllvm_ir_emit(ir,
+					   "%s = call i64 @plllvm_pj_assign_array(ptr %%ctx, i64 %s, i1 %s, i64 %s, i1 %s)",
+					   value, old, owned, datum, isnull);
+	}
+	else
+	{
+		plllvm_ir_declare(ir,
+						  "declare i64 @plllvm_pj_assign(ptr, i64, i1, i64, i1, i32)");
+		plllvm_ir_emit(ir,
+					   "%s = call i64 @plllvm_pj_assign(ptr %%ctx, i64 %s, i1 %s, i64 %s, i1 %s, i32 %d)",
+					   value, old, owned, datum, isnull, var->datatype->typlen);
+	}
 	plllvm_ir_emit(ir, "store i64 %s, ptr %%v%d", value, dno);
 	plllvm_ir_emit(ir, "store i1 %s, ptr %%n%d", isnull, dno);
 	plllvm_ir_emit(ir, "%s = xor i1 %s, true", kept, isnull);

@@ -33,7 +33,9 @@
 #include "miscadmin.h"
 #include "tcop/pquery.h"
 #include "utils/acl.h"
+#include "utils/array.h"
 #include "utils/datum.h"
+#include "utils/expandeddatum.h"
 #include "utils/lsyscache.h"
 #include "utils/memutils.h"
 #include "utils/snapmgr.h"
@@ -148,6 +150,78 @@ plllvm_pj_assign(PjCtx *ctx, Datum old, bool owned, Datum value, bool isnull,
 }
 
 /*
+ * exec_assign_value() for an array variable: always in expanded form, an
+ * expanded object of the executor reparented rather than copied, the old
+ * value freed unless it is the object itself.  The copy comes first, as the
+ * value may be made from the old one.
+ */
+Datum
+plllvm_pj_assign_array(PjCtx *ctx, Datum old, bool owned, Datum value,
+					   bool isnull)
+{
+	Datum		result = (Datum) 0;
+
+	if (!isnull)
+	{
+		PjLevel    *lv = plllvm_pj_level(ctx);
+		MemoryContext oldcxt = MemoryContextSwitchTo(lv->datum_cxt);
+
+		if (!VARATT_IS_EXTERNAL_EXPANDED_RW(DatumGetPointer(value)))
+			result = expand_array(value, lv->datum_cxt, NULL);
+		else
+			result = datumTransfer(value, false, -1);
+		MemoryContextSwitchTo(oldcxt);
+	}
+	if (owned && (result != old || isnull))
+	{
+		if (VARATT_IS_EXTERNAL_EXPANDED(DatumGetPointer(old)))
+			DeleteExpandedObject(old);
+		else
+			pfree(DatumGetPointer(old));
+	}
+
+	return result;
+}
+
+/* an array argument, expanded once as plpgsql_exec_function() does */
+Datum
+plllvm_pj_arg_array(PjCtx *ctx, Datum value)
+{
+	PjLevel    *lv = plllvm_pj_level(ctx);
+
+	return expand_array(value, lv->datum_cxt, NULL);
+}
+
+/*
+ * An array variable as a Param: read-only, as everywhere but at the one
+ * place of an assignment's expression that may change it in place.  Only a
+ * copy of ours is handed on as read/write.
+ */
+Datum
+plllvm_pj_param_ro(Datum value, bool isnull)
+{
+	return MakeExpandedObjectReadOnly(value, isnull, -1);
+}
+
+/* read/write only for an expanded object that is ours, else as above */
+Datum
+plllvm_pj_param_rw(Datum value, bool isnull, bool owned)
+{
+	if (isnull || !owned ||
+		!VARATT_IS_EXTERNAL_EXPANDED_RW(DatumGetPointer(value)))
+		return MakeExpandedObjectReadOnly(value, isnull, -1);
+	return value;
+}
+
+/* the copies of the activation in its variables are not needed any more */
+void
+plllvm_pj_datums_release(PjCtx *ctx)
+{
+	if (ctx->lv != NULL && ctx->lv->datum_cxt != NULL)
+		MemoryContextReset(ctx->lv->datum_cxt);
+}
+
+/*
  * After an expression with sites ran, as the executor of an evaluation does:
  * check EXECUTE again, since the callee may have run user code, and free what the evaluation
  * allocated once its value is out.  The result of a RETURN is not reset: the
@@ -238,8 +312,8 @@ level_build(PjLevel *lv, PjHarvest *h)
 										  ALLOCSET_SMALL_SIZES);
 
 	oldcxt = MemoryContextSwitchTo(cxt);
-	params = makeParamList(h->ndatums);
-	for (int i = 0; i < h->ndatums; i++)
+	params = makeParamList(h->nparams);
+	for (int i = 0; i < h->nparams; i++)
 	{
 		params->params[i].ptype = h->ptypes[i];
 		params->params[i].pflags = PARAM_FLAG_CONST;

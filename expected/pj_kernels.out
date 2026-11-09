@@ -182,3 +182,410 @@ SELECT fib_k(28);
 
 SELECT pj_delta(1028457, 0, 0, 0, 1) \gset
 SELECT pj_expect('fib_k(int)', 'compiled') \gset
+-- The array kernels nbody_k, spectralnorm_k, revcomp_k and tokenize_k are
+-- PL/pgSQL transcriptions of the Computer Language Benchmarks Game programs
+-- (tokenize_k is our own design); see LICENSES/BENCHMARKS-GAME-BSD-3.md.
+--   Copyright (c) 2004-2008 Brent Fulgham, 2005-2024 Isaac Gouy.
+CREATE FUNCTION nbody_k(n integer) RETURNS text
+LANGUAGE :pj_lang IMMUTABLE AS $$
+DECLARE
+  pi CONSTANT float8 := 3.141592653589793;
+  solar_mass float8;
+  days_per_year CONSTANT float8 := 365.24;
+  dt CONSTANT float8 := 0.01;
+  half CONSTANT float8 := 0.5;
+  zero CONSTANT float8 := 0.0;
+  nb CONSTANT integer := 5;
+  x float8[]; y float8[]; z float8[];
+  vx float8[]; vy float8[]; vz float8[];
+  m float8[];
+  i integer; j integer; s integer;
+  dx float8; dy float8; dz float8; d2 float8; mag float8; mi float8;
+      mj float8;
+  px float8 := 0; py float8 := 0; pz float8 := 0;
+  e float8;
+  e0 float8;
+BEGIN
+  solar_mass := 4 * pi * pi;
+  x  := ARRAY[zero, 4.84143144246472090e+00, 8.34336671824457987e+00,
+      1.28943695621391310e+01, 1.53796971148509165e+01]::float8[];
+  y  := ARRAY[zero, -1.16032004402742839e+00, 4.12479856412430479e+00,
+      -1.51111514016986312e+01, -2.59193146099879641e+01]::float8[];
+  z  := ARRAY[zero, -1.03622044471123109e-01, -4.03523417114321381e-01,
+      -2.23307578892655734e-01, 1.79258772950371181e-01]::float8[];
+  vx := ARRAY[zero, 1.66007664274403694e-03 * days_per_year,
+      -2.76742510726862411e-03 * days_per_year,
+              2.96460137564761618e-03 * days_per_year,
+                  2.68067772490389322e-03 * days_per_year]::float8[];
+  vy := ARRAY[zero, 7.69901118419740425e-03 * days_per_year,
+      4.99852801234917238e-03 * days_per_year,
+              2.37847173959480950e-03 * days_per_year,
+                  1.62824170038242295e-03 * days_per_year]::float8[];
+  vz := ARRAY[zero, -6.90460016972063023e-05 * days_per_year,
+      2.30417297573763929e-05 * days_per_year,
+              -2.96589568540237556e-05 * days_per_year,
+                  -9.51592254519715870e-05 * days_per_year]::float8[];
+  m  := ARRAY[solar_mass, 9.54791938424326609e-04 * solar_mass,
+      2.85885980666130812e-04 * solar_mass,
+              4.36624404335156298e-05 * solar_mass,
+                  5.15138902046611451e-05 * solar_mass]::float8[];
+
+  FOR i IN 1..nb LOOP
+    px := px + vx[i] * m[i];
+    py := py + vy[i] * m[i];
+    pz := pz + vz[i] * m[i];
+  END LOOP;
+  vx[1] := - px / solar_mass;
+  vy[1] := - py / solar_mass;
+  vz[1] := - pz / solar_mass;
+
+  e := zero;
+  FOR i IN 1..nb LOOP
+    e := e + half * m[i] * (vx[i]*vx[i] + vy[i]*vy[i] + vz[i]*vz[i]);
+    FOR j IN i+1..nb LOOP
+      dx := x[i] - x[j]; dy := y[i] - y[j]; dz := z[i] - z[j];
+      e := e - (m[i] * m[j]) / sqrt(dx*dx + dy*dy + dz*dz);
+    END LOOP;
+  END LOOP;
+  e0 := e;
+
+  FOR s IN 1..n LOOP
+    FOR i IN 1..nb LOOP
+      FOR j IN i+1..nb LOOP
+        dx := x[i] - x[j];
+        dy := y[i] - y[j];
+        dz := z[i] - z[j];
+        d2 := dx*dx + dy*dy + dz*dz;
+        mag := dt / (d2 * sqrt(d2));
+        mi := m[i] * mag;
+        mj := m[j] * mag;
+        vx[i] := vx[i] - dx * mj;
+        vy[i] := vy[i] - dy * mj;
+        vz[i] := vz[i] - dz * mj;
+        vx[j] := vx[j] + dx * mi;
+        vy[j] := vy[j] + dy * mi;
+        vz[j] := vz[j] + dz * mi;
+      END LOOP;
+    END LOOP;
+    FOR i IN 1..nb LOOP
+      x[i] := x[i] + dt * vx[i];
+      y[i] := y[i] + dt * vy[i];
+      z[i] := z[i] + dt * vz[i];
+    END LOOP;
+  END LOOP;
+
+  e := zero;
+  FOR i IN 1..nb LOOP
+    e := e + half * m[i] * (vx[i]*vx[i] + vy[i]*vy[i] + vz[i]*vz[i]);
+    FOR j IN i+1..nb LOOP
+      dx := x[i] - x[j]; dy := y[i] - y[j]; dz := z[i] - z[j];
+      e := e - (m[i] * m[j]) / sqrt(dx*dx + dy*dy + dz*dz);
+    END LOOP;
+  END LOOP;
+
+  RETURN round(e0::numeric, 9)::text || ' ' || round(e::numeric, 9)::text;
+END
+$$;
+CREATE FUNCTION spectralnorm_k(n integer) RETURNS text
+LANGUAGE :pj_lang IMMUTABLE AS $$
+DECLARE
+  one CONSTANT float8 := 1.0;
+  u float8[]; v float8[]; t float8[];
+  i integer; j integer; k integer; ij integer;
+  s float8;
+  vbv float8 := 0; vv float8 := 0;
+BEGIN
+  u := array_fill(1.0::float8, ARRAY[n]);
+  v := array_fill(0.0::float8, ARRAY[n]);
+  t := array_fill(0.0::float8, ARRAY[n]);
+  FOR k IN 1..10 LOOP
+    FOR i IN 0..n-1 LOOP
+      s := 0;
+      FOR j IN 0..n-1 LOOP
+        ij := i + j;
+        s := s + one / (ij * (ij + 1) / 2 + i + 1) * u[j+1];
+      END LOOP;
+      t[i+1] := s;
+    END LOOP;
+    FOR i IN 0..n-1 LOOP
+      s := 0;
+      FOR j IN 0..n-1 LOOP
+        ij := i + j;
+        s := s + one / (ij * (ij + 1) / 2 + j + 1) * t[j+1];
+      END LOOP;
+      v[i+1] := s;
+    END LOOP;
+    FOR i IN 0..n-1 LOOP
+      s := 0;
+      FOR j IN 0..n-1 LOOP
+        ij := i + j;
+        s := s + one / (ij * (ij + 1) / 2 + i + 1) * v[j+1];
+      END LOOP;
+      t[i+1] := s;
+    END LOOP;
+    FOR i IN 0..n-1 LOOP
+      s := 0;
+      FOR j IN 0..n-1 LOOP
+        ij := i + j;
+        s := s + one / (ij * (ij + 1) / 2 + j + 1) * t[j+1];
+      END LOOP;
+      u[i+1] := s;
+    END LOOP;
+  END LOOP;
+  FOR i IN 1..n LOOP
+    vbv := vbv + u[i] * v[i];
+    vv := vv + v[i] * v[i];
+  END LOOP;
+  RETURN round(sqrt(vbv / vv)::numeric, 9)::text;
+END
+$$;
+CREATE FUNCTION revcomp_k(nlines integer) RETURNS text
+LANGUAGE :pj_lang IMMUTABLE AS $$
+DECLARE
+  seed integer := 42;
+  r float8;
+  im CONSTANT float8 := 139968.0;
+  lines text[] := '{}';
+  outp text[] := '{}';
+  line text; oline text; c text;
+  i integer; j integer; n integer;
+  ngc integer := 0;
+BEGIN
+  FOR i IN 1..nlines LOOP
+    line := '';
+    FOR j IN 1..60 LOOP
+      seed := (seed * 3877 + 29573) % 139968;
+      r := seed / im;
+      IF i <= nlines / 2 THEN
+        IF    r < 0.27 THEN c := 'a';
+        ELSIF r < 0.39 THEN c := 'c';
+        ELSIF r < 0.51 THEN c := 'g';
+        ELSIF r < 0.78 THEN c := 't';
+        ELSIF r < 0.80 THEN c := 'B';
+        ELSIF r < 0.82 THEN c := 'D';
+        ELSIF r < 0.84 THEN c := 'H';
+        ELSIF r < 0.86 THEN c := 'K';
+        ELSIF r < 0.88 THEN c := 'M';
+        ELSIF r < 0.90 THEN c := 'N';
+        ELSIF r < 0.92 THEN c := 'R';
+        ELSIF r < 0.94 THEN c := 'S';
+        ELSIF r < 0.96 THEN c := 'V';
+        ELSIF r < 0.98 THEN c := 'W';
+        ELSE                c := 'Y';
+        END IF;
+      ELSE
+        IF    r < 0.3029549426680 THEN c := 'a';
+        ELSIF r < 0.5009432431601 THEN c := 'c';
+        ELSIF r < 0.6984905497992 THEN c := 'g';
+        ELSE                           c := 't';
+        END IF;
+      END IF;
+      line := line || c;
+    END LOOP;
+    lines := lines || line;
+  END LOOP;
+
+  n := array_length(lines, 1);
+  FOR i IN REVERSE n..1 LOOP
+    line := lines[i];
+    oline := '';
+    FOR j IN REVERSE length(line)..1 LOOP
+      c := upper(substr(line, j, 1));
+      c := CASE c
+             WHEN 'A' THEN 'T' WHEN 'C' THEN 'G' WHEN 'G' THEN 'C' WHEN 'T'
+                 THEN 'A'
+             WHEN 'U' THEN 'A' WHEN 'M' THEN 'K' WHEN 'R' THEN 'Y' WHEN 'W'
+                 THEN 'W'
+             WHEN 'S' THEN 'S' WHEN 'Y' THEN 'R' WHEN 'K' THEN 'M' WHEN 'V'
+                 THEN 'B'
+             WHEN 'H' THEN 'D' WHEN 'D' THEN 'H' WHEN 'B' THEN 'V' WHEN 'N'
+                 THEN 'N'
+             ELSE c END;
+      IF c = 'G' OR c = 'C' THEN
+        ngc := ngc + 1;
+      END IF;
+      oline := oline || c;
+    END LOOP;
+    outp := outp || oline;
+  END LOOP;
+  RETURN ngc::text || '/' || md5(array_to_string(outp, E'\n'));
+END
+$$;
+CREATE FUNCTION tokenize_k(nlines integer) RETURNS text
+LANGUAGE :pj_lang IMMUTABLE AS $$
+DECLARE
+  syl CONSTANT text[] := ARRAY['ka','lo','ren','ti','sa','mu','be','xor',
+    'qui','on','al','de','the','and','of'];
+  punct CONSTANT text[] := ARRAY[',', '.', ';', '(', ')', '!', '-'];
+  letters CONSTANT text :=
+    'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ';
+  stop CONSTANT text := ' the and of on al de ';
+  seed bigint := 12345;
+  lines text[] := '{}';
+  line text; w text; tok text; c text;
+  i integer; j integer; k integer; nsyl integer; ntok integer; len integer;
+      pos integer;
+  num bigint; innum boolean;
+  nwords integer := 0; ncap integer := 0; nstop integer := 0;
+      nnum integer := 0; npunct integer := 0;
+  numsum bigint := 0; longest integer := 0;
+  h bigint := 7;
+BEGIN
+  FOR i IN 1..nlines LOOP
+    line := '';
+    seed := (seed * 1103515245 + 12345) % 2147483648;
+    ntok := 8 + (seed % 9)::integer;
+    FOR j IN 1..ntok LOOP
+      seed := (seed * 1103515245 + 12345) % 2147483648;
+      IF seed % 10 < 7 THEN
+        w := '';
+        nsyl := 1 + ((seed / 16) % 4)::integer;
+        FOR k IN 1..nsyl LOOP
+          seed := (seed * 1103515245 + 12345) % 2147483648;
+          w := w || syl[1 + ((seed / 64) % 15)::integer];
+        END LOOP;
+        IF (seed / 1024) % 5 = 0 THEN
+          w := upper(substr(w, 1, 1)) || substr(w, 2);
+        END IF;
+      ELSIF seed % 10 < 9 THEN
+        w := ((seed / 8) % 100000)::text;
+      ELSE
+        w := punct[1 + ((seed / 8) % 7)::integer];
+      END IF;
+      IF j > 1 THEN
+        line := line || ' ';
+      END IF;
+      line := line || w;
+    END LOOP;
+    lines := lines || line;
+  END LOOP;
+
+  FOR i IN 1..nlines LOOP
+    line := lines[i] || ' ';
+    len := length(line);
+    tok := '';
+    innum := false;
+    num := 0;
+    pos := 1;
+    WHILE pos <= len LOOP
+      c := substr(line, pos, 1);
+      IF position(c IN letters) > 0 THEN
+        tok := tok || c;
+      ELSIF c >= '0' AND c <= '9' THEN
+        innum := true;
+        num := num * 10 + (ascii(c) - 48);
+      ELSE
+        IF tok <> '' THEN
+          nwords := nwords + 1;
+          IF upper(substr(tok, 1, 1)) = substr(tok, 1, 1) THEN
+            ncap := ncap + 1;
+          END IF;
+          tok := lower(tok);
+          IF position(' ' || tok || ' ' IN stop) > 0 THEN
+            nstop := nstop + 1;
+          END IF;
+          IF length(tok) > longest THEN
+            longest := length(tok);
+          END IF;
+          h := (h * 131 + length(tok) * 17 + ascii(tok)) % 1000000007;
+          tok := '';
+        END IF;
+        IF innum THEN
+          nnum := nnum + 1;
+          numsum := numsum + num;
+          h := (h * 131 + num % 1000) % 1000000007;
+          num := 0;
+          innum := false;
+        END IF;
+        IF c <> ' ' THEN
+          npunct := npunct + 1;
+          h := (h * 131 + ascii(c)) % 1000000007;
+        END IF;
+      END IF;
+      pos := pos + 1;
+    END LOOP;
+  END LOOP;
+  RETURN nwords || '/' || ncap || '/' || nstop || '/' || nnum || '/'
+      || numsum || '/'
+         || npunct || '/' || longest || '/' || h;
+END
+$$;
+SELECT nbody_k(1), nbody_k(10);
+          nbody_k          |          nbody_k          
+---------------------------+---------------------------
+ -0.169075164 -0.169074954 | -0.169075164 -0.169073022
+(1 row)
+
+SELECT nbody_k(1000), nbody_k(0);
+          nbody_k          |          nbody_k          
+---------------------------+---------------------------
+ -0.169075164 -0.169087605 | -0.169075164 -0.169075164
+(1 row)
+
+SELECT pj_mark() \gset
+SELECT nbody_k(5000);
+          nbody_k          
+---------------------------
+ -0.169075164 -0.169020000
+(1 row)
+
+SELECT pj_delta(1, 0, NULL, 0, 0) \gset
+SELECT pj_expect('nbody_k(int)', 'compiled') \gset
+SELECT spectralnorm_k(1), spectralnorm_k(10);
+ spectralnorm_k | spectralnorm_k 
+----------------+----------------
+ 1.000000000    | 1.271844019
+(1 row)
+
+SELECT spectralnorm_k(41), spectralnorm_k(2);
+ spectralnorm_k | spectralnorm_k 
+----------------+----------------
+ 1.274171096    | 1.183350177
+(1 row)
+
+SELECT pj_expect('spectralnorm_k(int)', 'compiled') \gset
+SELECT revcomp_k(2), revcomp_k(5);
+              revcomp_k              |              revcomp_k               
+-------------------------------------+--------------------------------------
+ 40/a27ca0c36a2d3b1c476a831a05137545 | 106/c21c62f4b4c9bdbb804088494a9570f3
+(1 row)
+
+SELECT revcomp_k(40), revcomp_k(41);
+              revcomp_k               |              revcomp_k               
+--------------------------------------+--------------------------------------
+ 768/c13f5e05b7d47f53b59667a584149358 | 792/86ef02ea9deac0547b1d5ba678d695f5
+(1 row)
+
+SELECT pj_expect('revcomp_k(int)', 'compiled') \gset
+SELECT tokenize_k(3), tokenize_k(40);
+           tokenize_k           |              tokenize_k               
+--------------------------------+---------------------------------------
+ 29/5/4/6/280126/2/11/534943056 | 305/55/26/100/5122327/45/12/947737969
+(1 row)
+
+SELECT tokenize_k(60), tokenize_k(81);
+              tokenize_k               |               tokenize_k                
+---------------------------------------+-----------------------------------------
+ 470/91/42/158/7941317/64/12/886639301 | 644/118/56/201/10121118/86/12/773168414
+(1 row)
+
+SELECT pj_expect('tokenize_k(int)', 'compiled') \gset
+-- an error in the middle of a kernel, and the kernel again
+SELECT nbody_k(NULL);  -- fail
+ERROR:  upper bound of FOR loop cannot be null
+CONTEXT:  PL/pgSQL function nbody_k(integer) line 63 at FOR with integer loop variable
+SELECT revcomp_k(NULL);  -- fail
+ERROR:  upper bound of FOR loop cannot be null
+CONTEXT:  PL/pgSQL function revcomp_k(integer) line 12 at FOR with integer loop variable
+SELECT tokenize_k(NULL);  -- fail
+ERROR:  upper bound of FOR loop cannot be null
+CONTEXT:  PL/pgSQL function tokenize_k(integer) line 20 at FOR with integer loop variable
+SELECT spectralnorm_k(-1);  -- fail
+ERROR:  array size exceeds the maximum allowed (134217727)
+CONTEXT:  PL/pgSQL function spectralnorm_k(integer) line 9 at assignment
+SELECT nbody_k(1), spectralnorm_k(10), revcomp_k(5), tokenize_k(40);
+          nbody_k          | spectralnorm_k |              revcomp_k               |              tokenize_k               
+---------------------------+----------------+--------------------------------------+---------------------------------------
+ -0.169075164 -0.169074954 | 1.271844019    | 106/c21c62f4b4c9bdbb804088494a9570f3 | 305/55/26/100/5122327/45/12/947737969
+(1 row)
+

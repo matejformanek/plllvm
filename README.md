@@ -218,8 +218,8 @@ run the code. In scope so far: blocks with `DECLARE` (defaults, `NOT NULL`,
 integers (`REVERSE`, `BY`), `EXIT` and `CONTINUE` with labels, `RETURN`, and
 `RAISE` without `USING`,
 with arguments and variables of a type passed by value that is no domain, or
-of a built-in base type passed by reference that is no array (`text`,
-`varchar`, `numeric`, `name`, `uuid`, `interval`, `bytea`, `jsonb`, ...), and
+of a built-in base type passed by reference (`text`, `varchar`, `numeric`,
+`name`, `uuid`, `interval`, `bytea`, `jsonb`, ...), or an array of one, and
 a result of any type that no variable holds. An expression is a bare
 variable or constant, or one of `bool`, `int4`, `int8` and `float8` as in the
 expression JIT; any other expression that PL/pgSQL plans as simple, calls of
@@ -350,7 +350,8 @@ measures.
 
 v0.3 adds `LANGUAGE plpgsql_jit`. It compiles scalar statements and
 locals, and runs the other simple expressions of such a function through the
-executor; SQL statements, exceptions and arrays follow.
+executor, as it does every access to an array; SQL statements and
+exceptions follow.
 
 ## Building and testing
 
@@ -398,7 +399,9 @@ PostgreSQL Licence, see `LICENSE`; `src/plllvm_pj.c` and `src/plllvm_pj_translat
 handler (Portions Copyright PostgreSQL Global Development Group).
 
 The kernels derived from the Computer
-Language Benchmarks Game are under `LICENSES/BENCHMARKS-GAME-BSD-3.md`.
+Language Benchmarks Game, in `examples/kernels/` and in the tests
+(`sql/pj_kernels.sql`, `sql/kernel_*.sql`), are under
+`LICENSES/BENCHMARKS-GAME-BSD-3.md`.
 
 ## Trademarks
 

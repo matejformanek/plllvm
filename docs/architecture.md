@@ -206,9 +206,9 @@ Only `plllvm_jit.c` and `plllvm_error.cpp` include LLVM headers.
   code with PL/pgSQL's SQLSTATE and CONTEXT, and a caught error marks the
   expression as any. A domain
   is never a target: a variable of a domain type declines the function.
-* A variable of a built-in base type passed by reference (not an array,
-  composite, domain or `refcursor`) has a slot of three parts: the Datum, a
-  null flag and a flag that the copy is ours. An argument is the caller's:
+* A variable of a built-in base type passed by reference, or an array of one
+  (not composite, domain or `refcursor`), has a slot of three parts: the
+  Datum, a null flag and a flag that the copy is ours. An argument is the caller's:
   the flag is false and it is never freed. An assignment copies the value
   into the datum context of the activation level (`datum_cxt`, under the
   level's context, reset when a call first uses the level), then frees the
@@ -217,6 +217,32 @@ Only `plllvm_jit.c` and `plllvm_error.cpp` include LLVM headers.
   variables at entry and starts them NULL. A bare constant or variable is
   moved without the executor, and a constant cast to such a type is folded
   at translation and copied at the store. An ERROR deletes the level.
+* An array is such a variable that is always kept in expanded form: the
+  assignment (`plllvm_pj_assign_array()`) reparents an expanded object the
+  executor returned and expands anything else, and an argument is expanded
+  once at entry, as PL/pgSQL does, so that a compressed or external one is not
+  detoasted at every subscript. The datum context is released when the call
+  ends, after the result is copied out, and goes with the level on an ERROR.
+* Every expression that reads or writes an array stays with the executor,
+  which is given the variable read-only. The one exception is the Param of the
+  assignment target that the in-place rule of PL/pgSQL allows to be modified:
+  the top-level function has a support function for
+  `SupportRequestModifyInPlace` (a subscripted assignment, `array_append`).
+  It is passed read/write through a twin of the parameter, with an id after
+  the datums, which exists in the harvest's copy of the tree only; the slot
+  keeps the array. The rule that hands the object to any function that holds
+  the only reference is not applied: a callee that takes it frees it, and the
+  slot would hold a freed array. A variant that stores an element has run the
+  executor, so it has no deopt point.
+* A constant text assigned to an array of `bool`, `int2`, `int4`, `int8`,
+  `float4`, `float8`, `numeric` or `text` (these eight only) is converted by
+  `array_in` when the function is translated, if the cast is the I/O
+  conversion (the input of other types reads a setting, a date's DateStyle);
+  an error there declines the function. An array of a type of the user and a
+  domain over an array decline the function, and so does an implicit
+  conversion of an array in a DECLARE default or a RETURN; at an assignment
+  the conversion is part of its expression and compiles. `int2vector` and
+  `oidvector` from a constant text decline as `cast`.
 * RAISE without `USING` is a few calls of the host: one starts the message in
   a context of the activation level, then for each `%` the code evaluates the
   parameter, prints it with the output function of its type
