@@ -1370,6 +1370,7 @@ class RecProgram:
                 "  %s\n  IF n <= 0 THEN RETURN %s; END IF;\n"
                 "  %s\n  %s\nEND" % (guard, r.choice(REC_RAISE), r.choice(REC_BASE),
                                       r.choice(REC_ASG), rec_shape(r, e)))
+        self.again = "WHILE" in body or "LOOP EXIT WHEN" in body
         sd = self.priv and r.random() < 0.5
         self.direct = r.random() < 0.3
         if self.direct:
@@ -1556,22 +1557,33 @@ def effects(lines):
     return ([l for l in lines if EFFECT.match(l)], [l for l in lines if not EFFECT.match(l)])
 
 
+def subseq(a, b):
+    it = iter(b)
+    return all(l in it for l in a)
+
+
 def prefix(a, b):
     return b[:len(a)] == a
 
 
-def frame_mix(j, a, c, g):
+def frame_mix(j, a, c, g, again=False):
     """Is the output j of plpgsql_jit what a recursion gets when some frames
     take SPI's custom plan and others the generic one?  A frame prints
     before it recurses, so the effects of j are a prefix of generic's and
     have custom's as a prefix.  The answer is generic's when j reaches the
     last effect of generic, else that of auto or custom.  A wrong value, an
-    effect that no mode has or one dropped from the middle is not a mix."""
+    effect that no mode has or one dropped from the middle is not a mix.
+    A body that evaluates the recursive expression again (again: WHILE or
+    LOOP) prints once per descent, so there the effects need only be
+    subsequences, custom's of j's and j's of generic's, and the answer one
+    of the three."""
     if c is None or g is None:
         return False
     je, ja = effects(j)
     ce, ca = effects(c)
     ge, ga = effects(g)
+    if again:
+        return ja in (effects(a)[1], ca, ga) and subseq(ce, je) and subseq(je, ge)
     if not (prefix(ce, je) and prefix(je, ge)):
         return False
     return ja == ga if len(je) == len(ge) else ja in (effects(a)[1], ca)
@@ -1595,6 +1607,10 @@ def selftest():
            (n(4, 3) + ["ERROR:  22012: division by zero"], c, c, g)]  # the reverse
     assert all(frame_mix(*t) for t in ok), "frame-mix refused a mix"
     assert not any(frame_mix(*t) for t in bad), "frame-mix accepted a mutant"
+    # a loop descends twice: 4,3,2,1,0,4,3 is no prefix but a subsequence
+    twice = (n(4, 3, 2, 4, 3) + ["N"], c, c, g + n(4, 3, 2, 1, 0))
+    assert not frame_mix(*twice) and frame_mix(*twice, True), "frame-mix again"
+    assert not any(frame_mix(*t, True) for t in bad[:5]), "frame-mix again accepted a mutant"
     print("pj_fuzz: selftest ok")
 
 
@@ -1629,7 +1645,8 @@ def rec_compare(args, prog, a, b, tally):
             tally["custom-steps"] += 1
         elif denied_fn(prog, y):
             tally["stricter-steps"] += 1
-        elif frame_mix(y, x, forced["custom"].get(str(i)), forced["generic"].get(str(i))):
+        elif frame_mix(y, x, forced["custom"].get(str(i)), forced["generic"].get(str(i)),
+                           prog.again):
             tally["mix-steps"] += 1
             mixed = True
         else:
