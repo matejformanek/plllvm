@@ -36,6 +36,33 @@ BEGIN
 END
 $$;
 
+-- pj_variant: the variant of fn that the session's settings select does, or
+-- does not, run expressions in the executor (boxed) and may be started again
+-- by the interpreter (restartable).  Nothing on stock, with plllvm.plpgsql_jit
+-- off, or under debug_discard_caches.
+CREATE FUNCTION pj_variant(fn regprocedure, want_boxed bool,
+                           want_restartable bool) RETURNS void
+LANGUAGE plpgsql AS $$
+DECLARE
+  got_boxed bool;
+  got_restartable bool;
+BEGIN
+  IF current_setting('plllvm.plpgsql_jit', true) IS NULL
+     OR NOT current_setting('plllvm.plpgsql_jit')::bool
+     OR current_setting('debug_discard_caches')::int > 0 THEN
+    RETURN;
+  END IF;
+
+  EXECUTE 'SELECT boxed, restartable FROM plllvm_pj_status($1)'
+    INTO got_boxed, got_restartable USING fn;
+  IF got_boxed IS DISTINCT FROM want_boxed
+     OR got_restartable IS DISTINCT FROM want_restartable THEN
+    RAISE EXCEPTION 'pj_variant(%): expected boxed %, restartable %, got % and %',
+      fn, want_boxed, want_restartable, got_boxed, got_restartable;
+  END IF;
+END
+$$;
+
 -- pj_mark and pj_delta: the change of the counters of plllvm_pj_stats()
 -- since the last pj_mark; NULL asserts nothing.  The mark is a GUC, not a
 -- temp table: the first temp table of a session changes its search_path,

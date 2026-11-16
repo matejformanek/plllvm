@@ -113,4 +113,21 @@ SELECT bool_and(variants = 4 AND last_path = 'compiled' AND boxed AND NOT restar
         UNION ALL SELECT * FROM plllvm_pj_status('pa_inc(int)')) s;
 SELECT boxed_evals > 0 AS boxed_evals_seen FROM plllvm_pj_stats();
 SELECT pa_sumn(100000);
+
+-- an element store keeps its read/write parameter, so the executor changes
+-- the array in place, whether the store is compiled or goes to the executor
+CREATE FUNCTION pa_estore(n integer) RETURNS integer LANGUAGE :pj_lang AS $$
+DECLARE a int4[] := '{1,2,3}'; i integer;
+BEGIN
+  FOR i IN 1..n LOOP a[1 + i % 3] := a[1 + i % 3] + i; END LOOP;
+  RETURN a[1] + a[2] + a[3];
+END $$;
+SELECT pa_estore(3), pa_estore(4);
+SELECT pa_estore(5), pa_estore(6);
+SELECT plllvm_pj_ir('pa_estore(integer)') ~ '@plllvm_pj_param_rw' AS boxed_store_twin;
+RESET plllvm.pj_codegen;
+SET plllvm.pj_codegen = native;
+SELECT pa_estore(3), pa_estore(4);
+SELECT pa_estore(5), pa_estore(6);
+SELECT plllvm_pj_ir('pa_estore(integer)') ~ '@plllvm_pj_param_rw' AS native_store_twin;
 RESET plllvm.pj_codegen;

@@ -269,4 +269,50 @@ SELECT boxed_evals > 0 AS boxed_evals_seen FROM plllvm_pj_stats();
 SELECT pa_sumn(100000);
 ERROR:  integer out of range
 CONTEXT:  PL/pgSQL function pa_sumn(integer) line 6 at assignment
+-- an element store keeps its read/write parameter, so the executor changes
+-- the array in place, whether the store is compiled or goes to the executor
+CREATE FUNCTION pa_estore(n integer) RETURNS integer LANGUAGE :pj_lang AS $$
+DECLARE a int4[] := '{1,2,3}'; i integer;
+BEGIN
+  FOR i IN 1..n LOOP a[1 + i % 3] := a[1 + i % 3] + i; END LOOP;
+  RETURN a[1] + a[2] + a[3];
+END $$;
+SELECT pa_estore(3), pa_estore(4);
+ pa_estore | pa_estore 
+-----------+-----------
+        12 |        16
+(1 row)
+
+SELECT pa_estore(5), pa_estore(6);
+ pa_estore | pa_estore 
+-----------+-----------
+        21 |        27
+(1 row)
+
+SELECT plllvm_pj_ir('pa_estore(integer)') ~ '@plllvm_pj_param_rw' AS boxed_store_twin;
+ boxed_store_twin 
+------------------
+ t
+(1 row)
+
+RESET plllvm.pj_codegen;
+SET plllvm.pj_codegen = native;
+SELECT pa_estore(3), pa_estore(4);
+ pa_estore | pa_estore 
+-----------+-----------
+        12 |        16
+(1 row)
+
+SELECT pa_estore(5), pa_estore(6);
+ pa_estore | pa_estore 
+-----------+-----------
+        21 |        27
+(1 row)
+
+SELECT plllvm_pj_ir('pa_estore(integer)') ~ '@plllvm_pj_param_rw' AS native_store_twin;
+ native_store_twin 
+-------------------
+ t
+(1 row)
+
 RESET plllvm.pj_codegen;
