@@ -142,13 +142,14 @@ SELECT pv_coalesce('{NULL,2,3}', 0);  -- fail
 SELECT pv_and('{1,2,3}', 0);
 
 -- store: in range, past both ends, into a NULL array and an empty one, a NULL
--- value over a value and a value over a NULL
+-- value over a value and a value over a NULL.  The first store of a call into
+-- an argument makes the elements of the array, which the second one finds.
 CREATE FUNCTION pv_set4(a int4[], i int, v int4) RETURNS int4[] LANGUAGE :pj_lang AS $$
-BEGIN a[i] := v; RETURN a; END $$;
+BEGIN a[i] := v; a[i + 1] := v + 1; RETURN a; END $$;
 CREATE FUNCTION pv_set8(a int8[], i int, v int8) RETURNS int8[] LANGUAGE :pj_lang AS $$
-BEGIN a[i] := v; RETURN a; END $$;
+BEGIN a[i] := v; a[i + 1] := v + 1; RETURN a; END $$;
 CREATE FUNCTION pv_setf(a float8[], i int, v float8) RETURNS float8[] LANGUAGE :pj_lang AS $$
-BEGIN a[i] := v; RETURN a; END $$;
+BEGIN a[i] := v; a[i + 1] := v + 1; RETURN a; END $$;
 CREATE FUNCTION pv_setnull(i int, v int4) RETURNS int4[] LANGUAGE :pj_lang AS $$
 DECLARE a int4[];
 BEGIN a[i] := v; RETURN a; END $$;
@@ -156,7 +157,7 @@ CREATE FUNCTION pv_setempty(i int, v int4) RETURNS int4[] LANGUAGE :pj_lang AS $
 DECLARE a int4[] := '{}';
 BEGIN a[i] := v; RETURN a; END $$;
 CREATE FUNCTION pv_setnullv(a int4[], i int) RETURNS int4[] LANGUAGE :pj_lang AS $$
-BEGIN a[i] := nullif(i, i); RETURN a; END $$;
+BEGIN a[i] := nullif(i, i); a[i] := i + 10; a[i + 1] := nullif(i, i); RETURN a; END $$;
 SELECT pv_set4('{1,2,3}', 2, 9), pv_set8('{1,2,3}', 2, 9), pv_setf('{1,2,3}', 2, 9);
 SELECT pv_set4('{1,2,3}', 2, 9), pv_set8('{1,2,3}', 2, 9), pv_setf('{1,2,3}', 2, 9);
 SELECT pv_setnull(2, 5), pv_setempty(2, 5), pv_setnullv('{1,2,3}', 2);
@@ -172,13 +173,13 @@ SELECT id, string_agg(coalesce(pv_set4(a::int4[], i, 9)::text, 'N'), ' ' ORDER B
        string_agg(coalesce(pv_set8(a::int8[], i, 9)::text, 'N'), ' ' ORDER BY i) AS i8,
        string_agg(coalesce(pv_setf(a::float8[], i, 9)::text, 'N'), ' ' ORDER BY i) AS f8
   FROM pv_arrs, generate_series(-4, 8, 3) i GROUP BY id ORDER BY id;
-SELECT pj_delta(105, 0, 105, 0, 0, 0) \gset
+SELECT pj_delta(105, 0, 0, 0, 0, 162) \gset
 SELECT pj_mark() \gset
 SELECT i, pv_setnull(i, 5), pv_setempty(i, 5)
   FROM generate_series(-2, 2) i ORDER BY i;
 SELECT id, i, pv_setnullv(a::int4[], i) FROM pv_arrs,
     generate_series(0, 4) i WHERE id IN (1, 5, 6) ORDER BY id, i;
-SELECT pj_delta(25, 0, 25, 0, 0, 0) \gset
+SELECT pj_delta(25, 0, 0, 0, 0, 40) \gset
 
 -- the subscript is checked before the value is computed, and a two-dimensional
 -- target, a size over the limit
@@ -213,7 +214,7 @@ SELECT pj_expect('pv_self(int4[],int,int)', 'compiled') \gset
 SELECT pj_mark() \gset
 SELECT pv_self('{1,2,3}', 3, 2), pv_self('{2,5,7}', 1, 3),
        pv_self('{3,5,7}', 2, 2);
-SELECT pj_delta(3, 0, 6, 0, 0, 0) \gset
+SELECT pj_delta(3, 0, 0, 0, 0, 4) \gset
 
 -- the answer that the array gives out after a store.  A value read before the
 -- store left the flat copy of the array standing, and a stored element must
@@ -244,7 +245,7 @@ SELECT pv_size();
 SELECT pj_expect('pv_size()', 'compiled') \gset
 SELECT pj_mark() \gset
 SELECT pv_ret(), pv_size();
-SELECT pj_delta(2, 0, 5, 0, 0, 1) \gset
+SELECT pj_delta(2, 0, 2, 0, 0, 2) \gset
 
 -- an element read after a store of the same call; the arrays of a call in
 -- another call's frames
@@ -410,9 +411,12 @@ SELECT pv_d1('{1,2,3}', 3, 0), pv_d1('{1,2,3}', 3, 0), pv_d1('{4,5,6}', 2, 0);
 SELECT pv_d2(3, 0), pv_d2(4, 0), pv_d2(5, 0);
 SELECT pj_expect('pv_d1(int4[],int,int)', 'compiled') \gset
 SELECT pj_variant('pv_d1(int4[],int,int)', false, true) \gset
-SELECT pj_expect('pv_d2(int,int)', 'waiting') \gset
+SELECT pj_expect('pv_d2(int,int)', 'compiled') \gset
+SELECT pj_variant('pv_d2(int,int)', false, true) \gset
 SELECT pj_mark() \gset
 SELECT pv_d1('{1,2,3}', 3, 99);
 SELECT pj_delta(0, 0, 0, 1, 0) \gset
+SELECT pj_mark() \gset
 SELECT pv_d2(3, 99);
+SELECT pj_delta(0, 0, 0, 1, 0) \gset
 SELECT pv_d1('{1,2,3}', 3, 0), pv_d2(3, 0), pv_d1('{1,2,3}', 3, 99), pv_d2(5, 99);

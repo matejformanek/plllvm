@@ -312,7 +312,7 @@ SELECT pa_estore(5), pa_estore(6);
 SELECT plllvm_pj_ir('pa_estore(integer)') ~ '@plllvm_pj_param_rw' AS native_store_twin;
  native_store_twin 
 -------------------
- t
+ f
 (1 row)
 
 RESET plllvm.pj_codegen;

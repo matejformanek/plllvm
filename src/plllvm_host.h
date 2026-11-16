@@ -57,7 +57,9 @@
 		offsetof(ExpandedArrayHeader, lbound), \
 		offsetof(ExpandedArrayHeader, element_type), \
 		offsetof(ExpandedArrayHeader, dvalues), \
-		offsetof(ExpandedArrayHeader, dnulls) \
+		offsetof(ExpandedArrayHeader, dnulls), \
+		offsetof(ExpandedArrayHeader, fvalue), \
+		offsetof(ExpandedArrayHeader, flat_size) \
 	}
 
 /* a call site of JIT-compiled code (plllvm_sites.c); its address is in the code */
@@ -130,6 +132,10 @@ pg_noreturn extern void plllvm_pj_raise_bare(void);
  */
 extern NullableDatum plllvm_pj_elem_get_slow(Datum array, int32 sub,
 											 Oid elemtype);
+extern Datum plllvm_pj_elem_set_slow(struct PjCtx *ctx, Datum array,
+									 bool isnull, int32 sub, Datum value,
+									 bool valuenull, Oid elemtype);
+pg_noreturn extern void plllvm_pj_subscript_null(void);
 
 /*
  * A call of a function from compiled code, for plllvm_pj_invoke(): the

@@ -121,7 +121,9 @@ plllvm_pj_boxed_eval(PjCtx *ctx, int32 idx)
 void
 plllvm_pj_boxed_reset(PjCtx *ctx)
 {
-	level_reset(ctx->lv);
+	/* no level yet if the call has run nothing of the executor */
+	if (ctx->lv != NULL)
+		level_reset(ctx->lv);
 }
 
 /*
@@ -226,6 +228,49 @@ plllvm_pj_elem_get_slow(Datum array, int32 sub, Oid elemtype)
 	r.value = array_get_element(array, 1, &sub, -1, len, true, align,
 								&r.isnull);
 	return r;
+}
+
+/*
+ * A store of an element that the inline code did not make: a value or an
+ * element out of range, NULL, an array of no Datums yet, or of other
+ * dimensions.  The slot's array is changed in place, and array_set_element()
+ * returns it; an array that is not the slot's, or is NULL, is what the
+ * interpreter replaces by an empty one, and exec_assign_value() then
+ * expands, here in the datum context of the level.  The flat arrays of that
+ * are the per-tuple memory's, which is reset once the object is made, as
+ * nothing of the expression that is not by value lives there now.
+ */
+Datum
+plllvm_pj_elem_set_slow(PjCtx *ctx, Datum array, bool isnull, int32 sub,
+						Datum value, bool valuenull, Oid elemtype)
+{
+	Datum		result;
+	int			len;
+	char		align;
+
+	plllvm_pj_count.elem_slow++;
+	elem_layout(elemtype, &len, &align);
+
+	if (isnull)
+	{
+		PjLevel    *lv = plllvm_pj_level(ctx);
+		MemoryContext oldcxt = MemoryContextSwitchTo(lv->econtext->ecxt_per_tuple_memory);
+		Datum		flat;
+
+		flat = array_set_element(PointerGetDatum(construct_empty_array(elemtype)),
+								 1, &sub, value, valuenull, -1, len, true,
+								 align);
+		result = expand_array(flat, lv->datum_cxt, NULL);
+		MemoryContextSwitchTo(oldcxt);
+		level_reset(lv);
+		return result;
+	}
+
+	result = array_set_element(array, 1, &sub, value, valuenull, -1, len, true,
+							   align);
+	if (result != array)
+		elog(ERROR, "plpgsql_jit: the store of an element made another array");
+	return result;
 }
 
 /* an array argument, expanded once as plpgsql_exec_function() does */

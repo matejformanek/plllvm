@@ -90,6 +90,12 @@ extern void plllvm_array_set_f64(ArrayType *a, int32 i, float8 v);
 extern int32 plllvm_pj_elem_get_i32(Datum array, int32 sub, bool *isnull);
 extern int64 plllvm_pj_elem_get_i64(Datum array, int32 sub, bool *isnull);
 extern float8 plllvm_pj_elem_get_f64(Datum array, int32 sub, bool *isnull);
+extern Datum plllvm_pj_elem_set_i32(struct PjCtx *ctx, Datum array, bool isnull,
+									int32 sub, int32 value, bool valuenull);
+extern Datum plllvm_pj_elem_set_i64(struct PjCtx *ctx, Datum array, bool isnull,
+									int32 sub, int64 value, bool valuenull);
+extern Datum plllvm_pj_elem_set_f64(struct PjCtx *ctx, Datum array, bool isnull,
+									int32 sub, float8 value, bool valuenull);
 extern int32 plllvm_int4_pl(int32 val1, int32 val2);
 extern int32 plllvm_int4_mi(int32 val1, int32 val2);
 extern int32 plllvm_int4_mul(int32 val1, int32 val2);
@@ -478,6 +484,69 @@ plllvm_pj_elem_get_f64(Datum array, int32 sub, bool *isnull)
 }
 
 /*
+ * A store into an element in range of such an array, which the slot holds
+ * as read/write: the four changes that array_set_element_expanded() makes
+ * for it (the flat copy and its size are no longer the array), and the
+ * object stays as it is.  Anything else, a NULL array or value included, is
+ * the slow function's.
+ */
+static pg_always_inline bool
+elem_write(Datum array, Oid elemtype, int32 sub, Datum value)
+{
+	ExpandedArrayHeader *eah;
+	int64		k;
+
+	if (!VARATT_IS_EXTERNAL_EXPANDED_RW(DatumGetPointer(array)) ||
+		!elem_shape(array, elemtype))
+		return false;
+	eah = elem_header(array);
+	k = (int64) sub - eah->lbound[0];
+	if (k < 0 || k >= eah->dims[0])
+		return false;
+
+	eah->fvalue = NULL;
+	eah->flat_size = 0;
+	eah->dvalues[k] = value;
+	if (eah->dnulls != NULL)
+		eah->dnulls[k] = false;
+	return true;
+}
+
+pg_always_inline Datum
+plllvm_pj_elem_set_i32(struct PjCtx *ctx, Datum array, bool isnull, int32 sub,
+					   int32 value, bool valuenull)
+{
+	if (likely(!isnull && !valuenull &&
+			   elem_write(array, INT4OID, sub, Int32GetDatum(value))))
+		return array;
+	return plllvm_pj_elem_set_slow(ctx, array, isnull, sub,
+								   Int32GetDatum(value), valuenull, INT4OID);
+}
+
+pg_always_inline Datum
+plllvm_pj_elem_set_i64(struct PjCtx *ctx, Datum array, bool isnull, int32 sub,
+					   int64 value, bool valuenull)
+{
+	if (likely(!isnull && !valuenull &&
+			   elem_write(array, INT8OID, sub, Int64GetDatum(value))))
+		return array;
+	return plllvm_pj_elem_set_slow(ctx, array, isnull, sub,
+								   Int64GetDatum(value), valuenull, INT8OID);
+}
+
+pg_always_inline Datum
+plllvm_pj_elem_set_f64(struct PjCtx *ctx, Datum array, bool isnull, int32 sub,
+					   float8 value, bool valuenull)
+{
+	if (likely(!isnull && !valuenull &&
+			   elem_write(array, FLOAT8OID, sub, Float8GetDatum(value))))
+		return array;
+	return plllvm_pj_elem_set_slow(ctx, array, isnull, sub,
+								   Float8GetDatum(value), valuenull,
+								   FLOAT8OID);
+}
+
+/*
  * Operators (plllvm_ops.h).  The int48 and int84 ones widen the int4
  * argument to use the int8 ones, except int48div.
  */
@@ -727,6 +796,8 @@ void	   *referenced_functions[] =
 	plllvm_pj_case_not_found,
 	plllvm_pj_params,
 	plllvm_pj_elem_get_slow,
+	plllvm_pj_elem_set_slow,
+	plllvm_pj_subscript_null,
 	plllvm_pj_boxed_eval,
 	plllvm_pj_boxed_reset,
 	plllvm_pj_assign,

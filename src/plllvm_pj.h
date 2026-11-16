@@ -171,6 +171,7 @@ typedef struct PjExpr
 	int			rw;				/* the datum its read/write Param is, or -1 */
 	bool		need;			/* a snapshot of our own, if boxed */
 	bool		elem_fetch;		/* the compiled code reads an element */
+	bool		elem_store;		/* the tree is the store of an element */
 	int			ncalls;			/* calls the compiled code makes, cast
 								 * included */
 	int			cast_calls;		/* those of the cast */

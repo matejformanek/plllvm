@@ -269,13 +269,14 @@ SELECT pv_and('{1,2,3}', 0);
 (1 row)
 
 -- store: in range, past both ends, into a NULL array and an empty one, a NULL
--- value over a value and a value over a NULL
+-- value over a value and a value over a NULL.  The first store of a call into
+-- an argument makes the elements of the array, which the second one finds.
 CREATE FUNCTION pv_set4(a int4[], i int, v int4) RETURNS int4[] LANGUAGE :pj_lang AS $$
-BEGIN a[i] := v; RETURN a; END $$;
+BEGIN a[i] := v; a[i + 1] := v + 1; RETURN a; END $$;
 CREATE FUNCTION pv_set8(a int8[], i int, v int8) RETURNS int8[] LANGUAGE :pj_lang AS $$
-BEGIN a[i] := v; RETURN a; END $$;
+BEGIN a[i] := v; a[i + 1] := v + 1; RETURN a; END $$;
 CREATE FUNCTION pv_setf(a float8[], i int, v float8) RETURNS float8[] LANGUAGE :pj_lang AS $$
-BEGIN a[i] := v; RETURN a; END $$;
+BEGIN a[i] := v; a[i + 1] := v + 1; RETURN a; END $$;
 CREATE FUNCTION pv_setnull(i int, v int4) RETURNS int4[] LANGUAGE :pj_lang AS $$
 DECLARE a int4[];
 BEGIN a[i] := v; RETURN a; END $$;
@@ -283,29 +284,29 @@ CREATE FUNCTION pv_setempty(i int, v int4) RETURNS int4[] LANGUAGE :pj_lang AS $
 DECLARE a int4[] := '{}';
 BEGIN a[i] := v; RETURN a; END $$;
 CREATE FUNCTION pv_setnullv(a int4[], i int) RETURNS int4[] LANGUAGE :pj_lang AS $$
-BEGIN a[i] := nullif(i, i); RETURN a; END $$;
+BEGIN a[i] := nullif(i, i); a[i] := i + 10; a[i + 1] := nullif(i, i); RETURN a; END $$;
 SELECT pv_set4('{1,2,3}', 2, 9), pv_set8('{1,2,3}', 2, 9), pv_setf('{1,2,3}', 2, 9);
- pv_set4 | pv_set8 | pv_setf 
----------+---------+---------
- {1,9,3} | {1,9,3} | {1,9,3}
+ pv_set4  | pv_set8  | pv_setf  
+----------+----------+----------
+ {1,9,10} | {1,9,10} | {1,9,10}
 (1 row)
 
 SELECT pv_set4('{1,2,3}', 2, 9), pv_set8('{1,2,3}', 2, 9), pv_setf('{1,2,3}', 2, 9);
- pv_set4 | pv_set8 | pv_setf 
----------+---------+---------
- {1,9,3} | {1,9,3} | {1,9,3}
+ pv_set4  | pv_set8  | pv_setf  
+----------+----------+----------
+ {1,9,10} | {1,9,10} | {1,9,10}
 (1 row)
 
 SELECT pv_setnull(2, 5), pv_setempty(2, 5), pv_setnullv('{1,2,3}', 2);
  pv_setnull | pv_setempty | pv_setnullv 
 ------------+-------------+-------------
- [2:2]={5}  | [2:2]={5}   | {1,NULL,3}
+ [2:2]={5}  | [2:2]={5}   | {1,12,NULL}
 (1 row)
 
 SELECT pv_setnull(2, 5), pv_setempty(2, 5), pv_setnullv('{1,2,3}', 2);
  pv_setnull | pv_setempty | pv_setnullv 
 ------------+-------------+-------------
- [2:2]={5}  | [2:2]={5}   | {1,NULL,3}
+ [2:2]={5}  | [2:2]={5}   | {1,12,NULL}
 (1 row)
 
 SELECT pj_expect('pv_set4(int4[],int,int4)', 'compiled') \gset
@@ -319,18 +320,18 @@ SELECT id, string_agg(coalesce(pv_set4(a::int4[], i, 9)::text, 'N'), ' ' ORDER B
        string_agg(coalesce(pv_set8(a::int8[], i, 9)::text, 'N'), ' ' ORDER BY i) AS i8,
        string_agg(coalesce(pv_setf(a::float8[], i, 9)::text, 'N'), ' ' ORDER BY i) AS f8
   FROM pv_arrs, generate_series(-4, 8, 3) i GROUP BY id ORDER BY id;
- id |                                                                                    i4                                                                                    |                                                                                    i8                                                                                    |                                                                                    f8                                                                                    
-----+--------------------------------------------------------------------------------------------------------------------------------------------------------------------------+--------------------------------------------------------------------------------------------------------------------------------------------------------------------------+--------------------------------------------------------------------------------------------------------------------------------------------------------------------------
-  1 | [-4:3]={9,NULL,NULL,NULL,NULL,1,2,3} [-1:3]={9,NULL,1,2,3} {1,9,3} {1,2,3,NULL,9} {1,2,3,NULL,NULL,NULL,NULL,9}                                                          | [-4:3]={9,NULL,NULL,NULL,NULL,1,2,3} [-1:3]={9,NULL,1,2,3} {1,9,3} {1,2,3,NULL,9} {1,2,3,NULL,NULL,NULL,NULL,9}                                                          | [-4:3]={9,NULL,NULL,NULL,NULL,1,2,3} [-1:3]={9,NULL,1,2,3} {1,9,3} {1,2,3,NULL,9} {1,2,3,NULL,NULL,NULL,NULL,9}
-  2 | [-4:2]={9,NULL,NULL,NULL,4,5,6} [-1:2]={9,4,5,6} [0:2]={4,5,9} [0:5]={4,5,6,NULL,NULL,9} [0:8]={4,5,6,NULL,NULL,NULL,NULL,NULL,9}                                        | [-4:2]={9,NULL,NULL,NULL,4,5,6} [-1:2]={9,4,5,6} [0:2]={4,5,9} [0:5]={4,5,6,NULL,NULL,9} [0:8]={4,5,6,NULL,NULL,NULL,NULL,NULL,9}                                        | [-4:2]={9,NULL,NULL,NULL,4,5,6} [-1:2]={9,4,5,6} [0:2]={4,5,9} [0:5]={4,5,6,NULL,NULL,9} [0:8]={4,5,6,NULL,NULL,NULL,NULL,NULL,9}
-  3 | [-4:-1]={9,7,8,9} [-3:-1]={7,8,9} [-3:2]={7,8,9,NULL,NULL,9} [-3:5]={7,8,9,NULL,NULL,NULL,NULL,NULL,9} [-3:8]={7,8,9,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,9}          | [-4:-1]={9,7,8,9} [-3:-1]={7,8,9} [-3:2]={7,8,9,NULL,NULL,9} [-3:5]={7,8,9,NULL,NULL,NULL,NULL,NULL,9} [-3:8]={7,8,9,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,9}          | [-4:-1]={9,7,8,9} [-3:-1]={7,8,9} [-3:2]={7,8,9,NULL,NULL,9} [-3:5]={7,8,9,NULL,NULL,NULL,NULL,NULL,9} [-3:8]={7,8,9,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,9}
-  4 | [-4:7]={9,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,10,11,12} [-1:7]={9,NULL,NULL,NULL,NULL,NULL,10,11,12} [2:7]={9,NULL,NULL,10,11,12} [5:7]={9,11,12} [5:8]={10,11,12,9} | [-4:7]={9,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,10,11,12} [-1:7]={9,NULL,NULL,NULL,NULL,NULL,10,11,12} [2:7]={9,NULL,NULL,10,11,12} [5:7]={9,11,12} [5:8]={10,11,12,9} | [-4:7]={9,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,10,11,12} [-1:7]={9,NULL,NULL,NULL,NULL,NULL,10,11,12} [2:7]={9,NULL,NULL,10,11,12} [5:7]={9,11,12} [5:8]={10,11,12,9}
-  5 | [-4:3]={9,NULL,NULL,NULL,NULL,1,NULL,3} [-1:3]={9,NULL,1,NULL,3} {1,9,3} {1,NULL,3,NULL,9} {1,NULL,3,NULL,NULL,NULL,NULL,9}                                              | [-4:3]={9,NULL,NULL,NULL,NULL,1,NULL,3} [-1:3]={9,NULL,1,NULL,3} {1,9,3} {1,NULL,3,NULL,9} {1,NULL,3,NULL,NULL,NULL,NULL,9}                                              | [-4:3]={9,NULL,NULL,NULL,NULL,1,NULL,3} [-1:3]={9,NULL,1,NULL,3} {1,9,3} {1,NULL,3,NULL,9} {1,NULL,3,NULL,NULL,NULL,NULL,9}
-  6 | [-4:-4]={9} [-1:-1]={9} [2:2]={9} [5:5]={9} [8:8]={9}                                                                                                                    | [-4:-4]={9} [-1:-1]={9} [2:2]={9} [5:5]={9} [8:8]={9}                                                                                                                    | [-4:-4]={9} [-1:-1]={9} [2:2]={9} [5:5]={9} [8:8]={9}
-  7 | [-4:3]={9,NULL,NULL,NULL,NULL,NULL,NULL,1} [-1:3]={9,NULL,NULL,NULL,1} [2:3]={9,1} [2:5]={NULL,1,NULL,9} [2:8]={NULL,1,NULL,NULL,NULL,NULL,9}                            | [-4:3]={9,NULL,NULL,NULL,NULL,NULL,NULL,1} [-1:3]={9,NULL,NULL,NULL,1} [2:3]={9,1} [2:5]={NULL,1,NULL,9} [2:8]={NULL,1,NULL,NULL,NULL,NULL,9}                            | [-4:3]={9,NULL,NULL,NULL,NULL,NULL,NULL,1} [-1:3]={9,NULL,NULL,NULL,1} [2:3]={9,1} [2:5]={NULL,1,NULL,9} [2:8]={NULL,1,NULL,NULL,NULL,NULL,9}
+ id |                                                                                     i4                                                                                      |                                                                                     i8                                                                                      |                                                                                     f8                                                                                      
+----+-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------+-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------+-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+  1 | [-4:3]={9,10,NULL,NULL,NULL,1,2,3} [-1:3]={9,10,1,2,3} {1,9,10} {1,2,3,NULL,9,10} {1,2,3,NULL,NULL,NULL,NULL,9,10}                                                          | [-4:3]={9,10,NULL,NULL,NULL,1,2,3} [-1:3]={9,10,1,2,3} {1,9,10} {1,2,3,NULL,9,10} {1,2,3,NULL,NULL,NULL,NULL,9,10}                                                          | [-4:3]={9,10,NULL,NULL,NULL,1,2,3} [-1:3]={9,10,1,2,3} {1,9,10} {1,2,3,NULL,9,10} {1,2,3,NULL,NULL,NULL,NULL,9,10}
+  2 | [-4:2]={9,10,NULL,NULL,4,5,6} [-1:2]={9,10,5,6} [0:3]={4,5,9,10} [0:6]={4,5,6,NULL,NULL,9,10} [0:9]={4,5,6,NULL,NULL,NULL,NULL,NULL,9,10}                                   | [-4:2]={9,10,NULL,NULL,4,5,6} [-1:2]={9,10,5,6} [0:3]={4,5,9,10} [0:6]={4,5,6,NULL,NULL,9,10} [0:9]={4,5,6,NULL,NULL,NULL,NULL,NULL,9,10}                                   | [-4:2]={9,10,NULL,NULL,4,5,6} [-1:2]={9,10,5,6} [0:3]={4,5,9,10} [0:6]={4,5,6,NULL,NULL,9,10} [0:9]={4,5,6,NULL,NULL,NULL,NULL,NULL,9,10}
+  3 | [-4:-1]={9,10,8,9} [-3:0]={7,8,9,10} [-3:3]={7,8,9,NULL,NULL,9,10} [-3:6]={7,8,9,NULL,NULL,NULL,NULL,NULL,9,10} [-3:9]={7,8,9,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,9,10} | [-4:-1]={9,10,8,9} [-3:0]={7,8,9,10} [-3:3]={7,8,9,NULL,NULL,9,10} [-3:6]={7,8,9,NULL,NULL,NULL,NULL,NULL,9,10} [-3:9]={7,8,9,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,9,10} | [-4:-1]={9,10,8,9} [-3:0]={7,8,9,10} [-3:3]={7,8,9,NULL,NULL,9,10} [-3:6]={7,8,9,NULL,NULL,NULL,NULL,NULL,9,10} [-3:9]={7,8,9,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,9,10}
+  4 | [-4:7]={9,10,NULL,NULL,NULL,NULL,NULL,NULL,NULL,10,11,12} [-1:7]={9,10,NULL,NULL,NULL,NULL,10,11,12} [2:7]={9,10,NULL,10,11,12} [5:7]={9,10,12} [5:9]={10,11,12,9,10}       | [-4:7]={9,10,NULL,NULL,NULL,NULL,NULL,NULL,NULL,10,11,12} [-1:7]={9,10,NULL,NULL,NULL,NULL,10,11,12} [2:7]={9,10,NULL,10,11,12} [5:7]={9,10,12} [5:9]={10,11,12,9,10}       | [-4:7]={9,10,NULL,NULL,NULL,NULL,NULL,NULL,NULL,10,11,12} [-1:7]={9,10,NULL,NULL,NULL,NULL,10,11,12} [2:7]={9,10,NULL,10,11,12} [5:7]={9,10,12} [5:9]={10,11,12,9,10}
+  5 | [-4:3]={9,10,NULL,NULL,NULL,1,NULL,3} [-1:3]={9,10,1,NULL,3} {1,9,10} {1,NULL,3,NULL,9,10} {1,NULL,3,NULL,NULL,NULL,NULL,9,10}                                              | [-4:3]={9,10,NULL,NULL,NULL,1,NULL,3} [-1:3]={9,10,1,NULL,3} {1,9,10} {1,NULL,3,NULL,9,10} {1,NULL,3,NULL,NULL,NULL,NULL,9,10}                                              | [-4:3]={9,10,NULL,NULL,NULL,1,NULL,3} [-1:3]={9,10,1,NULL,3} {1,9,10} {1,NULL,3,NULL,9,10} {1,NULL,3,NULL,NULL,NULL,NULL,9,10}
+  6 | [-4:-3]={9,10} [-1:0]={9,10} [2:3]={9,10} [5:6]={9,10} [8:9]={9,10}                                                                                                         | [-4:-3]={9,10} [-1:0]={9,10} [2:3]={9,10} [5:6]={9,10} [8:9]={9,10}                                                                                                         | [-4:-3]={9,10} [-1:0]={9,10} [2:3]={9,10} [5:6]={9,10} [8:9]={9,10}
+  7 | [-4:3]={9,10,NULL,NULL,NULL,NULL,NULL,1} [-1:3]={9,10,NULL,NULL,1} [2:3]={9,10} [2:6]={NULL,1,NULL,9,10} [2:9]={NULL,1,NULL,NULL,NULL,NULL,9,10}                            | [-4:3]={9,10,NULL,NULL,NULL,NULL,NULL,1} [-1:3]={9,10,NULL,NULL,1} [2:3]={9,10} [2:6]={NULL,1,NULL,9,10} [2:9]={NULL,1,NULL,NULL,NULL,NULL,9,10}                            | [-4:3]={9,10,NULL,NULL,NULL,NULL,NULL,1} [-1:3]={9,10,NULL,NULL,1} [2:3]={9,10} [2:6]={NULL,1,NULL,9,10} [2:9]={NULL,1,NULL,NULL,NULL,NULL,9,10}
 (7 rows)
 
-SELECT pj_delta(105, 0, 105, 0, 0, 0) \gset
+SELECT pj_delta(105, 0, 0, 0, 0, 162) \gset
 SELECT pj_mark() \gset
 SELECT i, pv_setnull(i, 5), pv_setempty(i, 5)
   FROM generate_series(-2, 2) i ORDER BY i;
@@ -345,26 +346,26 @@ SELECT i, pv_setnull(i, 5), pv_setempty(i, 5)
 
 SELECT id, i, pv_setnullv(a::int4[], i) FROM pv_arrs,
     generate_series(0, 4) i WHERE id IN (1, 5, 6) ORDER BY id, i;
- id | i |      pv_setnullv      
-----+---+-----------------------
-  1 | 0 | [0:3]={NULL,1,2,3}
-  1 | 1 | {NULL,2,3}
-  1 | 2 | {1,NULL,3}
-  1 | 3 | {1,2,NULL}
-  1 | 4 | {1,2,3,NULL}
-  5 | 0 | [0:3]={NULL,1,NULL,3}
-  5 | 1 | {NULL,NULL,3}
-  5 | 2 | {1,NULL,3}
-  5 | 3 | {1,NULL,NULL}
-  5 | 4 | {1,NULL,3,NULL}
-  6 | 0 | [0:0]={NULL}
-  6 | 1 | {NULL}
-  6 | 2 | [2:2]={NULL}
-  6 | 3 | [3:3]={NULL}
-  6 | 4 | [4:4]={NULL}
+ id | i |      pv_setnullv       
+----+---+------------------------
+  1 | 0 | [0:3]={10,NULL,2,3}
+  1 | 1 | {11,NULL,3}
+  1 | 2 | {1,12,NULL}
+  1 | 3 | {1,2,13,NULL}
+  1 | 4 | {1,2,3,14,NULL}
+  5 | 0 | [0:3]={10,NULL,NULL,3}
+  5 | 1 | {11,NULL,3}
+  5 | 2 | {1,12,NULL}
+  5 | 3 | {1,NULL,13,NULL}
+  5 | 4 | {1,NULL,3,14,NULL}
+  6 | 0 | [0:1]={10,NULL}
+  6 | 1 | {11,NULL}
+  6 | 2 | [2:3]={12,NULL}
+  6 | 3 | [3:4]={13,NULL}
+  6 | 4 | [4:5]={14,NULL}
 (15 rows)
 
-SELECT pj_delta(25, 0, 25, 0, 0, 0) \gset
+SELECT pj_delta(25, 0, 0, 0, 0, 40) \gset
 -- the subscript is checked before the value is computed, and a two-dimensional
 -- target, a size over the limit
 CREATE FUNCTION pv_nullsubset(a int4[], k int) RETURNS int4[] LANGUAGE :pj_lang AS $$
@@ -435,7 +436,7 @@ SELECT pv_self('{1,2,3}', 3, 2), pv_self('{2,5,7}', 1, 3),
  {2,2,5} | {9,5,7,NULL,NULL,NULL,NULL,NULL,5} | {3,10,10}
 (1 row)
 
-SELECT pj_delta(3, 0, 6, 0, 0, 0) \gset
+SELECT pj_delta(3, 0, 0, 0, 0, 4) \gset
 -- the answer that the array gives out after a store.  A value read before the
 -- store left the flat copy of the array standing, and a stored element must
 -- not leave it, nor the size of the flat copy, in use
@@ -490,7 +491,7 @@ SELECT pv_ret(), pv_size();
  {1,9,3} |       4
 (1 row)
 
-SELECT pj_delta(2, 0, 5, 0, 0, 1) \gset
+SELECT pj_delta(2, 0, 2, 0, 0, 2) \gset
 -- an element read after a store of the same call; the arrays of a call in
 -- another call's frames
 CREATE FUNCTION pv_rec(n int, a int4[]) RETURNS int8 LANGUAGE :pj_lang STABLE AS $$
@@ -770,7 +771,8 @@ SELECT pv_d2(3, 0), pv_d2(4, 0), pv_d2(5, 0);
 
 SELECT pj_expect('pv_d1(int4[],int,int)', 'compiled') \gset
 SELECT pj_variant('pv_d1(int4[],int,int)', false, true) \gset
-SELECT pj_expect('pv_d2(int,int)', 'waiting') \gset
+SELECT pj_expect('pv_d2(int,int)', 'compiled') \gset
+SELECT pj_variant('pv_d2(int,int)', false, true) \gset
 SELECT pj_mark() \gset
 SELECT pv_d1('{1,2,3}', 3, 99);
  pv_d1 
@@ -779,12 +781,14 @@ SELECT pv_d1('{1,2,3}', 3, 99);
 (1 row)
 
 SELECT pj_delta(0, 0, 0, 1, 0) \gset
+SELECT pj_mark() \gset
 SELECT pv_d2(3, 99);
   pv_d2  
 ---------
  {4,0,5}
 (1 row)
 
+SELECT pj_delta(0, 0, 0, 1, 0) \gset
 SELECT pv_d1('{1,2,3}', 3, 0), pv_d2(3, 0), pv_d1('{1,2,3}', 3, 99), pv_d2(5, 99);
  pv_d1 |  pv_d2  | pv_d1 |  pv_d2   
 -------+---------+-------+----------

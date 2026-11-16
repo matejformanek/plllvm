@@ -457,14 +457,14 @@ SELECT nbody_k(1), nbody_k(10);
 SELECT nbody_k(1000), nbody_k(0);
 SELECT pj_mark() \gset
 SELECT nbody_k(5000);
-SELECT pj_delta(1, 0, 375010, 0, 0, 7) \gset
+SELECT pj_delta(1, 0, 7, 0, 0, 7) \gset
 SELECT pj_expect('nbody_k(int)', 'compiled') \gset
 
 SELECT spectralnorm_k(1), spectralnorm_k(10);
 SELECT spectralnorm_k(41), spectralnorm_k(2);
 SELECT pj_mark() \gset
 SELECT spectralnorm_k(41);
-SELECT pj_delta(1, 0, 1643, 0, 0, 1) \gset
+SELECT pj_delta(1, 0, 3, 0, 0, 3) \gset
 SELECT pj_expect('spectralnorm_k(int)', 'compiled') \gset
 
 SELECT revcomp_k(2), revcomp_k(5);

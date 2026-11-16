@@ -52,6 +52,8 @@ const plllvm_host_symbol plllvm_host_symbols[] =
 	{"plllvm_pj_case_not_found", (void *) plllvm_pj_case_not_found},
 	{"plllvm_pj_params", (void *) plllvm_pj_params},
 	{"plllvm_pj_elem_get_slow", (void *) plllvm_pj_elem_get_slow},
+	{"plllvm_pj_elem_set_slow", (void *) plllvm_pj_elem_set_slow},
+	{"plllvm_pj_subscript_null", (void *) plllvm_pj_subscript_null},
 	{"plllvm_pj_boxed_eval", (void *) plllvm_pj_boxed_eval},
 	{"plllvm_pj_boxed_reset", (void *) plllvm_pj_boxed_reset},
 	{"plllvm_pj_assign", (void *) plllvm_pj_assign},
@@ -119,6 +121,15 @@ plllvm_error(int32 sqlstate, const char *msg)
 	ereport(ERROR,
 			(errcode(sqlstate),
 			 errmsg_internal("%s", msg)));
+}
+
+/* the error of array_subscript_check_subscripts() for a store */
+void
+plllvm_pj_subscript_null(void)
+{
+	ereport(ERROR,
+			(errcode(ERRCODE_NULL_VALUE_NOT_ALLOWED),
+			 errmsg("array subscript in assignment must not be null")));
 }
 
 void

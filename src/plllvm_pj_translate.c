@@ -69,6 +69,7 @@ typedef struct PjEnv
 	bool		need;
 	int			ncalls;
 	int			nfetch;			/* elements read */
+	int			target;			/* the datum the expression assigns to, or -1 */
 	/* the sites made so far by an emit */
 	List	   *sites;
 } PjEnv;
@@ -227,6 +228,7 @@ static void expr_value(PjEmit *em, const void *owner, const char **datum,
 static const char *expr_taken(PjEmit *em, const void *owner);
 static void store_var(PjEmit *em, int dno, const char *datum,
 					  const char *isnull);
+static void held_reset(PjEmit *em);
 static void assign_var(PjEmit *em, PLpgSQL_var *var, const char *datum,
 					   const char *isnull, bool evaluated);
 static void check_not_null(PjEmit *em, PLpgSQL_var *var, const char *isnull);
@@ -888,9 +890,15 @@ plllvm_pj_harvest(PLpgSQL_function *func, const PjScope *scope, PjHarvest *h)
 					reason = "datum:case variable";
 			}
 
-			/* the one Param that may change the target in place */
+			/*
+			 * The one Param that may change the target in place.  A compiled
+			 * store has it too, though it is not given to the executor: the
+			 * code of pj_codegen = boxed is the same tree, and without the
+			 * twin it would copy the array at every store.
+			 */
 			if (reason == NULL && pe->expr != NULL &&
-				copy->path == PJ_PATH_BOXED && pe->expr->target_param >= 0)
+				(copy->path == PJ_PATH_BOXED || copy->path == PJ_PATH_NATIVE) &&
+				pe->expr->target_param >= 0)
 			{
 				PLpgSQL_var *target = pj_var(h, func, pe->expr->target_param);
 				Param	   *rw = NULL;
@@ -972,6 +980,7 @@ harvest_expr(PLpgSQL_function *func, PjHarvest *h, PjEnv *env, PjExpr *pe,
 		env->need = pe->need;
 		env->ncalls = 0;
 		env->nfetch = 0;
+		env->target = pe->expr != NULL ? pe->expr->target_param : -1;
 		pe->path = plllvm_expr_check(tree, &env->base, &key, &facts, &why) ?
 			PJ_PATH_NATIVE : PJ_PATH_BOXED;
 		if (contain_volatile_functions((Node *) tree))
@@ -980,6 +989,8 @@ harvest_expr(PLpgSQL_function *func, PjHarvest *h, PjEnv *env, PjExpr *pe,
 		{
 			pe->ncalls = env->ncalls;
 			pe->elem_fetch = env->nfetch > 0;
+			pe->elem_store = IsA(tree, SubscriptingRef) &&
+				((SubscriptingRef *) tree)->refassgnexpr != NULL;
 		}
 
 		/* a tree for the executor reads the datums by number */
@@ -1393,22 +1404,40 @@ subscript_check(plllvm_expr_env *base, const SubscriptingRef *sb,
 	var = pj_var(env->h, env->func, p->paramid - 1);
 	if (var == NULL || var->datatype->typoid != p->paramtype ||
 		sb->refcontainertype != p->paramtype || sb->reftypmod != -1 ||
-		sb->refrestype != elemtype ||
 		!plllvm_expr_type_repr(elemtype, elem))
 		return false;
 
+	if (sb->refassgnexpr == NULL)
+	{
+		if (sb->refrestype != elemtype)
+			return false;
+		env->nfetch++;
+	}
+	else
+	{
+		/* the assignment's target, as the in-place rule has it */
+		if (sb->refrestype != p->paramtype || p->paramid != env->target + 1)
+			return false;
+	}
+
 	appendStringInfo(facts, "%d:%u ", p->paramid, p->paramtype);
-	env->nfetch++;
 	return true;
 }
 
-/* the variable's Datum and its null flag */
+/*
+ * The variable's Datum and its null flag.  The Param of a store has been
+ * given the id of the read/write twin of the variable.
+ */
 static void
 subscript_container(plllvm_expr_env *base, plllvm_ir *ir,
 					const SubscriptingRef *sb, plllvm_value *out)
 {
+	PjEnv	   *env = (PjEnv *) base->arg;
 	const Param *p = (const Param *) sb->refexpr;
 	int			dno = p->paramid - 1;
+
+	if (dno >= env->func->ndatums)
+		dno -= env->func->ndatums;
 
 	out->v = plllvm_ir_tmp(ir);
 	out->isnull = plllvm_ir_tmp(ir);
@@ -1419,9 +1448,10 @@ subscript_container(plllvm_expr_env *base, plllvm_ir *ir,
 }
 
 /*
- * The element, by the helper of the element type.  The helper writes the null
- * flag of the element to %en, a slot of the function that nothing but the
- * helper, once inlined, touches, so that it is not kept.
+ * The element, by the helper of the element type, or the store of a value,
+ * which gives the array back.  The helper of a fetch writes the null flag of
+ * the element to %en, a slot of the function that nothing but the helper,
+ * once inlined, touches, so that it is not kept.
  */
 static void
 subscript_access(plllvm_expr_env *base, plllvm_ir *ir,
@@ -1448,6 +1478,20 @@ subscript_access(plllvm_expr_env *base, plllvm_ir *ir,
 		default:
 			suffix = "f64";
 			rtype = "double";
+	}
+
+	if (value != NULL)
+	{
+		plllvm_ir_declare(ir, psprintf("declare i64 @plllvm_pj_elem_set_%s(ptr, i64, i1, i32, %s, i1)",
+									   suffix, rtype));
+		plllvm_ir_emit(ir, "%s = call i64 @plllvm_pj_elem_set_%s(ptr %%ctx, i64 %s, i1 %s, i32 %s, %s %s, i1 %s)",
+					   r, suffix, container->v, container->isnull, sub->v,
+					   rtype, value->v, value->isnull);
+		out->v = r;
+		out->isnull = "false";
+		out->repr = PLLLVM_DATUM;
+		out->type = sb->refcontainertype;
+		return;
 	}
 
 	plllvm_ir_declare(ir, psprintf("declare %s @plllvm_pj_elem_get_%s(i64, i32, ptr)",
@@ -2166,10 +2210,28 @@ emit_assign_expr(PjEmit *em, PLpgSQL_var *var, int dno, const void *owner)
 {
 	const char *datum;
 	const char *isnull;
+	PjExpr	   *pe;
 
 	em->hold_reset = !var->datatype->typbyval;
 	expr_value(em, owner, &datum, &isnull);
 	em->hold_reset = false;
+
+	/*
+	 * The store of an element changed the array of the variable, or made it
+	 * if it was NULL, and the slot keeps it: there is no copy to make and no
+	 * old value to free, and the result is never NULL.  Anything the value
+	 * allocated is reset now.
+	 */
+	pe = list_nth(em->h->exprs, em->next_expr - 1);
+	if (pe->h1 == PJ_H1_READY && pe->elem_store &&
+		expr_path(em, pe) == PJ_PATH_NATIVE)
+	{
+		store_var(em, dno, datum, "false");
+		plllvm_ir_emit(em->ir, "store i1 true, ptr %%o%d", dno);
+		held_reset(em);
+		return;
+	}
+
 	check_not_null(em, var, isnull);
 	if (var->datatype->typbyval)
 		store_var(em, dno, datum, isnull);
@@ -2376,7 +2438,11 @@ may_raise(Node *node, void *context)
 		case T_BoolExpr:
 		case T_NullTest:
 		case T_BooleanTest:
+			break;
 		case T_SubscriptingRef:
+			/* a store raises, a fetch only by its subscript */
+			if (((SubscriptingRef *) node)->refassgnexpr != NULL)
+				return true;
 			break;
 		case T_OpExpr:
 			{
@@ -2993,6 +3059,17 @@ assign_var(PjEmit *em, PLpgSQL_var *var, const char *datum, const char *isnull,
 		plllvm_ir_emit(ir, "call void @plllvm_pj_boxed_reset(ptr %%ctx)");
 		em->reset_held = false;
 	}
+}
+
+/* what the evaluation of the value left for a reset, once it is stored */
+static void
+held_reset(PjEmit *em)
+{
+	if (!em->reset_held)
+		return;
+	plllvm_ir_declare(em->ir, "declare void @plllvm_pj_boxed_reset(ptr)");
+	plllvm_ir_emit(em->ir, "call void @plllvm_pj_boxed_reset(ptr %%ctx)");
+	em->reset_held = false;
 }
 
 /* a NOT NULL variable takes no NULL (exec_assign_value()) */
