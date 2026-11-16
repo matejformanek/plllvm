@@ -227,7 +227,6 @@ typedef struct PjScope
 	int			nnotsimple;
 	bool		has_notice;		/* a RAISE may have an effect a deopt would
 								 * repeat */
-	bool		has_sql;		/* a statement for SPI */
 } PjScope;
 
 typedef enum PjSiteKind
@@ -318,7 +317,6 @@ typedef struct PjHarvest
 	int			npos;
 	int			nbase;			/* then one per expression */
 	bool		has_notice;		/* as in PjScope */
-	bool		has_sql;		/* as in PjScope */
 	bool		sql_stale;		/* a statement changed what it was admitted
 								 * for during a call: the next one translates
 								 * again */

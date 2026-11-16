@@ -366,9 +366,19 @@ Only `plllvm_jit.c` and `plllvm_error.cpp` include LLVM headers.
     then the admission walk is made again over the current query list. After
     each execution the same comparison finds an analysis done inside the
     call; the address of the new query list is no sign, since the old one is
-    deleted first and the new one can take its place. A statement found no
+    deleted first and the new one can take its place.  A new query list is
+    followed by a plan, and so by a new `generation`, unless that plan fails
+    to build (a custom plan that raises): the next call then runs the list once
+    unchecked, and the check after that execution finds it. A statement found no
     longer admitted ends the call as it was and makes the next call
     translate (`sql_stale`).
+  * `sql_stale` is exact for a statement found changed after an execution;
+    for a function replaced by code a statement ran it is counted only when
+    a function or privilege changed during the statement (`exec_epoch`), not
+    after every statement.
+  * Compiled SQL never runs under `debug_discard_caches`: every plan is stale
+    there, so the code translates nothing. The shadow estate under that setting
+    was tried by the spike only; `pj_sql_replan` is what the tests use.
   * Differences: a function replaced by code a statement runs stales the plan
     of a later expression of the call, which goes on with its tree where
     PL/pgSQL plans it again; a privilege lost in a statement is raised at

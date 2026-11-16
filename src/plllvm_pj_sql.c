@@ -46,7 +46,6 @@
 #include "nodes/params.h"
 #include "plpgsql.h"
 #include "utils/fmgroids.h"
-#include "utils/memutils.h"
 #include "utils/plancache.h"
 #include "utils/rls.h"
 #include "utils/syscache.h"
@@ -243,33 +242,37 @@ sql_facts_ok(PjSql *sql)
 {
 	SqlFacts	facts = {0};
 	CachedPlanSource *psrc = sql->plansource;
+	bool		ok = false;
 
-	if (!bms_equal(sql->expr->paramnos, sql->paramnos))
-		return false;
-	if (sql_scan_walker((Node *) psrc->query_list, &facts))
-		return false;
-	if (facts.has_view != sql->has_view || list_length(facts.funcs) != sql->nfuncs)
-		return false;
-	for (int i = 0; i < sql->nfuncs; i++)
+	/* the lists are in the caller's context, which lives as long as the call */
+	if (bms_equal(sql->expr->paramnos, sql->paramnos) &&
+		!sql_scan_walker((Node *) psrc->query_list, &facts) &&
+		facts.has_view == sql->has_view &&
+		list_length(facts.funcs) == sql->nfuncs)
 	{
-		int			at = -1;
-
-		for (int j = 0; j < list_length(facts.funcs); j++)
+		ok = true;
+		for (int i = 0; i < sql->nfuncs && ok; i++)
 		{
-			if (list_nth_oid(facts.funcs, j) == sql->funcs[i])
-				at = j;
+			int			at = -1;
+
+			for (int j = 0; j < list_length(facts.funcs); j++)
+			{
+				if (list_nth_oid(facts.funcs, j) == sql->funcs[i])
+					at = j;
+			}
+			ok = at >= 0 &&
+				list_nth_int(facts.volatility, at) == sql->volatility[i];
 		}
-		if (at < 0 || list_nth_int(facts.volatility, at) != sql->volatility[i])
-			return false;
 	}
-	return true;
+	list_free(facts.funcs);
+	list_free(facts.volatility);
+	return ok;
 }
 
 /*
  * The facts of an SQL statement the code depends on, copied into the harvest.
  * Returns the reason to decline the function, or NULL.  The plan of the
- * statement is valid: classify() counts one that is not as unplanned, since
- * no tree of a plan that is stale is safe to read.
+ * statement is valid, or the statement counts as unplanned (see below).
  */
 const char *
 plllvm_pj_sql_harvest(PLpgSQL_function *func, PjHarvest *h, PjExpr *pe)
@@ -282,7 +285,20 @@ plllvm_pj_sql_harvest(PLpgSQL_function *func, PjHarvest *h, PjExpr *pe)
 
 	Assert(expr->plan != NULL);
 	psrc = (CachedPlanSource *) linitial(SPI_plan_get_plan_sources(expr->plan));
-	Assert(psrc->is_valid);
+
+	/*
+	 * classify() found the plan valid, but taking the locks of a first
+	 * translation delivers invalidations, so another session's DDL may have
+	 * made it stale since.  Its trees are not ours to read: the statement is
+	 * unplanned, and the function waits as for one the interpreter has not
+	 * reached.
+	 */
+	if (!psrc->is_valid)
+	{
+		pe->h1 = PJ_H1_UNPLANNED;
+		h->nunplanned++;
+		return NULL;
+	}
 
 	if (sql_scan_walker((Node *) psrc->query_list, &facts))
 		return facts.reason;
@@ -318,8 +334,8 @@ plllvm_pj_sql_harvest(PLpgSQL_function *func, PjHarvest *h, PjExpr *pe)
  * interpreter, which translates again.
  *
  * An invalid plan is not a miss: SPI analyses it again inside the call, and
- * lookup in a bench that truncates and analyses its tables between rounds
- * would otherwise never compile.  It is one only if what the statement was
+ * a function whose table is truncated and analysed between calls would
+ * otherwise never stay compiled.  It is one only if what the statement was
  * admitted for may have changed: a callee that is not as it was, a view, a
  * policy.  A plan that others have rebuilt since our last look (an interpreted
  * call may have) is checked as it stands.
@@ -379,7 +395,9 @@ plllvm_pj_sql_guard(PjSql *sql)
  * analysed the statement again, and the query list has changed under us.  The
  * list's address would not tell (the new one can take the place of the old),
  * the counter of plans does: it moves with every plan built, and a new query
- * list is always followed by one.  The statement goes on with the trees it
+ * list is followed by one, unless the plan that follows the analysis fails
+ * to build (a custom plan that raises): then the next call runs that list once
+ * unchecked, and this check, after it, finds it.  The statement goes on with the trees it
  * has, as PL/pgSQL does until its next evaluation, and the next call translates
  * again if the plan is no longer the one it was admitted as.
  */

@@ -356,10 +356,13 @@ SELECT psq_tenant(1), psq_tenant(2);
 SELECT psq_tenant(1), psq_tenant(2);
 SELECT psq_tenant(1), psq_tenant(2);
 SELECT pj_expect('psq_tenant(integer)', 'compiled') \gset
+SELECT pj_mark() \gset
 SET search_path = psq_b, public;
 SELECT psq_tenant(1), psq_tenant(2);
 SELECT psq_tenant(1), psq_tenant(2);
 SELECT psq_tenant(1), psq_tenant(2);
+-- no statement ran compiled on the plan made for the other schema
+SELECT pj_delta(NULL, NULL, NULL, NULL, NULL, NULL, 0);
 SELECT pj_expect('psq_tenant(integer)', 'declined:volatile callee') \gset
 SET search_path = public;
 DROP SCHEMA psq_a CASCADE;
@@ -459,6 +462,30 @@ SELECT psq_priv(1), psq_priv(3);
 SELECT psq_priv(1), psq_priv(3);
 RESET ROLE;
 
+-- row-level security: another role rewrites the query another way
+CREATE TABLE psq_rls (a int, owner_name text);
+INSERT INTO psq_rls VALUES (1, 'regress_psq_u'), (2, 'nobody');
+ALTER TABLE psq_rls ENABLE ROW LEVEL SECURITY;
+CREATE POLICY psq_rls_p ON psq_rls USING (owner_name = current_user);
+GRANT SELECT ON psq_rls TO regress_psq_u;
+CREATE FUNCTION psq_rlsf(n int) RETURNS bool LANGUAGE :pj_lang AS $$
+BEGIN
+  PERFORM 1 FROM psq_rls WHERE a = n;
+  RETURN found;
+END $$;
+GRANT EXECUTE ON FUNCTION psq_rlsf(int) TO regress_psq_u;
+SELECT psq_rlsf(1), psq_rlsf(2);
+SELECT psq_rlsf(1), psq_rlsf(2);
+SELECT psq_rlsf(1), psq_rlsf(2);
+SELECT pj_expect('psq_rlsf(integer)', 'compiled') \gset
+SELECT pj_mark() \gset
+SET ROLE regress_psq_u;
+SELECT psq_rlsf(2);
+RESET ROLE;
+-- the call under the other role did not run the statement on the plan of this one
+SELECT pj_delta(NULL, NULL, NULL, NULL, NULL, NULL, 0);
+SELECT psq_rlsf(1), psq_rlsf(2);
+
 -- a statement not planned yet leaves the call to PL/pgSQL, with nothing run
 -- twice: the NOTICEs are the callee's, and a call compiled before the branch
 -- was reached would repeat them
@@ -530,6 +557,11 @@ SELECT psq_loop(3, 1) > 0, psq_loop(3, 2) > 0;
 SELECT psq_loop(1000, 1000) AS m1 \gset
 SELECT psq_loop(20000, 20000) - :m1 < 262144 AS flat;
 SELECT pj_expect('psq_loop(integer,integer)', 'compiled') \gset
+-- custom plans, which move the generation of the plan at every execution
+SET plan_cache_mode = force_custom_plan;
+SELECT psq_loop(1000, 1000) AS m1 \gset
+SELECT psq_loop(20000, 20000) - :m1 < 262144 AS flat_custom;
+RESET plan_cache_mode;
 
 -- parallel query inside a statement: the parameters of the list are serialized
 -- (PERFORM fetches all rows, so the plan may use workers)
@@ -556,3 +588,6 @@ SELECT psq_par(100, 'text3'), psq_par(1, 'text3');
 SELECT psq_workers() - :w0 >= 2 AS launched;
 RESET debug_parallel_query;
 SELECT pj_expect('psq_par(integer,text)', 'compiled') \gset
+
+DROP OWNED BY regress_psq_u;
+DROP ROLE regress_psq_u;

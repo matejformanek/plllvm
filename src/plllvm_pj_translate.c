@@ -633,7 +633,6 @@ scope_sql(PjScopeWalk *w, PLpgSQL_expr *expr, PjSqlKind kind)
 
 	scope_expr(w, expr, expr, InvalidOid, -1);
 	((PjExpr *) llast(w->scope->exprs))->sql_kind = kind;
-	w->scope->has_sql = true;
 	return NULL;
 }
 
@@ -837,7 +836,6 @@ plllvm_pj_harvest(PLpgSQL_function *func, const PjScope *scope, PjHarvest *h)
 	/* then a copy of its statement's for each expression, naming it */
 	h->nbase = scope->npos;
 	h->has_notice = scope->has_notice;
-	h->has_sql = scope->has_sql;
 	foreach_ptr(PjExpr, pe, scope->exprs)
 		nextra += pe->into_sql;
 	h->npos = scope->npos + list_length(scope->exprs) + nextra;
@@ -996,8 +994,12 @@ harvest_sql(PLpgSQL_function *func, PjHarvest *h, PjExpr *pe)
 
 	while ((dno = bms_next_member(pe->expr->paramnos, dno)) >= 0)
 	{
+		PLpgSQL_datum *datum = func->datums[dno];
+
 		if (pj_var(h, func, dno) == NULL)
-			return "datum:record";
+			return datum->dtype == PLPGSQL_DTYPE_VAR ?
+				psprintf("datum:%s", ((PLpgSQL_var *) datum)->datatype->typname) :
+				"datum:record";
 	}
 	return plllvm_pj_sql_harvest(func, h, pe);
 }
