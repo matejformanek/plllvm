@@ -51,7 +51,15 @@
 		offsetof(FmgrInfo, fn_addr), \
 		offsetof(FmgrInfo, fn_strict), \
 		sizeof(ArrayType), \
-		ARR_OVERHEAD_NONULLS(1) \
+		ARR_OVERHEAD_NONULLS(1), \
+		offsetof(ExpandedArrayHeader, ndims), \
+		offsetof(ExpandedArrayHeader, dims), \
+		offsetof(ExpandedArrayHeader, lbound), \
+		offsetof(ExpandedArrayHeader, element_type), \
+		offsetof(ExpandedArrayHeader, dvalues), \
+		offsetof(ExpandedArrayHeader, dnulls), \
+		offsetof(ExpandedArrayHeader, fvalue), \
+		offsetof(ExpandedArrayHeader, flat_size) \
 	}
 
 /* a call site of JIT-compiled code (plllvm_sites.c); its address is in the code */
@@ -117,6 +125,18 @@ extern void plllvm_pj_raise_param(struct PjCtx *ctx, Datum value, bool isnull,
 extern void plllvm_pj_raise(struct PjCtx *ctx, int32 level, int32 sqlstate,
 							const char *msg);
 pg_noreturn extern void plllvm_pj_raise_bare(void);
+
+/*
+ * Elements of an array in a variable of plpgsql_jit that the inline code
+ * (plllvm_types.c) does not read or write: an array in no shape it can use,
+ * and for a store also a NULL value or a subscript out of range
+ */
+extern NullableDatum plllvm_pj_elem_get_slow(Datum array, int32 sub,
+											 Oid elemtype);
+extern Datum plllvm_pj_elem_set_slow(struct PjCtx *ctx, Datum array,
+									 bool isnull, int32 sub, Datum value,
+									 bool valuenull, Oid elemtype);
+pg_noreturn extern void plllvm_pj_subscript_null(void);
 
 /*
  * A call of a function from compiled code, for plllvm_pj_invoke(): the

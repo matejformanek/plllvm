@@ -79,6 +79,27 @@ struct plllvm_expr_env
 							  const char *const *args, int nargs);
 	bool		no_native_ops;	/* operators that are function calls go
 								 * through bare_emit */
+
+	/*
+	 * A SubscriptingRef of one upper subscript: NULL refuses it.  The caller
+	 * says whether it can fetch or store that element and gives the
+	 * representation of the element.  The container is a variable of the
+	 * caller's, which subscript_container loads as its Datum, and
+	 * subscript_access fetches the element from or, with a value, stores it
+	 * into and gives the container back.  A store is accepted only as the
+	 * root of the tree.
+	 */
+	bool		(*subscript_check) (plllvm_expr_env *env, const SubscriptingRef *sbsref,
+									plllvm_repr *elem, StringInfo facts);
+	void		(*subscript_container) (plllvm_expr_env *env, plllvm_ir *ir,
+										const SubscriptingRef *sbsref,
+										plllvm_value *out);
+	void		(*subscript_access) (plllvm_expr_env *env, plllvm_ir *ir,
+									 const SubscriptingRef *sbsref,
+									 const plllvm_value *container,
+									 const plllvm_value *sub,
+									 const plllvm_value *value,
+									 plllvm_value *out);
 	void	   *arg;			/* caller's state */
 };
 

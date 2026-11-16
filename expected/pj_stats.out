@@ -48,7 +48,7 @@ SELECT calls = 4 AS calls_ok,
        translations = s.compiles::int AND attempts = translations AND
          resident = translations AS translated_ok,
        declines + guard_misses + null_args + plugin_fallbacks + capped +
-       failures + deopts + boxed_evals + peak_tuple_bytes = 0 AS rest_ok
+       failures + deopts + boxed_evals + peak_tuple_bytes + elem_slow = 0 AS rest_ok
   FROM plllvm_pj_stats(),
        (SELECT current_setting('plllvm.plpgsql_jit')::bool AND
                current_setting('debug_discard_caches')::int = 0 AS compiles) s;

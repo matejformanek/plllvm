@@ -103,7 +103,11 @@ REVOKE ALL ON FUNCTION plllvm_jit_test(text, int4, bool) FROM PUBLIC;
 -- of this backend: every handler entry of LANGUAGE plpgsql_jit is one call,
 -- and calls = compiled_calls + deopts + interpreted_calls.  declines (calls
 -- that fell back because the function is declined), guard_misses, null_args,
--- plugin_fallbacks and capped are among the interpreted_calls
+-- plugin_fallbacks and capped are among the interpreted_calls.  elem_slow
+-- counts the reads of an array element, and the stores, that the compiled code
+-- gave to a function: an array that is NULL, has no Datums of its elements yet,
+-- or is not one-dimensional, and for a store also a NULL value or a subscript
+-- out of range
 CREATE FUNCTION plllvm_pj_stats(OUT calls int8, OUT compiled_calls int8,
                                 OUT deopts int8, OUT interpreted_calls int8,
                                 OUT declines int8, OUT guard_misses int8,
@@ -111,7 +115,8 @@ CREATE FUNCTION plllvm_pj_stats(OUT calls int8, OUT compiled_calls int8,
                                 OUT capped int8, OUT translations int8,
                                 OUT attempts int8, OUT failures int8,
                                 OUT boxed_evals int8, OUT resident int8,
-                                OUT peak_tuple_bytes int8)
+                                OUT peak_tuple_bytes int8,
+                                OUT elem_slow int8)
   RETURNS record
   VOLATILE LANGUAGE c AS 'MODULE_PATHNAME';
 

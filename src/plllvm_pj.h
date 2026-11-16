@@ -47,6 +47,7 @@ typedef struct plllvm_pj_counters
 	int64		failures;
 	int64		boxed_evals;
 	int64		peak_tuple_bytes;
+	int64		elem_slow;
 } plllvm_pj_counters;
 
 /* one side entry of a function, for plllvm_pj_status() */
@@ -169,6 +170,8 @@ typedef struct PjExpr
 	Bitmapset  *params;			/* datums the tree reads, if boxed */
 	int			rw;				/* the datum its read/write Param is, or -1 */
 	bool		need;			/* a snapshot of our own, if boxed */
+	bool		elem_fetch;		/* the compiled code reads an element */
+	bool		elem_store;		/* the tree is the store of an element */
 	int			ncalls;			/* calls the compiled code makes, cast
 								 * included */
 	int			cast_calls;		/* those of the cast */

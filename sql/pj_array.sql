@@ -438,8 +438,9 @@ END $$;
 SELECT pa_const_err();  -- fail
 SELECT pa_const_err();  -- fail
 
--- an element store: no deopt after it, and nothing it did repeats.  A branch
--- no call has taken yet makes the function wait.
+-- an element store in a function that is not restartable (it has a notice and
+-- an expression of the executor): no deopt after it, and nothing it did
+-- repeats.  A branch no call has taken yet makes the function wait.
 CREATE FUNCTION pa_wait(n int, flag int) RETURNS text LANGUAGE :pj_lang AS $$
 DECLARE a int[] := ARRAY[1, 2, 3];
 BEGIN
@@ -459,8 +460,9 @@ DISCARD PLANS;
 SELECT pa_wait(7, 1), pa_wait(7, 0);
 SELECT pj_expect('pa_wait(int,int)', 'compiled') \gset
 
--- a restartable function: arrays only declared and returned; the deopt
--- gives up the arrays of the call
+-- a restartable function: arrays only declared and returned (pj_elements has
+-- one that reads and stores elements); the deopt gives up the arrays of the
+-- call
 CREATE FUNCTION pa_restart(flag int) RETURNS int[] LANGUAGE :pj_lang AS $$
 DECLARE a int[] := '{1,2,3}'; b text[] := '{x,y}'; c int[];
 BEGIN

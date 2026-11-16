@@ -29,6 +29,7 @@
 #include "postgres.h"
 
 #include "access/xact.h"
+#include "catalog/pg_type.h"
 #include "executor/executor.h"
 #include "miscadmin.h"
 #include "tcop/pquery.h"
@@ -120,7 +121,9 @@ plllvm_pj_boxed_eval(PjCtx *ctx, int32 idx)
 void
 plllvm_pj_boxed_reset(PjCtx *ctx)
 {
-	level_reset(ctx->lv);
+	/* no level yet if the call has run nothing of the executor */
+	if (ctx->lv != NULL)
+		level_reset(ctx->lv);
 }
 
 /*
@@ -180,6 +183,91 @@ plllvm_pj_assign_array(PjCtx *ctx, Datum old, bool owned, Datum value,
 			pfree(DatumGetPointer(old));
 	}
 
+	return result;
+}
+
+/* the length and alignment of the element types of plpgsql_jit's arrays */
+static void
+elem_layout(Oid elemtype, int *len, char *align)
+{
+	switch (elemtype)
+	{
+		case INT4OID:
+			*len = sizeof(int32);
+			*align = TYPALIGN_INT;
+			break;
+		case INT8OID:
+			*len = sizeof(int64);
+			*align = TYPALIGN_DOUBLE;
+			break;
+		case FLOAT8OID:
+			*len = sizeof(float8);
+			*align = TYPALIGN_DOUBLE;
+			break;
+		default:
+			elog(ERROR, "unexpected array element type %u", elemtype);
+	}
+}
+
+/*
+ * An element of a variable's array that the inline code did not read: an
+ * array of no Datums yet, which array_get_element() makes, or of other
+ * dimensions, for which it answers NULL.
+ */
+NullableDatum
+plllvm_pj_elem_get_slow(Datum array, int32 sub, Oid elemtype)
+{
+	NullableDatum r;
+	int			len;
+	char		align;
+
+	plllvm_pj_count.elem_slow++;
+	elem_layout(elemtype, &len, &align);
+	r.value = array_get_element(array, 1, &sub, -1, len, true, align,
+								&r.isnull);
+	return r;
+}
+
+/*
+ * A store of an element that the inline code did not make: a NULL value, a
+ * subscript out of range, an array of no Datums yet, or of other dimensions.
+ * The slot's array is changed in place and array_set_element() returns it
+ * (any other result is an error).  A NULL array is what the interpreter
+ * replaces by an empty one, and exec_assign_value() then expands, here in the
+ * datum context of the level.  The flat arrays of that are in the per-tuple
+ * memory, which is reset once the object is made: nothing of the expression
+ * that is not by value lives there now.
+ */
+Datum
+plllvm_pj_elem_set_slow(PjCtx *ctx, Datum array, bool isnull, int32 sub,
+						Datum value, bool valuenull, Oid elemtype)
+{
+	Datum		result;
+	int			len;
+	char		align;
+
+	plllvm_pj_count.elem_slow++;
+	elem_layout(elemtype, &len, &align);
+
+	if (isnull)
+	{
+		PjLevel    *lv = plllvm_pj_level(ctx);
+		MemoryContext oldcxt = MemoryContextSwitchTo(lv->econtext->ecxt_per_tuple_memory);
+		Datum		flat;
+
+		flat = array_set_element(PointerGetDatum(construct_empty_array(elemtype)),
+								 1, &sub, value, valuenull, -1, len, true,
+								 align);
+		result = expand_array(flat, lv->datum_cxt, NULL);
+		MemoryContextSwitchTo(oldcxt);
+		level_reset(lv);
+		return result;
+	}
+
+	result = array_set_element(array, 1, &sub, value, valuenull, -1, len, true,
+							   align);
+	if (result != array)
+		elog(ERROR, "plpgsql_jit: the store of an element made another array");
 	return result;
 }
 
