@@ -274,12 +274,12 @@ SELECT pj_mark() \gset
 SELECT pk_native(1), pk_native(2), pk_native(3);
 SELECT pj_delta(3, 0, 0, 0, 0);
 
--- the memory of a text selector (the value of a call of upper) is flat inside one call, measured inside it:
--- every iteration's selector is a copy in a variable, freed by the next.  A
--- selector variable that were not set to NULL after the WHENs would free its
--- copy at the next assignment all the same, so no pin can tell that apart;
--- the values of this call, under a build that clobbers freed memory, catch a
--- selector read after it is freed.
+-- the memory of a text selector (the value of a call of upper) is flat inside
+-- one call, measured inside it: each iteration's selector is a copy in the
+-- case variable, freed by the next.  A variable that is not set to NULL after
+-- the WHENs frees its copy at the next assignment all the same, so no pin
+-- can tell that apart.  The values of pk_text_sum, on a build that clobbers
+-- freed memory, catch a selector that is read after it is freed.
 CREATE FUNCTION pk_text(n int) RETURNS bigint LANGUAGE :pj_lang AS $$
 DECLARE s int := 0; t text; m0 bigint;
 BEGIN

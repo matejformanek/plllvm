@@ -72,7 +72,7 @@ come from a generator of their own, so that a program without --cx is the
 same as it was; with --cx the programs are other ones.  Equal output is also
 what a function gives that PL/pgSQL ran, so the programs that contain each
 construct are counted, and so are those among them whose function ran
-compiled: --floor-cx is the share of those that must have.  The CASE or
+compiled: --floor-cx is the share of those in the body that must have.  The CASE or
 SELECT INTO then counts only if it stands in the body outside any branch,
 and the function had compiled calls and no deopt (a RETURN before it is not
 excluded).
@@ -2050,8 +2050,14 @@ def main():
             tally["has-" + k] += 1
             # the construct ran compiled: it stands outside any branch, and no
             # call left the code at a deopt point
+            if k in prog.g.top:
+                tally["top-" + k] += 1
             if ran and k in prog.g.top and int(st[4]) == 0:
                 tally["compiled-" + k] += 1
+            elif ran and k in prog.g.top:
+                cx_reasons[k]["deopt"] += 1
+            elif ran:
+                cx_reasons[k]["nested in a branch"] += 1
             else:
                 cx_reasons[k]["%s %s" % tuple(st[:2]) if ok else "no status"] += 1
         if args.v or verdict != "equal":
@@ -2087,12 +2093,12 @@ def main():
         failed = True
     if args.cx:
         for k in ("case", "into"):
-            print("pj_fuzz: %s: programs with it %d, compiled %d" % (
-                k, tally["has-" + k], tally["compiled-" + k]))
+            print("pj_fuzz: %s: programs with it %d, in the body %d, compiled %d" % (
+                k, tally["has-" + k], tally["top-" + k], tally["compiled-" + k]))
             for why, v in cx_reasons[k].most_common(6):
                 print("  with %s, not compiled: %5d  %s" % (k, v, why))
-            if tally["has-" + k] < 10 or \
-                    tally["compiled-" + k] < args.floor_cx * tally["has-" + k]:
+            if tally["top-" + k] < 5 or \
+                    tally["compiled-" + k] < args.floor_cx * tally["top-" + k]:
                 print("pj_fuzz: %s: too few programs, or compiled below the floor of "
                       "%.0f%%" % (k, 100 * args.floor_cx))
                 failed = True

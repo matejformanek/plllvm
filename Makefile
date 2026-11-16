@@ -480,8 +480,9 @@ fuzz-pj: port-ok
 	    --mode ref --cx --floor 0.3 --n $(NCX) --seed $(SEED) --opt-level $$o --out results-fuzz/refcx-O$$o || rc=1; \
 	done; exit $$rc
 
-# The classes of the fuzzer on programs of known shape, and 60 programs with
-# CASE and SELECT INTO, flat and ref: seed 22:745 is
+# The classes of the fuzzer on programs of known shape, and 300 programs with
+# CASE and SELECT INTO, flat and ref, of which 15% of those that have the
+# construct in the body must have run it compiled: seed 22:745 is
 # stale-privilege (L2), seed 21:597 frame-mix ((g)); and frame_mix refuses a
 # wrong value.  setup() drops and recreates the fuzz database, so the
 # cluster must be a throwaway
@@ -500,10 +501,10 @@ check-pj-fuzz: port-ok
 	  rc=$$?; cat results-fuzz/unit.log >&2; [ $$rc = 0 ] && \
 	  grep -q 'frame-mix=1 history=0 stale-privilege=0 permissive=0' results-fuzz/unit.log
 	python3 -I tools/pj_fuzz.py --psql '$(bindir)/psql' --host /tmp --port $(PLLLVM_PORT) \
-	  --cx --floor 0.3 --floor-cx 0.1 --seed 41 --n 60 --opt-level 0 --out results-fuzz/cx-flat > results-fuzz/cx-flat.log; \
+	  --cx --floor 0.3 --floor-cx 0.15 --seed 41 --n 300 --opt-level 0 --out results-fuzz/cx-flat > results-fuzz/cx-flat.log; \
 	  rc=$$?; cat results-fuzz/cx-flat.log >&2; [ $$rc = 0 ]
 	python3 -I tools/pj_fuzz.py --psql '$(bindir)/psql' --host /tmp --port $(PLLLVM_PORT) \
-	  --mode ref --cx --floor 0.3 --floor-cx 0.1 --seed 41 --n 60 --opt-level 2 --out results-fuzz/cx-ref > results-fuzz/cx-ref.log; \
+	  --mode ref --cx --floor 0.3 --floor-cx 0.15 --seed 41 --n 300 --opt-level 2 --out results-fuzz/cx-ref > results-fuzz/cx-ref.log; \
 	  rc=$$?; cat results-fuzz/cx-ref.log >&2; [ $$rc = 0 ]
 
 #

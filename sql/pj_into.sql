@@ -213,6 +213,7 @@ SET ROLE regress_pj_i1;
 SELECT pi_priv(6);  -- fail
 SELECT pi_priv(7);  -- fail
 RESET ROLE;
+SELECT pj_expect('pi_priv(integer)', 'interpreted:execute') \gset
 SELECT pi_priv(8);
 SELECT pj_expect('pi_priv(integer)', 'compiled') \gset
 
@@ -322,6 +323,19 @@ SELECT pi_loop(10) IS NOT NULL;
 SELECT pi_loop(10) IS NOT NULL;
 SELECT pi_loop(100000) < 1048576 AS flat;
 SELECT pj_expect('pi_loop(integer)', 'compiled') \gset
+-- and the values of the same loop: the old copy of the target is freed at
+-- each assignment, and a read of it after that would change the length
+CREATE FUNCTION pi_loop_sum(n int) RETURNS int LANGUAGE :pj_lang AS $$
+DECLARE t text; s int := 0;
+BEGIN
+  FOR i IN 1..n LOOP
+    SELECT repeat('x', i % 50) INTO t;
+    s := s + length(t);
+  END LOOP;
+  RETURN s;
+END $$;
+SELECT pi_loop_sum(10), pi_loop_sum(10), pi_loop_sum(100000);
+SELECT pj_expect('pi_loop_sum(integer)', 'compiled') \gset
 
 DROP TABLE pi_t;
 DROP OWNED BY regress_pj_i1;
