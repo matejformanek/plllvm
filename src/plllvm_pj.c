@@ -156,7 +156,6 @@ static Datum run(PLpgSQL_function *func, FunctionCallInfo fcinfo, PjEntry *e,
 static void activation_end(PLpgSQL_function *func, PjEntry *e,
 						   MemoryContext entry_cxt);
 static void exec_error_callback(void *arg);
-static bool guards_ok(PjHarvest *h);
 static bool execute_allowed(PjEntry *e);
 static void pj_mark(PLpgSQL_expr *expr, LocalTransactionId lxid);
 static void pj_mark_busy(PjEntry *e);
@@ -704,7 +703,7 @@ run_compiled(PLpgSQL_function *func, FunctionCallInfo fcinfo, PjEntry *e)
 		}
 	}
 
-	if (!guards_ok(h))
+	if (!plllvm_pj_guards_ok(h, true))
 	{
 		plllvm_pj_count.guard_misses++;
 		e->guard_misses++;
@@ -948,11 +947,20 @@ exec_error_callback(void *arg)
  * plansource needs the generation too (plancache.c).  The cast trees are
  * ours: valid while the cached expression is.
  */
-static bool
-guards_ok(PjHarvest *h)
+bool
+plllvm_pj_guards_ok(PjHarvest *h, bool sql)
 {
+	if (sql && h->sql_stale)
+		return false;
+
 	foreach_ptr(PjExpr, pe, h->exprs)
 	{
+		if (pe->h1 == PJ_H1_SQL)
+		{
+			if (sql && !plllvm_pj_sql_guard(pe->sql))
+				return false;
+			continue;
+		}
 		if (pe->h1 != PJ_H1_READY)
 			continue;
 		if (pe->expr != NULL &&

@@ -225,6 +225,7 @@ SELECT psq_g3d(0, 1);
 SET plan_cache_mode = force_generic_plan;
 SELECT psq_g3d(0, 1);
 RESET plan_cache_mode;
+SELECT pj_expect('psq_g3(integer,integer)', 'compiled') \gset
 
 -- a statement with no parameter has no parameter list: its plan is generic,
 -- made once, and a stable function in it runs at planning once
@@ -241,6 +242,7 @@ SELECT psq_np();
 SELECT psq_np();
 SELECT psq_np();
 SELECT psq_np();
+SELECT pj_expect('psq_np()', 'compiled') \gset
 
 -- what happens to the plan between calls changes no value, and no call leaves
 -- the compiled code: SPI plans again by itself
@@ -309,9 +311,14 @@ END $$;
 SELECT psq_use_vol(1), psq_use_vol(2);
 SELECT psq_use_vol(1), psq_use_vol(2);
 SELECT psq_use_vol(1), psq_use_vol(2);
+SELECT pj_expect('psq_use_vol(integer)', 'compiled') \gset
+SELECT pj_mark() \gset
 ALTER FUNCTION psq_vol(int) VOLATILE;
 SELECT psq_use_vol(1), psq_use_vol(2);
+-- neither call ran the statement compiled
+SELECT pj_delta(0, 2, NULL, 0, NULL, NULL, 0);
 SELECT psq_use_vol(1), psq_use_vol(2);
+SELECT pj_expect('psq_use_vol(integer)', 'declined:volatile callee') \gset
 
 -- a view redefined between calls
 CREATE VIEW psq_v AS SELECT a, b FROM psq_t WHERE a < 10;
@@ -330,6 +337,7 @@ CREATE OR REPLACE VIEW psq_v AS SELECT a, b FROM psq_t WHERE a < 10 AND psq_vol(
 SELECT psq_view(5), psq_view(15);
 SELECT psq_view(5), psq_view(15);
 SELECT psq_view(5), psq_view(15);
+SELECT pj_expect('psq_view(integer)', 'declined:volatile callee') \gset
 
 -- tenants: the same name resolves to another callee after a search_path change
 CREATE SCHEMA psq_a;
@@ -347,10 +355,12 @@ SET search_path = psq_a, public;
 SELECT psq_tenant(1), psq_tenant(2);
 SELECT psq_tenant(1), psq_tenant(2);
 SELECT psq_tenant(1), psq_tenant(2);
+SELECT pj_expect('psq_tenant(integer)', 'compiled') \gset
 SET search_path = psq_b, public;
 SELECT psq_tenant(1), psq_tenant(2);
 SELECT psq_tenant(1), psq_tenant(2);
 SELECT psq_tenant(1), psq_tenant(2);
+SELECT pj_expect('psq_tenant(integer)', 'declined:volatile callee') \gset
 SET search_path = public;
 DROP SCHEMA psq_a CASCADE;
 DROP SCHEMA psq_b CASCADE;
@@ -365,6 +375,7 @@ SELECT psq_cfg(1), psq_cfg(2);
 SELECT psq_cfg(1), psq_cfg(2);
 SELECT psq_cfg(3);
 SELECT current_setting('psq.x');
+SELECT pj_expect('psq_cfg(integer)', 'declined:volatile callee') \gset
 CREATE SEQUENCE psq_s;
 CREATE FUNCTION psq_seq(n int) RETURNS int LANGUAGE :pj_lang STABLE AS $$
 BEGIN
@@ -376,6 +387,7 @@ SELECT psq_seq(1), psq_seq(2);
 SELECT psq_seq(1), psq_seq(2);
 SELECT psq_seq(3);
 SELECT last_value FROM psq_s;
+SELECT pj_expect('psq_seq(integer)', 'compiled') \gset
 
 -- statements that write are not compiled, and are as PL/pgSQL runs them: a
 -- plain command, and a data-modifying CTE on a table with a trigger
@@ -394,6 +406,7 @@ SELECT psq_try('SELECT psq_cte(1)');
 SELECT psq_try('SELECT psq_cte(2)');
 SELECT psq_try('SELECT psq_cte(3)');
 SELECT count(*) FROM psq_trg;
+SELECT pj_expect('psq_cte(integer)', 'declined:statement:SQL statement') \gset
 CREATE FUNCTION psq_dml(n int) RETURNS int LANGUAGE :pj_lang AS $$
 BEGIN
   UPDATE psq_trg SET b = 'y' WHERE a = n;
@@ -402,6 +415,7 @@ END $$;
 SELECT psq_dml(4), psq_dml(5);
 SELECT psq_dml(4), psq_dml(5);
 SELECT psq_dml(4), psq_dml(5);
+SELECT pj_expect('psq_dml(integer)', 'declined:statement:SQL statement') \gset
 SELECT * FROM psq_trg ORDER BY a;
 
 -- privileges are the executor's: a table, and a callee, taken away
@@ -430,6 +444,7 @@ SELECT psq_priv(1), psq_priv(3), psq_priv_fn(1);
 SELECT psq_priv(1), psq_priv(3), psq_priv_fn(1);
 SELECT psq_priv(1), psq_priv(3), psq_priv_fn(1);
 RESET ROLE;
+SELECT pj_expect('psq_priv(integer)', 'compiled') \gset
 REVOKE SELECT ON psq_priv FROM regress_psq_u;
 REVOKE EXECUTE ON FUNCTION psq_gone(int) FROM PUBLIC;
 SET ROLE regress_psq_u;
@@ -460,10 +475,14 @@ END $$;
 SELECT psq_wait(3);
 SELECT psq_wait(3);
 SELECT psq_wait(3);
+SELECT pj_expect('psq_wait(integer)', 'waiting') \gset
+SELECT pj_mark() \gset
 SELECT psq_wait(200);
 SELECT psq_wait(200);
 SELECT psq_wait(3);
 SELECT psq_wait(200);
+SELECT pj_expect('psq_wait(integer)', 'compiled') \gset
+SELECT pj_delta(NULL, NULL, NULL, 0, NULL);
 
 -- recursion through a statement: the frames are each their own
 CREATE FUNCTION psq_rec(n int) RETURNS int LANGUAGE :pj_lang STABLE AS $$
@@ -476,6 +495,7 @@ END $$;
 SELECT psq_rec(3), psq_rec(4);
 SELECT psq_rec(20), psq_rec(3);
 SELECT psq_rec(20), psq_rec(3);
+SELECT pj_expect('psq_rec(integer)', 'compiled') \gset
 
 -- a cancel inside the statement is SPI's, and the call is left as stock's
 CREATE FUNCTION psq_sleep(n float8) RETURNS int LANGUAGE :pj_lang AS $$
@@ -489,6 +509,7 @@ SET statement_timeout = '100ms';
 SELECT psq_sleep(5);
 RESET statement_timeout;
 SELECT psq_sleep(0);
+SELECT pj_expect('psq_sleep(double precision)', 'compiled') \gset
 
 -- the tuple tables go with each statement: memory read inside the loop does
 -- not grow with the number of statements run
@@ -508,6 +529,7 @@ SELECT psq_loop(3, 1) > 0, psq_loop(3, 2) > 0;
 SELECT psq_loop(3, 1) > 0, psq_loop(3, 2) > 0;
 SELECT psq_loop(1000, 1000) AS m1 \gset
 SELECT psq_loop(20000, 20000) - :m1 < 262144 AS flat;
+SELECT pj_expect('psq_loop(integer,integer)', 'compiled') \gset
 
 -- parallel query inside a statement: the parameters of the list are serialized
 -- (PERFORM fetches all rows, so the plan may use workers)
@@ -533,3 +555,4 @@ SELECT psq_workers() AS w0 \gset
 SELECT psq_par(100, 'text3'), psq_par(1, 'text3');
 SELECT psq_workers() - :w0 >= 2 AS launched;
 RESET debug_parallel_query;
+SELECT pj_expect('psq_par(integer,text)', 'compiled') \gset

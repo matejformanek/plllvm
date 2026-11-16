@@ -48,6 +48,9 @@ typedef struct plllvm_pj_counters
 	int64		boxed_evals;
 	int64		peak_tuple_bytes;
 	int64		elem_slow;
+	int64		sql_execs;
+	int64		sql_stale;
+	int64		sql_rewalks;
 } plllvm_pj_counters;
 
 /* one side entry of a function, for plllvm_pj_status() */
@@ -143,6 +146,11 @@ typedef struct PjSql
 	PjSqlKind	kind;
 	Bitmapset  *paramnos;		/* the datums its parameter list holds */
 	CachedPlanSource *plansource;
+	int			generation;		/* of the plansource when we last looked */
+	int			nfuncs;			/* the callees it was admitted with ... */
+	Oid		   *funcs;
+	char	   *volatility;		/* ... and their provolatile */
+	bool		has_view;		/* a view is among the relations */
 } PjSql;
 
 /* how to cast one type to another, as PL/pgSQL's cast_expr_hash */
@@ -311,6 +319,9 @@ typedef struct PjHarvest
 	int			nbase;			/* then one per expression */
 	bool		has_notice;		/* as in PjScope */
 	bool		has_sql;		/* as in PjScope */
+	bool		sql_stale;		/* a statement changed what it was admitted
+								 * for during a call: the next one translates
+								 * again */
 	struct PjShadow *shadow;	/* the estate the parser hooks read */
 	List	   *fori;
 	int			ndatums;
@@ -334,10 +345,12 @@ extern char *plllvm_pj_ir_text(Oid fn);
 extern uint64 plllvm_pj_exec_epoch(void);
 extern bool plllvm_pj_execute_check(PjHarvest *h, Oid user, uint64 epoch,
 									Oid *denied);
+extern bool plllvm_pj_guards_ok(PjHarvest *h, bool sql);
 
 /* plllvm_pj_sql.c */
 extern const char *plllvm_pj_sql_harvest(struct PLpgSQL_function *func,
 										 PjHarvest *h, PjExpr *pe);
+extern bool plllvm_pj_sql_guard(PjSql *sql);
 extern void plllvm_pj_sql_finish(PjCtx *ctx);
 
 /* plllvm_pj_boxed.c */
@@ -345,6 +358,7 @@ extern PjLevel *plllvm_pj_level(PjCtx *ctx);
 extern void plllvm_pj_levels_release(PjVariant *v);
 extern void plllvm_pj_level_abort(PjCtx *ctx);
 extern void plllvm_pj_datums_release(PjCtx *ctx);
+extern void plllvm_pj_key_recheck(PjCtx *ctx, const PjExpr *pe);
 extern void plllvm_pj_xact_callback(XactEvent event);
 
 /* plllvm_pj_translate.c */

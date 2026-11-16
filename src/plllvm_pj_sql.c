@@ -37,13 +37,19 @@
  */
 #include "postgres.h"
 
+#include "catalog/namespace.h"
+#include "catalog/pg_class.h"
+#include "catalog/pg_proc.h"
 #include "executor/spi.h"
 #include "miscadmin.h"
 #include "nodes/nodeFuncs.h"
 #include "nodes/params.h"
 #include "plpgsql.h"
+#include "utils/fmgroids.h"
 #include "utils/memutils.h"
 #include "utils/plancache.h"
+#include "utils/rls.h"
+#include "utils/syscache.h"
 
 #include "plllvm.h"
 #include "plllvm_pj.h"
@@ -58,7 +64,21 @@ typedef struct PjShadow
 
 static PjShadow *shadow_build(PLpgSQL_function *func, MemoryContext cxt);
 static void sql_connect(PjCtx *ctx);
-static bool sql_writes_walker(Node *node, void *context);
+
+/* what the walk over the queries of a plan finds */
+typedef struct SqlFacts
+{
+	const char *reason;			/* why the statement is not admitted */
+	List	   *funcs;			/* the callees, once each ... */
+	List	   *volatility;		/* ... and their provolatile (as int) */
+	bool		has_view;
+} SqlFacts;
+
+static bool sql_scan_walker(Node *node, SqlFacts *facts);
+static bool sql_scan_func(Oid funcid, void *context);
+static bool sql_func_pinned(Oid funcid);
+static bool sql_facts_ok(PjSql *sql);
+static void sql_recheck(PjHarvest *h, PjSql *sql);
 
 /*
  * The datums of a function as copy_plpgsql_datums() makes them for a call:
@@ -110,12 +130,16 @@ shadow_build(PLpgSQL_function *func, MemoryContext cxt)
 }
 
 /*
- * What a statement for SPI may be: a query with no writes.  Any command that
- * is not a SELECT, and a data-modifying CTE under a SELECT, is the
- * interpreter's.
+ * What a statement for SPI may be: a query with no writes, and no callee that
+ * can change what the plan was made from.  A command that is not a SELECT
+ * and a data-modifying CTE under a SELECT are the interpreter's: the triggers,
+ * rules and constraints of the table they write are code that no walk of the
+ * query shows.  A VOLATILE function may run SQL of its own, or set what a later
+ * simple expression of the function was planned with (search_path), so it is
+ * not admitted either, but the built-in ones that change no plan input.
  */
 static bool
-sql_writes_walker(Node *node, void *context)
+sql_scan_walker(Node *node, SqlFacts *facts)
 {
 	if (node == NULL)
 		return false;
@@ -124,10 +148,121 @@ sql_writes_walker(Node *node, void *context)
 		Query	   *query = (Query *) node;
 
 		if (query->commandType != CMD_SELECT || query->hasModifyingCTE)
+		{
+			facts->reason = "statement:SQL statement";
 			return true;
-		return query_tree_walker(query, sql_writes_walker, context, 0);
+		}
+		foreach_node(RangeTblEntry, rte, query->rtable)
+		{
+			/* ApplyRetrieveRule() leaves the relkind of the view */
+			if (rte->rtekind == RTE_SUBQUERY && rte->relkind == RELKIND_VIEW)
+				facts->has_view = true;
+		}
+		return query_tree_walker(query, sql_scan_walker, facts, 0);
 	}
-	return expression_tree_walker(node, sql_writes_walker, context);
+	if (check_functions_in_node(node, sql_scan_func, facts))
+		return true;
+	return expression_tree_walker(node, sql_scan_walker, facts);
+}
+
+static bool
+sql_scan_func(Oid funcid, void *context)
+{
+	SqlFacts   *facts = (SqlFacts *) context;
+	HeapTuple	tup;
+	char		provolatile;
+
+	if (sql_func_pinned(funcid))
+		return false;
+	tup = SearchSysCache1(PROCOID, ObjectIdGetDatum(funcid));
+	if (!HeapTupleIsValid(tup))
+	{
+		facts->reason = "callee";
+		return true;
+	}
+	provolatile = ((Form_pg_proc) GETSTRUCT(tup))->provolatile;
+	ReleaseSysCache(tup);
+	if (provolatile == PROVOLATILE_VOLATILE)
+	{
+		facts->reason = "volatile callee";
+		return true;
+	}
+	if (!list_member_oid(facts->funcs, funcid))
+	{
+		facts->funcs = lappend_oid(facts->funcs, funcid);
+		facts->volatility = lappend_int(facts->volatility, provolatile);
+	}
+	return false;
+}
+
+/*
+ * The VOLATILE built-ins that change no input of a plan: the sequence
+ * functions, the clocks and random numbers, the transaction id, notify and
+ * sleep.  set_config is none of them.
+ */
+static bool
+sql_func_pinned(Oid funcid)
+{
+	switch (funcid)
+	{
+		case F_NEXTVAL:
+		case F_CURRVAL:
+		case F_LASTVAL:
+		case F_SETVAL_REGCLASS_INT8:
+		case F_SETVAL_REGCLASS_INT8_BOOL:
+		case F_RANDOM_:
+		case F_RANDOM_NORMAL:
+		case F_RANDOM_INT4_INT4:
+		case F_RANDOM_INT8_INT8:
+		case F_RANDOM_NUMERIC_NUMERIC:
+		case F_CLOCK_TIMESTAMP:
+		case F_TIMEOFDAY:
+		case F_GEN_RANDOM_UUID:
+		case F_UUIDV4:
+		case F_UUIDV7_:
+		case F_UUIDV7_INTERVAL:
+		case F_TXID_CURRENT:
+		case F_PG_CURRENT_XACT_ID:
+		case F_PG_NOTIFY:
+		case F_PG_SLEEP:
+		case F_PG_SLEEP_FOR:
+		case F_PG_SLEEP_UNTIL:
+			return true;
+		default:
+			return false;
+	}
+}
+
+/*
+ * Is the plan of the statement, as it is now, one it was admitted as?  The
+ * same walk, and the same variables for parameters.  Only for a plan that is
+ * valid: the trees of a stale one may name what is gone.
+ */
+static bool
+sql_facts_ok(PjSql *sql)
+{
+	SqlFacts	facts = {0};
+	CachedPlanSource *psrc = sql->plansource;
+
+	if (!bms_equal(sql->expr->paramnos, sql->paramnos))
+		return false;
+	if (sql_scan_walker((Node *) psrc->query_list, &facts))
+		return false;
+	if (facts.has_view != sql->has_view || list_length(facts.funcs) != sql->nfuncs)
+		return false;
+	for (int i = 0; i < sql->nfuncs; i++)
+	{
+		int			at = -1;
+
+		for (int j = 0; j < list_length(facts.funcs); j++)
+		{
+			if (list_nth_oid(facts.funcs, j) == sql->funcs[i])
+				at = j;
+		}
+		if (at < 0 || list_nth_int(facts.volatility, at) != sql->volatility[i])
+			return false;
+	}
+	return true;
 }
 
 /*
@@ -142,14 +277,15 @@ plllvm_pj_sql_harvest(PLpgSQL_function *func, PjHarvest *h, PjExpr *pe)
 	PLpgSQL_expr *expr = pe->expr;
 	CachedPlanSource *psrc;
 	PjSql	   *sql;
+	SqlFacts	facts = {0};
 	MemoryContext oldcxt;
 
 	Assert(expr->plan != NULL);
 	psrc = (CachedPlanSource *) linitial(SPI_plan_get_plan_sources(expr->plan));
 	Assert(psrc->is_valid);
 
-	if (sql_writes_walker((Node *) psrc->query_list, NULL))
-		return "statement:SQL statement";
+	if (sql_scan_walker((Node *) psrc->query_list, &facts))
+		return facts.reason;
 
 	oldcxt = MemoryContextSwitchTo(h->cxt);
 	sql = palloc0_object(PjSql);
@@ -157,12 +293,112 @@ plllvm_pj_sql_harvest(PLpgSQL_function *func, PjHarvest *h, PjExpr *pe)
 	sql->kind = pe->sql_kind;
 	sql->paramnos = bms_copy(expr->paramnos);
 	sql->plansource = psrc;
+	sql->generation = psrc->generation;
+	sql->has_view = facts.has_view;
+	sql->nfuncs = list_length(facts.funcs);
+	sql->funcs = palloc_array(Oid, Max(sql->nfuncs, 1));
+	sql->volatility = palloc_array(char, Max(sql->nfuncs, 1));
+	for (int i = 0; i < sql->nfuncs; i++)
+	{
+		sql->funcs[i] = list_nth_oid(facts.funcs, i);
+		sql->volatility[i] = (char) list_nth_int(facts.volatility, i);
+	}
 	pe->sql = sql;
 	if (h->shadow == NULL)
 		h->shadow = shadow_build(func, h->cxt);
 	MemoryContextSwitchTo(oldcxt);
 
 	return NULL;
+}
+
+/*
+ * May the next call run the statement on the plan it has?  The checks SPI
+ * itself would make are the ones that can change what the code assumed, so
+ * they are made before anything runs: a miss sends the call to the
+ * interpreter, which translates again.
+ *
+ * An invalid plan is not a miss: SPI analyses it again inside the call, and
+ * lookup in a bench that truncates and analyses its tables between rounds
+ * would otherwise never compile.  It is one only if what the statement was
+ * admitted for may have changed: a callee that is not as it was, a view, a
+ * policy.  A plan that others have rebuilt since our last look (an interpreted
+ * call may have) is checked as it stands.
+ */
+bool
+plllvm_pj_sql_guard(PjSql *sql)
+{
+	CachedPlanSource *psrc = sql->plansource;
+
+	/* the names would resolve in another schema */
+	if (psrc->search_path == NULL ||
+		!SearchPathMatchesCurrentEnvironment(psrc->search_path))
+		return false;
+
+	/* another role or row_security rewrites the query another way */
+	if (psrc->dependsOnRLS &&
+		(!psrc->is_valid || psrc->rewriteRoleId != GetUserId() ||
+		 psrc->rewriteRowSecurity != row_security))
+		return false;
+
+	if (!bms_equal(sql->expr->paramnos, sql->paramnos))
+		return false;
+
+	if (!psrc->is_valid)
+	{
+		if (sql->has_view)
+			return false;
+		for (int i = 0; i < sql->nfuncs; i++)
+		{
+			HeapTuple	tup = SearchSysCache1(PROCOID,
+											  ObjectIdGetDatum(sql->funcs[i]));
+			bool		same;
+
+			if (!HeapTupleIsValid(tup))
+				return false;
+			same = ((Form_pg_proc) GETSTRUCT(tup))->provolatile ==
+				sql->volatility[i];
+			ReleaseSysCache(tup);
+			if (!same)
+				return false;
+		}
+		return true;
+	}
+
+	if (psrc->generation != sql->generation)
+	{
+		plllvm_pj_count.sql_rewalks++;
+		if (!sql_facts_ok(sql))
+			return false;
+		sql->generation = psrc->generation;
+	}
+	return true;
+}
+
+/*
+ * After an execution: if a plan was built since we looked, SPI may have
+ * analysed the statement again, and the query list has changed under us.  The
+ * list's address would not tell (the new one can take the place of the old),
+ * the counter of plans does: it moves with every plan built, and a new query
+ * list is always followed by one.  The statement goes on with the trees it
+ * has, as PL/pgSQL does until its next evaluation, and the next call translates
+ * again if the plan is no longer the one it was admitted as.
+ */
+static void
+sql_recheck(PjHarvest *h, PjSql *sql)
+{
+	CachedPlanSource *psrc = sql->plansource;
+
+	if (psrc->generation == sql->generation || !psrc->is_valid)
+		return;
+
+	plllvm_pj_count.sql_rewalks++;
+	if (sql_facts_ok(sql))
+		sql->generation = psrc->generation;
+	else
+	{
+		plllvm_pj_count.sql_stale++;
+		h->sql_stale = true;
+	}
 }
 
 /*
@@ -262,6 +498,11 @@ plllvm_pj_sql(PjCtx *ctx, int32 idx)
 
 	sql_connect(ctx);
 	ctx->evaluated = true;
+	plllvm_pj_count.sql_execs++;
+
+	/* for the tests: every execution analyses its statement again */
+	if (plllvm_debug_inject == PLLLVM_INJECT_PJ_SQL_REPLAN)
+		ResetPlanCache();
 
 	/* NULL, not an empty list, without parameters: the plan stays generic */
 	if (!bms_is_empty(sql->paramnos))
@@ -291,6 +532,8 @@ plllvm_pj_sql(PjCtx *ctx, int32 idx)
 	}
 	PG_END_TRY();
 	MemoryContextSwitchTo(oldcxt);
+
+	sql_recheck(h, sql);
 
 	if (sql->kind == PJ_SQL_PERFORM)
 	{
@@ -367,6 +610,20 @@ plllvm_pj_sql(PjCtx *ctx, int32 idx)
 void
 plllvm_pj_sql_end(PjCtx *ctx, int32 idx)
 {
+	bool		moved;
+
 	SPI_freetuptable(SPI_tuptable);
 	Assert(SPI_tuptable == NULL);
+
+	/*
+	 * The statement may have run code that changed the user or a privilege.
+	 * Code that changes a function says so in the same way, and may have made
+	 * a plan of the function's own stale: it goes on with its trees, as
+	 * PL/pgSQL goes on until its next evaluation, and the next call finds
+	 * out.
+	 */
+	moved = plllvm_pj_exec_epoch() != ctx->epoch;
+	plllvm_pj_key_recheck(ctx, list_nth(ctx->harvest->exprs, idx));
+	if (moved && !plllvm_pj_guards_ok(ctx->harvest, false))
+		plllvm_pj_count.sql_stale++;
 }
