@@ -1476,6 +1476,7 @@ subscript_access(plllvm_expr_env *base, plllvm_ir *ir,
 			rtype = "i64";
 			break;
 		default:
+			Assert(sb->refcontainertype == FLOAT8ARRAYOID);
 			suffix = "f64";
 			rtype = "double";
 	}

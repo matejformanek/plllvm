@@ -432,6 +432,7 @@ elem_read(Datum array, int32 sub, Datum *value)
 	return true;
 }
 
+/* element sub of the array, NULL (isnull) as array_get_element() says */
 pg_always_inline int32
 plllvm_pj_elem_get_i32(Datum array, int32 sub, bool *isnull)
 {
@@ -449,6 +450,7 @@ plllvm_pj_elem_get_i32(Datum array, int32 sub, bool *isnull)
 	return DatumGetInt32(value);
 }
 
+/* element sub of the array, NULL (isnull) as array_get_element() says */
 pg_always_inline int64
 plllvm_pj_elem_get_i64(Datum array, int32 sub, bool *isnull)
 {
@@ -466,6 +468,7 @@ plllvm_pj_elem_get_i64(Datum array, int32 sub, bool *isnull)
 	return DatumGetInt64(value);
 }
 
+/* element sub of the array, NULL (isnull) as array_get_element() says */
 pg_always_inline float8
 plllvm_pj_elem_get_f64(Datum array, int32 sub, bool *isnull)
 {

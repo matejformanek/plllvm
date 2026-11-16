@@ -127,8 +127,9 @@ extern void plllvm_pj_raise(struct PjCtx *ctx, int32 level, int32 sqlstate,
 pg_noreturn extern void plllvm_pj_raise_bare(void);
 
 /*
- * Elements of an array in a variable of plpgsql_jit, when the inline code
- * (plllvm_types.c) finds the array in no shape it can read
+ * Elements of an array in a variable of plpgsql_jit that the inline code
+ * (plllvm_types.c) does not read or write: an array in no shape it can use,
+ * and for a store also a NULL value or a subscript out of range
  */
 extern NullableDatum plllvm_pj_elem_get_slow(Datum array, int32 sub,
 											 Oid elemtype);

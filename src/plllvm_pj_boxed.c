@@ -206,8 +206,6 @@ elem_layout(Oid elemtype, int *len, char *align)
 			break;
 		default:
 			elog(ERROR, "unexpected array element type %u", elemtype);
-			*len = 0;
-			*align = 0;
 	}
 }
 
@@ -231,14 +229,14 @@ plllvm_pj_elem_get_slow(Datum array, int32 sub, Oid elemtype)
 }
 
 /*
- * A store of an element that the inline code did not make: a value or an
- * element out of range, NULL, an array of no Datums yet, or of other
- * dimensions.  The slot's array is changed in place, and array_set_element()
- * returns it; an array that is not the slot's, or is NULL, is what the
- * interpreter replaces by an empty one, and exec_assign_value() then
- * expands, here in the datum context of the level.  The flat arrays of that
- * are the per-tuple memory's, which is reset once the object is made, as
- * nothing of the expression that is not by value lives there now.
+ * A store of an element that the inline code did not make: a NULL value, a
+ * subscript out of range, an array of no Datums yet, or of other dimensions.
+ * The slot's array is changed in place and array_set_element() returns it
+ * (any other result is an error).  A NULL array is what the interpreter
+ * replaces by an empty one, and exec_assign_value() then expands, here in the
+ * datum context of the level.  The flat arrays of that are in the per-tuple
+ * memory, which is reset once the object is made: nothing of the expression
+ * that is not by value lives there now.
  */
 Datum
 plllvm_pj_elem_set_slow(PjCtx *ctx, Datum array, bool isnull, int32 sub,

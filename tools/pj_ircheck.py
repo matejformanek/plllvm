@@ -113,7 +113,6 @@ END""", "9"),
 }
 
 
-
 def kernel_body(name):
     """The body of the plpgsql_jit function <name>_k of sql/pj_kernels.sql."""
     path = os.path.join(os.path.dirname(os.path.abspath(__file__)), os.pardir,

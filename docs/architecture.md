@@ -226,26 +226,29 @@ Only `plllvm_jit.c` and `plllvm_error.cpp` include LLVM headers.
 * The read `a[i]` and the store `a[i] := e` of a variable of type `int4[]`,
   `int8[]` or `float8[]`, with one subscript, are compiled when the store is
   the whole expression of an assignment to that variable (the parameter is
-  the assignment target, as the in-place rule has it). The order is the
-  interpreter's: a NULL array reads NULL without the subscript being
-  evaluated, and a store checks its subscript, which must not be NULL (22004),
-  before it computes the value. The inline helpers of `plllvm_types.c` read
-  and write an expanded one-dimensional array that has its Datums: bounds from
-  the lower bound, the null bitmap, and for a store in range the four changes
-  of `array_set_element_expanded()` (`fvalue` and `flat_size` cleared, the
-  Datum set, the null flag cleared). Any other array goes to
-  `plllvm_pj_elem_get_slow()` or `plllvm_pj_elem_set_slow()`, which call
-  `array_get_element()` and `array_set_element()`, and are counted in
-  `elem_slow` of `plllvm_pj_stats()`: an array that was just expanded has no
-  Datums until the first access to it makes them, a NULL array, an empty one,
-  a two-dimensional one, a NULL value and a subscript past either end are
-  always slow. A NULL array that is stored into is replaced by an empty one and
-  expanded into the datum context, and the flat arrays of that are reset at
-  once. The null flag of a read goes to one slot of the function (`%en`),
-  which the inlined helper is the only user of; the slow function returns its
-  answer by value, so that no pointer escapes. The result of a store is the
-  slot's own array, and the code keeps it without `plllvm_pj_assign_array()`,
-  then runs the reset that a call in the value left.
+  the assignment target, as the in-place rule has it).
+  * The order is the interpreter's: a NULL array reads NULL without the
+    subscript being evaluated, and a store checks its subscript, which must
+    not be NULL (22004), before it computes the value.
+  * The inline helpers of `plllvm_types.c` read and write an expanded
+    one-dimensional array that has its Datums: bounds from the lower bound,
+    the null bitmap, and for a store in range the four changes of
+    `array_set_element_expanded()` (`fvalue` and `flat_size` cleared, the
+    Datum set, the null flag cleared).
+  * Any other array goes to `plllvm_pj_elem_get_slow()` or
+    `plllvm_pj_elem_set_slow()`, which call `array_get_element()` and
+    `array_set_element()`, and are counted in `elem_slow` of
+    `plllvm_pj_stats()`: an array just expanded has no Datums until the first
+    access makes them; a NULL array, an empty one, a two-dimensional one, a
+    NULL value and a subscript past either end are always slow.
+  * A NULL array that is stored into is replaced by an empty one and expanded
+    into the datum context, and the flat arrays of that are reset at once.
+  * The null flag of a read goes to one slot of the function (`%en`), which
+    the inlined helper is the only user of; the slow function returns its
+    answer by value, so that no pointer escapes.
+  * The result of a store is the slot's own array, and the code keeps it
+    without `plllvm_pj_assign_array()`, then runs the reset that a call in
+    the value left.
 * Any other expression that reads or writes an array stays with the executor,
   which is given the variable read-only: a slice, a second subscript, a
   constructor, an array function, a call or a conversion that is given the

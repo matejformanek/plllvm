@@ -1386,6 +1386,10 @@ emit_subscript(plllvm_ir *ir, const SubscriptingRef *sb, EmitState *es,
 		emit_store(ir, sb, &container, es, out);
 }
 
+/*
+ * The fetch of an element: the branches to NULL for a NULL container and a NULL
+ * subscript, then the access of the caller, joined by phis
+ */
 static void
 emit_fetch(plllvm_ir *ir, const SubscriptingRef *sb,
 		   const plllvm_value *container, EmitState *es, plllvm_value *out)
@@ -1419,6 +1423,10 @@ emit_fetch(plllvm_ir *ir, const SubscriptingRef *sb,
 	out->type = sb->refrestype;
 }
 
+/*
+ * The store: the subscript, the error if it is NULL, then the value, which
+ * the interpreter computes only after that check, then the caller's store
+ */
 static void
 emit_store(plllvm_ir *ir, const SubscriptingRef *sb,
 		   const plllvm_value *container, EmitState *es, plllvm_value *out)
