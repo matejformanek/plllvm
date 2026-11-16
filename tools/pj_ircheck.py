@@ -16,6 +16,14 @@ fib has no loop and calls itself by design: the whole function is counted
 (the hand-written one has two), it must keep no local slot and make exactly two
 calls through a site, and the ratio is printed, not checked.
 
+nbody and spectralnorm are the array kernels, taken from sql/pj_kernels.sql.
+Their loops read and write the elements of arrays, so loads and stores are
+allowed in them, and the only calls are the interrupt poll and the two slow
+functions of an element, which are as cold as the poll: a block that calls any
+of them is not counted.  The loop must call nothing of the executor, no site
+and no assignment of an array, and the function keeps no local slot.  The
+ratio is printed, not checked.
+
 A script of the standard library, run by make check-pj-ir against a running
 cluster; it has no dependencies to manage.
 
@@ -31,6 +39,11 @@ import tempfile
 from collections import Counter
 
 MAX_RATIO = 1.5
+
+# the calls that take a block out of the hot count, in the kernels of arrays
+COLD_CALLS = ("@ProcessInterrupts", "@plllvm_pj_elem_get_slow",
+              "@plllvm_pj_elem_set_slow")
+ARRAY_KERNELS = ("nbody", "spectralnorm")
 
 # name: (result type, body), and the argument of the first and the second call
 KERNELS = {
@@ -99,6 +112,24 @@ BEGIN
 END""", "9"),
 }
 
+
+
+def kernel_body(name):
+    """The body of the plpgsql_jit function <name>_k of sql/pj_kernels.sql."""
+    path = os.path.join(os.path.dirname(os.path.abspath(__file__)), os.pardir,
+                        "sql", "pj_kernels.sql")
+    with open(path) as f:
+        m = re.search(r"CREATE FUNCTION %s_k\(n integer\) RETURNS text\n"
+                      r"LANGUAGE :pj_lang \w+ AS \$\$(.*?)\$\$;" % name,
+                      f.read(), re.S)
+    if m is None:
+        sys.exit("no function %s_k in %s" % (name, path))
+    return m.group(1)
+
+
+KERNELS["nbody"] = ("text", kernel_body("nbody"), "3")
+KERNELS["spectralnorm"] = ("text", kernel_body("spectralnorm"), "5")
+
 SCRIPT = """\
 SET plllvm.opt_level = 2;
 SET plllvm.pj_opt_level = 2;
@@ -155,27 +186,29 @@ def dump(args, kernel):
 
 
 def parse(text):
-    """Blocks of the one defined function: label -> instruction lines."""
-    blocks = {}
+    """Blocks of each function: name -> label -> instruction lines."""
+    funcs = {}
     cur = None
     for line in text.splitlines():
-        if re.match(r"define .*@([\w.\"$]+)\(", line):
-            cur = "entry"
-            blocks[cur] = []
+        m = re.match(r"define .*@([\w.\"$]+)\(", line)
+        if m:
+            funcs[m.group(1)] = {"entry": []}
+            cur = funcs[m.group(1)]
+            label = "entry"
         elif cur is None:
             continue
         elif line == "}":
-            break
+            cur = None
         elif re.match(r"^([\w.$\-]+):", line):
-            cur = line.split(":")[0]
-            blocks[cur] = []
+            label = line.split(":")[0]
+            cur[label] = []
         elif line.strip() and not line.strip().startswith(";"):
-            blocks[cur].append(line.strip())
-    return blocks
+            cur[label].append(line.strip())
+    return funcs
 
 
 def innermost_loop(text, opt):
-    """The blocks of the deepest loop."""
+    """The function and the blocks of the deepest loop."""
     with tempfile.NamedTemporaryFile("w", suffix=".ll") as f:
         f.write(text)
         f.flush()
@@ -183,15 +216,20 @@ def innermost_loop(text, opt):
                               f.name], capture_output=True,
                              text=True).stderr
     found = []
+    func = None
     for line in out.splitlines():
+        m = re.match(r"Loop info for function '([^']*)'", line)
+        if m:
+            func = m.group(1)
         m = re.match(r"\s*Loop at depth (\d+) containing: (.*)", line)
         if m:
-            found.append((int(m.group(1)),
+            found.append((int(m.group(1)), func,
                           [re.sub(r"<.*?>", "", b).lstrip("%")
                            for b in m.group(2).split(",")]))
     if not found:
         sys.exit("no loop in the IR")
-    return max(found)[1]
+    depth, func, blocks = max(found, key=lambda f: f[0])
+    return func, blocks
 
 
 def analyze_whole(text):
@@ -222,33 +260,39 @@ def analyze_whole(text):
     return hot, sites, problems
 
 
-def analyze(text, opt):
-    """Hot count, position stores, calls, and what the loop must not do."""
-    blocks = parse(text)
+def analyze(text, opt, array=False):
+    """Hot count, position stores, calls, and what the loop must not do.  The
+    loop of an array kernel may load and store anything, and the slow
+    functions of an element are cold as the poll is."""
+    funcs = parse(text)
     hot = stores = 0
     calls = Counter()
     problems = []
-    for name in innermost_loop(text, opt):
-        insts = blocks.get(name, [])
-        cold = any("@ProcessInterrupts" in i for i in insts)
+    cold_calls = COLD_CALLS if array else COLD_CALLS[:1]
+    allowed = [c[1:] for c in cold_calls]
+    func, names = innermost_loop(text, opt)
+    for name in names:
+        insts = funcs[func].get(name, [])
+        cold = any(c in i for i in insts for c in cold_calls)
         for i in insts:
             hot += not cold
             if "= load volatile" in i:
                 continue
-            if "= load " in i:
+            if "= load " in i and not array:
                 problems.append("load in the loop: " + i)
             if i.startswith("store "):
                 if re.search(r"ptr %ctx\b", i):
                     stores += 1
-                else:
+                elif not array:
                     problems.append("store in the loop: " + i)
             m = re.search(r"\bcall [^@]*@([\w.$\"]+)\(", i)
             if m:
                 calls[m.group(1)] += 1
     for callee in calls:
-        if callee != "ProcessInterrupts" and not callee.startswith("llvm."):
+        if callee not in allowed and not callee.startswith("llvm."):
             problems.append("call in the loop: " + callee)
-    allocas = [i for b in blocks.values() for i in b if " = alloca " in i]
+    allocas = [i for blocks in funcs.values() for b in blocks.values()
+               for i in b if " = alloca " in i]
     if allocas:
         problems.append("local slots left: " + ", ".join(allocas))
     return hot, stores, calls, problems
@@ -286,12 +330,13 @@ def main():
                     print("  FAIL %s: %s" % (kernel, p))
                     failed = True
                 continue
-            ll_hot = analyze(ir["ll"], args.opt)[0]
-            hot, stores, calls, problems = analyze(ir["pj"], args.opt)
+            array = kernel in ARRAY_KERNELS
+            ll_hot = analyze(ir["ll"], args.opt, array)[0]
+            hot, stores, calls, problems = analyze(ir["pj"], args.opt, array)
             ratio = hot / ll_hot
             print("%-10s %7d %7d %6.2f  %d position stores, calls %s" %
                   (kernel, ll_hot, hot, ratio, stores, dict(calls) or "-"))
-            if ratio > MAX_RATIO:
+            if ratio > MAX_RATIO and not array:
                 problems.append("hot count %.2f times the hand-written code "
                                 "(limit %.1f)" % (ratio, MAX_RATIO))
             for p in problems:

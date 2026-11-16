@@ -65,6 +65,14 @@ arguments and results, and int4[] locals with element stores, appends,
 slices and subscripts past the ends, in the same steps as flat ones; a bit
 of the first argument inverts each condition, so that a few warm calls reach
 every branch.
+--mode elem writes programs of one element type, int4, int8 or float8, whose
+only work on arrays is to read and store elements, with a scalar sum, loops,
+IF and the rare branch that no warm call takes, so that the function is
+compiled by itself and the call that takes the branch is a deopt.  Arguments
+are arrays of the other lower bounds, with NULL elements, empty, two-dimensional
+or NULL; subscripts are NULL, raising, out of range, past either end or at the
+ends of int4.  The run fails if no program had a deopt, or if fewer than
+--floor-elem of the programs have a variant without a call of the executor.
 --cx adds CASE statements, searched and simple (a selector of any type of the
 mode, a list of values in a WHEN, with and without ELSE), and SELECT
 expression INTO a variable to a flat or ref program.  The choices of these
@@ -82,7 +90,8 @@ schema name is normalised.  Every statement of a script is a step.
 
 Usage: pj_fuzz.py --psql <psql> --host <dir> --port <port> [--n N] [--start I]
                   [--seed S] [--opt-level 0|2|3] [--out dir] [--floor 0.5]
-                  [--mode flat|rec|ref] [--cx] [--floor-cx 0.15]
+                  [--mode flat|rec|ref|elem] [--cx] [--floor-cx 0.15]
+                  [--floor-elem 0.9]
 """
 import argparse
 import os
@@ -1826,6 +1835,211 @@ def main_rec(args):
     return 1 if failed else 0
 
 
+# ---- programs of element reads and stores only (--mode elem)
+
+ELEM = {"int4": "integer", "int8": "bigint", "float8": "double precision"}
+ELEM_DEFAULT = ["'{1,NULL,3}'", "'[0:2]={4,5,6}'", "'[-3:-1]={7,8,9}'", "'{}'",
+                "'{1,2,3}'", "'{1,2,3,4,5,6,7,8}'", None]
+ELEM_ARGS = ["'{1,NULL,3}'", "'[0:2]={4,5,6}'", "'[-3:-1]={7,8,9}'", "'{}'",
+             "'{1,2,3}'", "'{{1,2},{3,4}}'", "'[5:6]={1,2}'", "NULL"]
+ELEM_RARE = 99                  # the argument no warm call passes
+ELEM_BAD = 7                    # the one that makes the raising subscripts raise
+
+
+class ElemGen:
+    """Statements over the arrays a and b of one element type, the scalar s,
+    the loop variable i and the arguments k and n."""
+
+    def __init__(self, rng, ety):
+        self.r = rng
+        self.t = ety
+        self.arrs = ["a", "b"]
+
+    def idx(self, loop):
+        r = self.r
+        c = ["1", "2", "3", "0", "(-1)", "4", "(-3)", "5", "k % 4 + 1", "n",
+             "nullif(k, %d)" % ELEM_BAD, "10 / (k - %d)" % ELEM_BAD]
+        if loop:
+            c += ["i", "i", "i", "i + 1", "i - 1", "n - i"]
+        x = r.random()
+        if x < 0.08:
+            return r.choice(["2147483647", "(-2147483647 - 1)", "2147483640 + k"])
+        if x < 0.2:
+            return "%s[%s]" % (r.choice(self.arrs), r.choice(c[:6]))
+        return r.choice(c)
+
+    def sub(self, loop):
+        """A subscript of a store: no extreme value, which would end the call."""
+        e = self.idx(loop)
+        while "21474836" in e or "[" in e:
+            e = self.idx(loop)
+        return e
+
+    def val(self, loop, d):
+        r = self.r
+        if d <= 0 or r.random() < 0.25:
+            return r.choice(["0", "1", "2", "(-1)", "100", "s", "s", "k", "n",
+                             "nullif(k, %d)" % ELEM_BAD,
+                             "(10 / (k - %d))" % ELEM_BAD, "i" if loop else "3"])
+        x = r.random()
+        arr = r.choice(self.arrs)
+        if x < 0.4:
+            return "%s[%s]" % (arr, self.idx(loop))
+        if x < 0.5:
+            return "coalesce(%s[%s], %s)" % (arr, self.idx(loop), r.choice(["0", "1", "s"]))
+        op = r.choice(["+", "-", "*"])
+        return "(%s %s %s)" % (self.val(loop, d - 1), op, self.val(loop, d - 1))
+
+    def cond(self, loop):
+        r = self.r
+        x = r.random()
+        if x < 0.3:
+            return "%s[%s] IS NULL" % (r.choice(self.arrs), self.idx(loop))
+        if x < 0.6:
+            return "%s %s %s" % (self.val(loop, 1), r.choice(["<", ">", "="]),
+                                 self.val(loop, 1))
+        return "k %s %d" % (r.choice(["<", ">", "="]), r.randint(0, 5))
+
+    def stmt(self, d, loop):
+        r = self.r
+        x = r.random()
+        if x < 0.35:
+            return "%s[%s] := %s;" % (r.choice(self.arrs), self.sub(loop),
+                                       self.val(loop, 2))
+        if x < 0.6:
+            return "s := %s;" % self.val(loop, 3)
+        if d > 0 and not loop and x < 0.75:
+            body = " ".join(self.stmt(d - 1, True) for _ in range(r.randint(1, 3)))
+            return "FOR i IN 1..n LOOP %s END LOOP;" % body
+        if d > 0 and x < 0.9:
+            then = " ".join(self.stmt(d - 1, loop) for _ in range(r.randint(1, 2)))
+            els = ""
+            if r.random() < 0.4:
+                els = " ELSE " + " ".join(self.stmt(d - 1, loop) for _ in range(r.randint(1, 2)))
+            return "IF %s THEN %s%s END IF;" % (self.cond(loop), then, els)
+        return "s := s + coalesce(%s[%s], 1);" % (r.choice(self.arrs), self.idx(loop))
+
+
+class ElemProgram:
+    def __init__(self, seed, cat=None, cx=False):
+        r = random.Random(seed)
+        self.rng = r
+        self.seed = seed
+        self.ety = r.choice(["int4", "int8", "float8"])
+        self.t = ELEM[self.ety]
+        g = ElemGen(r, self.ety)
+        self.g = g
+        self.default = r.choice(ELEM_DEFAULT)
+        self.body = [g.stmt(2, False) for _ in range(r.randint(2, 6))]
+        rare = " ".join(g.stmt(0, False) for _ in range(r.randint(1, 2)))
+        self.body.insert(r.randint(0, len(self.body)),
+                         "IF k = %d THEN %s END IF;" % (ELEM_RARE, rare))
+        self.ret = r.choice(["s", "s + coalesce(b[1], 0)", "b", "a", "b"])
+        self.priv = False
+        self.real = {}
+        self.status_cols = ("state, coalesce(reason, ''), compiled_calls, calls, deopts, "
+                            "coalesce(boxed::text, '-')")
+        self.steps = self.make_steps()
+
+    def array(self):
+        return self.ret in ("a", "b")
+
+    def sig(self):
+        return "(%s[],integer,integer)" % self.t
+
+    def function(self):
+        o = "CREATE FUNCTION f(a %s[], k integer, n integer) RETURNS %s LANGUAGE :lang AS $f$\n" % (
+            self.t, self.t + "[]" if self.array() else self.t)
+        o += "DECLARE\n  b %s[]%s;\n  s %s := 0;\n  i integer;\nBEGIN\n" % (
+            self.t, " := " + self.default if self.default else "", self.t)
+        for st in self.body:
+            o += "  %s\n" % st
+        return o + "  RETURN %s;\nEND\n$f$;\n" % self.ret
+
+    def wrapper(self):
+        return ("CREATE FUNCTION w(a %s[], k integer, n integer) RETURNS text LANGUAGE plpgsql AS $w$\n"
+                "BEGIN PERFORM f(a, k, n); RETURN 'ok';\n"
+                "EXCEPTION WHEN OTHERS THEN RETURN SQLSTATE || ' ' || SQLERRM;\nEND $w$;\n"
+                % self.t)
+
+    def call(self, kind, fn="f"):
+        r = self.rng
+        if kind == "harmless":
+            a = r.choice(["'{1,2,3}'", "'{4,5,6,7}'", "'{1,NULL,3}'"])
+            k, n = r.randint(0, 5), r.randint(0, 4)
+        elif kind == "rare":
+            a, k, n = "'{1,2,3}'", ELEM_RARE, r.randint(0, 3)
+        else:
+            a = r.choice(ELEM_ARGS)
+            k = r.choice([0, 1, 2, ELEM_BAD, ELEM_BAD, -1, 5, 2147483647])
+            n = r.choice([0, 1, 2, 3, 6, -1])
+        return "SELECT %s((%s)::%s[], %s, %s);" % (fn, a, self.t, k, n)
+
+    def make_steps(self):
+        r = self.rng
+        st = ["@create", "@wrapper"]
+        for _ in range(3):
+            st.append(self.call("harmless"))
+        for _ in range(r.randint(4, 9)):
+            st.append(self.call(r.choice(["harmless", "edge", "edge"])))
+        st.append(self.call("edge", "w"))
+        st.append(self.call("rare"))
+        st.append(self.call("harmless"))
+        st.append(self.call("harmless"))
+        st.append(self.call("rare"))
+        return st
+
+
+def main_elem(args):
+    tally = Counter()
+    failed = False
+    for i in range(args.start, args.start + args.n):
+        seed = "%d:%d" % (args.seed, i)
+        prog = ElemProgram(seed)
+        a, b = run_pair(args, prog)
+        verdict, step = compare(args, prog, a, b, tally)
+        tally[verdict] += 1
+        m = re.search(r"@@ status\n(.*)", b, re.S)
+        st = m.group(1).strip().split("\n")[0].split("|") if m else []
+        ok = len(st) == 6
+        if ok and int(st[2]) > 0:
+            tally["compiled"] += 1
+        if ok and st[5] == "false":
+            tally["native"] += 1
+        if ok:
+            tally["deopts"] += int(st[4])
+            tally["deopt-programs"] += int(st[4]) > 0
+        if args.v or verdict != "equal":
+            print("seed %s: %s%s" % (seed, verdict, "" if step is None else " at step %d" % step))
+        if verdict in ("MISMATCH", "PERMISSIVE"):
+            failed = True
+            f = os.path.join(args.out, "fuzz-%s.txt" % seed.replace(":", "-"))
+            with open(f, "w") as fh:
+                fh.write("-- %s at step %s, seed %s, opt level %s\n== plpgsql script\n%s"
+                         "== plpgsql_jit script\n%s== plpgsql output\n%s\n"
+                         "== plpgsql_jit output\n%s\n"
+                         % (verdict, step, seed, args.opt_level, script(prog, "plpgsql"),
+                            script(prog, "plpgsql_jit", True), a, b))
+            print("  program and outputs: %s" % f)
+    print("pj_fuzz elem: seed=%d programs=%d opt_level=%s equal=%d permissive=%d mismatch=%d "
+          "compiled=%d (%.1f%%) without the executor=%d (%.1f%%) deopts=%d in %d programs"
+          % (args.seed, args.n, args.opt_level, tally["equal"], tally["PERMISSIVE"],
+             tally["MISMATCH"], tally["compiled"], 100.0 * tally["compiled"] / max(args.n, 1),
+             tally["native"], 100.0 * tally["native"] / max(args.n, 1), tally["deopts"],
+             tally["deopt-programs"]))
+    if tally["compiled"] < args.floor * args.n:
+        print("pj_fuzz: compiled fraction below the floor of %.0f%%" % (100 * args.floor))
+        failed = True
+    if tally["native"] < args.floor_elem * args.n:
+        print("pj_fuzz: programs without a call of the executor below the floor of %.0f%%"
+              % (100 * args.floor_elem))
+        failed = True
+    if tally["deopts"] == 0 and args.n >= 20:
+        print("pj_fuzz: no program deopted")
+        failed = True
+    return 1 if failed else 0
+
+
 # ---- running
 
 CLEAN = ("SET client_min_messages = warning;\n"
@@ -1857,9 +2071,11 @@ def script(prog, lang, status=False):
             o += s + "\n"
     o += "\\echo @@ end\nROLLBACK;\nRESET ROLE;\n\\echo @@ leak\n" + LEAK
     if status:
+        cols = getattr(prog, "status_cols",
+                       "state, coalesce(reason, ''), compiled_calls, calls, deopts")
         o += ("\\echo @@ status\n"
-              "SELECT state, coalesce(reason, ''), compiled_calls, calls, deopts FROM "
-              "plllvm_pj_status('%s.f%s'::regprocedure);\n" % (sch, prog.sig()))
+              "SELECT %s FROM plllvm_pj_status('%s.f%s'::regprocedure);\n"
+              % (cols, sch, prog.sig()))
     return o + CLEAN
 
 
@@ -2003,9 +2219,10 @@ def main():
     ap.add_argument("--opt-level", type=int, default=None)
     ap.add_argument("--out", default="results-fuzz")
     ap.add_argument("--floor", type=float, default=0.5)
-    ap.add_argument("--mode", choices=["flat", "rec", "ref"], default="flat")
+    ap.add_argument("--mode", choices=["flat", "rec", "ref", "elem"], default="flat")
     ap.add_argument("--cx", action="store_true", help="CASE and SELECT INTO (flat, ref)")
     ap.add_argument("--floor-cx", type=float, default=0.15, dest="floor_cx")
+    ap.add_argument("--floor-elem", type=float, default=0.9, dest="floor_elem")
     ap.add_argument("-v", action="store_true")
     ap.add_argument("--selftest", action="store_true", help="check frame_mix, no cluster")
     args = ap.parse_args()
@@ -2020,6 +2237,10 @@ def main():
         if args.cx:
             ap.error("--cx is for flat and ref programs")
         sys.exit(main_rec(args))
+    if args.mode == "elem":
+        if args.cx:
+            ap.error("--cx is for flat and ref programs")
+        sys.exit(main_elem(args))
     cat = load_catalog(lambda q: admin(args, q))
     if args.mode == "ref":
         universe = cat.universe

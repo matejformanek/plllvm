@@ -145,7 +145,7 @@ All are superuser only and show the current backend.
 | `plllvm_call_sites()` | call sites, their state and how often each was prepared, checked and re-entered |
 | `plllvm_function_status(regprocedure)` | `not_compiled`, `live`, `stale` or `dropped`, with resident and retired compiles |
 | `plllvm_expr_stats()` | expression JIT in PL/pgSQL (below): `state`; expressions `fired`, `installed` (given code), `compiled`, `declined`, failed (`failures`) and left interpreted at the cap (`capped`); `programs` kept; `compiled_evals`, evaluations of code compiled under `plllvm.expr_eager` |
-| `plllvm_pj_stats()` | `LANGUAGE plpgsql_jit` (below): handler entries `calls` = `compiled_calls` + `deopts` + `interpreted_calls`, and among the interpreted `declines`, `guard_misses`, `null_args`, `plugin_fallbacks`, `capped`; `translations`, `attempts`, `failures`, `boxed_evals`, `resident`, `peak_tuple_bytes` |
+| `plllvm_pj_stats()` | `LANGUAGE plpgsql_jit` (below): handler entries `calls` = `compiled_calls` + `deopts` + `interpreted_calls`, and among the interpreted `declines`, `guard_misses`, `null_args`, `plugin_fallbacks`, `capped`; `translations`, `attempts`, `failures`, `boxed_evals`, `resident`, `peak_tuple_bytes`, `elem_slow` (reads and stores of an array element that the inline code gave to a function) |
 | `plllvm_pj_status(regprocedure)` | one row per signature and input collation of a `plpgsql_jit` function: `state` (`new`, `seen`, `compiled`, `declined`), `reason`, call counts, `last_path`, and for the translation `exprs`, `unplanned`, `variants`, `native`, `boxed`, `restartable`, `translate_ms`, `symbol` (the name of the code in `plllvm_code_cache()` and in a profile) |
 | `plllvm_pj_ir(regprocedure)` | the IR of that variant, for inspection |
 | `plllvm_jit_test(ir, opt_level, codegen)` | compiles a body without calling it: `ok`, SQLSTATE, message, detail, line and column of a parse error, instruction and helper counts, checks added; `codegen => false` only checks the IR |
@@ -352,8 +352,10 @@ measures.
 
 v0.3 adds `LANGUAGE plpgsql_jit`. It compiles scalar statements and
 locals, and runs the other simple expressions of such a function through the
-executor, as it does every access to an array; SQL statements and
-exceptions follow.
+executor. An element of a one-dimensional `int4[]`, `int8[]` or `float8[]`
+variable is read and stored in the compiled code; a slice, a constructor and
+the other array types are the executor's. SQL statements and exceptions
+follow.
 
 ## Building and testing
 
@@ -386,8 +388,9 @@ make stage cluster-start installcheck doctor cluster-stop
 | `installcheck-pj-once`, `installcheck-pj-opt` | the `pj_` tests whose output comes from plllvm, in one variant, and at the highest opt level |
 | `check-pj-cmodule PLLLVM_PORT=<port>` | `tools/pj_cmodule_pins.sh`: pins that load a C module built on the spot, against `plpgsql` and `plpgsql_jit` (an output function with an effect in a `RAISE`; an object access hook that denies a function at the entry check, a stated difference). Skipped with a printed reason where no module can be built (only macOS and Linux have a recipe) |
 | `installcheck-plpgsql-pj PLLLVM_PORT=<port>` | the tests of `installcheck-plpgsql` without plllvm, then with `LANGUAGE plpgsql` changed to `plpgsql_jit` and the handler off and on; the results must match the first, but for the hunks of `tools/plpgsql_pj_allowed.diff` |
-| `fuzz-pj PLLLVM_PORT=<port> N=<n> NREC=<m> SEED=<s>` | `tools/pj_fuzz.py`: `N` generated functions and `NREC` recursive ones run as `plpgsql` and as `plpgsql_jit` at opt level 0 and 2, values, SQLSTATEs, messages and CONTEXT compared, with role switches and `REVOKE` inside transactions; the classes of a difference are in the script's docstring; reported by seed with its program in `results-fuzz/`; not part of `verify` |
-| `check-pj-fuzz` | the classes of the fuzzer on two programs of known shape (seed 22:745 stale-privilege, 21:597 frame-mix) and a check that a wrong value is not a mix; in `verify` |
+| `fuzz-pj PLLLVM_PORT=<port> N=<n> NREC=<m> NELEM=<e> SEED=<s>` | `tools/pj_fuzz.py`: `N` generated functions, `NREC` recursive ones and `NELEM` of element reads and stores of arrays run as `plpgsql` and as `plpgsql_jit` at opt level 0 and 2, values, SQLSTATEs, messages and CONTEXT compared, with role switches and `REVOKE` inside transactions; the classes of a difference are in the script's docstring; reported by seed with its program in `results-fuzz/`; not part of `verify` |
+| `check-pj-fuzz` | the classes of the fuzzer on two programs of known shape (seed 22:745 stale-privilege, 21:597 frame-mix), a check that a wrong value is not a mix, and 150 programs of element reads and stores at opt level 0 and 2, which must compile without the executor, and deopt; in `verify` |
+| `check-pj-ir PLLLVM_PORT=<port>` | `tools/pj_ircheck.py`: the optimized IR of `loop`, `is_prime`, `fib`, `mandelbrot`, `nbody` and `spectralnorm` against the hand-written kernels: no local slot, and in the innermost loop no call but the poll (and, in the array kernels, the slow functions of an element, which are as cold as the poll); in `verify` |
 | `verify PLLLVM_PORT=<port>` | every suite of a PR in order, with the commit and the exit code of each in `results-verify.log` |
 | `kernels`, `check-kernels` | compile `examples/kernels/src/*.c` to IR with the install-perf headers; check the committed `.ll` files are current |
 | `pgindent` | format the C sources (`docs/style.md`) |

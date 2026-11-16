@@ -223,17 +223,52 @@ Only `plllvm_jit.c` and `plllvm_error.cpp` include LLVM headers.
   once at entry, as PL/pgSQL does, so that a compressed or external one is not
   detoasted at every subscript. The datum context is released when the call
   ends, after the result is copied out, and goes with the level on an ERROR.
-* Every expression that reads or writes an array stays with the executor,
-  which is given the variable read-only. The one exception is the Param of the
-  assignment target that the in-place rule of PL/pgSQL allows to be modified:
-  the top-level function has a support function for
-  `SupportRequestModifyInPlace` (a subscripted assignment, `array_append`).
-  It is passed read/write through a twin of the parameter, with an id after
-  the datums, which exists in the harvest's copy of the tree only; the slot
-  keeps the array. The rule that hands the object to any function that holds
-  the only reference is not applied: a callee that takes it frees it, and the
-  slot would hold a freed array. A variant that stores an element has run the
-  executor, so it has no deopt point.
+* The read `a[i]` and the store `a[i] := e` of a variable of type `int4[]`,
+  `int8[]` or `float8[]`, with one subscript, are compiled when the store is
+  the whole expression of an assignment to that variable (the parameter is
+  the assignment target, as the in-place rule has it). The order is the
+  interpreter's: a NULL array reads NULL without the subscript being
+  evaluated, and a store checks its subscript, which must not be NULL (22004),
+  before it computes the value. The inline helpers of `plllvm_types.c` read
+  and write an expanded one-dimensional array that has its Datums: bounds from
+  the lower bound, the null bitmap, and for a store in range the four changes
+  of `array_set_element_expanded()` (`fvalue` and `flat_size` cleared, the
+  Datum set, the null flag cleared). Any other array goes to
+  `plllvm_pj_elem_get_slow()` or `plllvm_pj_elem_set_slow()`, which call
+  `array_get_element()` and `array_set_element()`, and are counted in
+  `elem_slow` of `plllvm_pj_stats()`: an array that was just expanded has no
+  Datums until the first access to it makes them, a NULL array, an empty one,
+  a two-dimensional one, a NULL value and a subscript past either end are
+  always slow. A NULL array that is stored into is replaced by an empty one and
+  expanded into the datum context, and the flat arrays of that are reset at
+  once. The null flag of a read goes to one slot of the function (`%en`),
+  which the inlined helper is the only user of; the slow function returns its
+  answer by value, so that no pointer escapes. The result of a store is the
+  slot's own array, and the code keeps it without `plllvm_pj_assign_array()`,
+  then runs the reset that a call in the value left.
+* Any other expression that reads or writes an array stays with the executor,
+  which is given the variable read-only: a slice, a second subscript, a
+  constructor, an array function, a call or a conversion that is given the
+  array, an element of another array type. The one Param that is passed
+  read/write is that of the assignment target that the in-place rule of
+  PL/pgSQL allows to be modified: the top-level function has a support
+  function for `SupportRequestModifyInPlace` (a subscripted assignment,
+  `array_append`). It is passed read/write through a twin of the parameter,
+  with an id after the datums, which exists in the harvest's copy of the tree
+  only; the slot keeps the array. The twin is made for every expression that
+  is compiled or goes to the executor, as `pj_codegen = boxed` runs the same
+  tree through the executor and would copy the array at every store otherwise;
+  the code of a compiled store reads the datum of the twin's id. The rule that
+  hands the object to any function that holds the only reference is not
+  applied: a callee that takes it frees it, and the slot would hold a freed
+  array.
+* A variant whose only array work is compiled is restartable, as one with no
+  array: its arguments are copies, a store lands in the arrays of the
+  activation, which the handler gives up before it starts the interpreter
+  again, and the code of an element runs no function of the user and never
+  sets `evaluated`. One with an expression of the executor, or a call, has no
+  deopt point. A deopt point is a whole expression, so none falls inside a
+  store.
 * A constant text assigned to an array of `bool`, `int2`, `int4`, `int8`,
   `float4`, `float8`, `numeric` or `text` (these eight only) is converted by
   `array_in` when the function is translated, if the cast is the I/O

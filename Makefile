@@ -449,8 +449,9 @@ check-pj-cmodule: port-ok
 	sh tools/pj_cmodule_pins.sh '$(bindir)' $(PLLLVM_PORT)
 
 # The differential fuzzer: N programs from SEED, as plpgsql and as plpgsql_jit
-# at opt level 0 and 2, NREC recursive ones and NREF over text and numeric,
-# in the throwaway database pj_fuzz.  A difference is reported by seed, with
+# at opt level 0 and 2, NREC recursive ones, NREF over text and numeric and
+# NELEM of reads and stores of array elements, in the throwaway database
+# pj_fuzz.  A difference is reported by seed, with
 # the program and both outputs in results-fuzz/.  Not part of installcheck or
 # verify.  NCX programs of each of the flat and ref modes also have CASE and
 # SELECT INTO (--cx).
@@ -458,6 +459,7 @@ N ?= 2000
 NREC ?= 500
 NREF ?= 500
 NCX ?= 500
+NELEM ?= 500
 SEED ?= 1
 
 .PHONY: fuzz-pj check-pj-fuzz
@@ -478,14 +480,17 @@ fuzz-pj: port-ok
 	    --cx --floor 0.3 --n $(NCX) --seed $(SEED) --opt-level $$o --out results-fuzz/cx-O$$o || rc=1; \
 	  python3 -I tools/pj_fuzz.py --psql '$(bindir)/psql' --host /tmp --port $(PLLLVM_PORT) \
 	    --mode ref --cx --floor 0.3 --n $(NCX) --seed $(SEED) --opt-level $$o --out results-fuzz/refcx-O$$o || rc=1; \
+	  python3 -I tools/pj_fuzz.py --psql '$(bindir)/psql' --host /tmp --port $(PLLLVM_PORT) \
+	    --mode elem --n $(NELEM) --seed $(SEED) --opt-level $$o --out results-fuzz/elem-O$$o || rc=1; \
 	done; exit $$rc
 
 # The classes of the fuzzer on programs of known shape, and 300 programs with
 # CASE and SELECT INTO, flat and ref, of which 15% of those that have the
 # construct in the body must have run it compiled: seed 22:745 is
 # stale-privilege (L2), seed 21:597 frame-mix ((g)); and frame_mix refuses a
-# wrong value.  setup() drops and recreates the fuzz database, so the
-# cluster must be a throwaway
+# wrong value.  150 programs of element reads and stores must have no call
+# of the executor in 90% of them, and deopt.  setup() drops and recreates the
+# fuzz database, so the cluster must be a throwaway
 check-pj-fuzz: port-ok
 	@case "$(origin PLLLVM_PORT):$(PLLLVM_PORT)" in file:*|*:|*:544[2-5]) \
 	  echo "check-pj-fuzz needs the PLLLVM_PORT of a throwaway cluster" >&2; \
@@ -506,6 +511,12 @@ check-pj-fuzz: port-ok
 	python3 -I tools/pj_fuzz.py --psql '$(bindir)/psql' --host /tmp --port $(PLLLVM_PORT) \
 	  --mode ref --cx --floor 0.3 --floor-cx 0.15 --seed 41 --n 300 --opt-level 2 --out results-fuzz/cx-ref > results-fuzz/cx-ref.log; \
 	  rc=$$?; cat results-fuzz/cx-ref.log >&2; [ $$rc = 0 ]
+	python3 -I tools/pj_fuzz.py --psql '$(bindir)/psql' --host /tmp --port $(PLLLVM_PORT) \
+	  --mode elem --seed 21 --n 150 --opt-level 0 --out results-fuzz/elem-O0 > results-fuzz/elem-O0.log; \
+	  rc=$$?; cat results-fuzz/elem-O0.log >&2; [ $$rc = 0 ]
+	python3 -I tools/pj_fuzz.py --psql '$(bindir)/psql' --host /tmp --port $(PLLLVM_PORT) \
+	  --mode elem --seed 22 --n 150 --opt-level 2 --out results-fuzz/elem-O2 > results-fuzz/elem-O2.log; \
+	  rc=$$?; cat results-fuzz/elem-O2.log >&2; [ $$rc = 0 ]
 
 #
 # Every suite of a PR in order; the commit and each exit code go to
