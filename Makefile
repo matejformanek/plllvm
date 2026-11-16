@@ -50,7 +50,7 @@ REGRESS = plllvm_setup $(REGRESS_FEATURES) $(REGRESS_KERNELS) expr_plugin \
 # variant only, REGRESS_PJ_OPT at opt level 3.
 REGRESS_PJ = pj_language pj_basic pj_errors pj_guards pj_execute pj_casts pj_sessions \
 		pj_control pj_kernels pj_ops pj_bounds pj_memory pj_boxed pj_abort pj_planfree pj_calls \
-		pj_byref pj_udf pj_typmod pj_raise pj_array
+		pj_byref pj_udf pj_typmod pj_raise pj_array pj_case pj_into
 REGRESS_PJ_ONCE = pj_states pj_discard pj_execute_diff pj_arms pj_ctxraw \
 		pj_sessions_midcall
 REGRESS_PJ_OPT = pj_kernels pj_ops
@@ -452,10 +452,12 @@ check-pj-cmodule: port-ok
 # at opt level 0 and 2, NREC recursive ones and NREF over text and numeric,
 # in the throwaway database pj_fuzz.  A difference is reported by seed, with
 # the program and both outputs in results-fuzz/.  Not part of installcheck or
-# verify.
+# verify.  NCX programs of each of the flat and ref modes also have CASE and
+# SELECT INTO (--cx).
 N ?= 2000
 NREC ?= 500
 NREF ?= 500
+NCX ?= 500
 SEED ?= 1
 
 .PHONY: fuzz-pj check-pj-fuzz
@@ -472,9 +474,15 @@ fuzz-pj: port-ok
 	    --mode rec --n $(NREC) --seed $(SEED) --opt-level $$o --out results-fuzz/rec-O$$o || rc=1; \
 	  python3 -I tools/pj_fuzz.py --psql '$(bindir)/psql' --host /tmp --port $(PLLLVM_PORT) \
 	    --mode ref --n $(NREF) --seed $(SEED) --opt-level $$o --out results-fuzz/ref-O$$o || rc=1; \
+	  python3 -I tools/pj_fuzz.py --psql '$(bindir)/psql' --host /tmp --port $(PLLLVM_PORT) \
+	    --cx --floor 0.3 --n $(NCX) --seed $(SEED) --opt-level $$o --out results-fuzz/cx-O$$o || rc=1; \
+	  python3 -I tools/pj_fuzz.py --psql '$(bindir)/psql' --host /tmp --port $(PLLLVM_PORT) \
+	    --mode ref --cx --floor 0.3 --n $(NCX) --seed $(SEED) --opt-level $$o --out results-fuzz/refcx-O$$o || rc=1; \
 	done; exit $$rc
 
-# The classes of the fuzzer on programs of known shape: seed 22:745 is
+# The classes of the fuzzer on programs of known shape, and 300 programs with
+# CASE and SELECT INTO, flat and ref, of which 15% of those that have the
+# construct in the body must have run it compiled: seed 22:745 is
 # stale-privilege (L2), seed 21:597 frame-mix ((g)); and frame_mix refuses a
 # wrong value.  setup() drops and recreates the fuzz database, so the
 # cluster must be a throwaway
@@ -492,6 +500,12 @@ check-pj-fuzz: port-ok
 	  --mode rec --seed 21 --start 597 --n 1 --opt-level 2 --out results-fuzz/unit > results-fuzz/unit.log; \
 	  rc=$$?; cat results-fuzz/unit.log >&2; [ $$rc = 0 ] && \
 	  grep -q 'frame-mix=1 history=0 stale-privilege=0 permissive=0' results-fuzz/unit.log
+	python3 -I tools/pj_fuzz.py --psql '$(bindir)/psql' --host /tmp --port $(PLLLVM_PORT) \
+	  --cx --floor 0.3 --floor-cx 0.15 --seed 41 --n 300 --opt-level 0 --out results-fuzz/cx-flat > results-fuzz/cx-flat.log; \
+	  rc=$$?; cat results-fuzz/cx-flat.log >&2; [ $$rc = 0 ]
+	python3 -I tools/pj_fuzz.py --psql '$(bindir)/psql' --host /tmp --port $(PLLLVM_PORT) \
+	  --mode ref --cx --floor 0.3 --floor-cx 0.15 --seed 41 --n 300 --opt-level 2 --out results-fuzz/cx-ref > results-fuzz/cx-ref.log; \
+	  rc=$$?; cat results-fuzz/cx-ref.log >&2; [ $$rc = 0 ]
 
 #
 # Every suite of a PR in order; the commit and each exit code go to

@@ -98,6 +98,7 @@ pg_noreturn extern void plllvm_sqrt_negative(void);
 pg_noreturn extern void plllvm_pj_no_return(void);
 pg_noreturn extern void plllvm_pj_not_null(const char *name);
 pg_noreturn extern void plllvm_pj_for_error(int32 what);
+pg_noreturn extern void plllvm_pj_case_not_found(void);
 struct PjCtx;
 extern void *plllvm_pj_params(struct PjCtx *ctx);
 extern Datum plllvm_pj_boxed_eval(struct PjCtx *ctx, int32 idx);

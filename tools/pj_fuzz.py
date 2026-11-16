@@ -65,13 +65,24 @@ arguments and results, and int4[] locals with element stores, appends,
 slices and subscripts past the ends, in the same steps as flat ones; a bit
 of the first argument inverts each condition, so that a few warm calls reach
 every branch.
+--cx adds CASE statements, searched and simple (a selector of any type of the
+mode, a list of values in a WHEN, with and without ELSE), and SELECT
+expression INTO a variable to a flat or ref program.  The choices of these
+come from a generator of their own, so that a program without --cx is the
+same as it was; with --cx the programs are other ones.  Equal output is also
+what a function gives that PL/pgSQL ran, so the programs that contain each
+construct are counted, and so are those among them whose function ran
+compiled: --floor-cx is the share of those in the body that must have.  The CASE or
+SELECT INTO then counts only if it stands in the body outside any branch,
+and the function had compiled calls and no deopt (a RETURN before it is not
+excluded).
 
 A third of the programs call f directly instead of through the wrapper.  The
 schema name is normalised.  Every statement of a script is a step.
 
 Usage: pj_fuzz.py --psql <psql> --host <dir> --port <port> [--n N] [--start I]
                   [--seed S] [--opt-level 0|2|3] [--out dir] [--floor 0.5]
-                  [--mode flat|rec|ref]
+                  [--mode flat|rec|ref] [--cx] [--floor-cx 0.15]
 """
 import argparse
 import os
@@ -157,8 +168,11 @@ def load_catalog(run_sql):
 
 
 class Gen:
-    def __init__(self, rng, cat):
+    def __init__(self, rng, cat, cx=None):
         self.r = rng
+        self.cx = cx                # a generator for CASE and SELECT INTO, or None
+        self.used = set()           # the constructs of cx the program has
+        self.top = set()            # those that stand in the body, outside any branch
         self.cat = cat
         self.procs = set()          # the functions the program may call
         self.nvar = 0
@@ -427,8 +441,48 @@ class Gen:
         return {"k": "raise", "text": "RAISE %s '%s'%s" % (
             level, msg, "".join(", " + a for a in args))}
 
+    def cx_stmt(self, depth):
+        """A CASE or a SELECT INTO.  The selector and the values of a simple
+        CASE have one type, so the operator of each WHEN is known, and a role
+        that lacks it is refused (42501) by the walk of privileges like any
+        other function the body calls."""
+        c = self.cx
+        av = self.assignable()
+        if av and c.random() < 0.3:
+            v = c.choice(av)
+            self.used.add("into")
+            if depth == 3:
+                self.top.add("into")
+            return {"k": "into", "v": v["name"], "e": self.assign_expr(v["ty"])}
+        self.used.add("case")
+        if depth == 3:
+            self.top.add("case")
+        whens, simple = [], c.random() < 0.55
+        sel = None
+        if simple:
+            ty = c.choice(["int4", "int4", "int8", "float8", "bool"])
+            sel = self.cast(self.expr(ty, 1), ty)
+            # parenthesised: a selector that is itself a CASE expression
+            # would take the END of the statement's WHEN list for its own
+            sel = ("(%s)" % sel[0], sel[1])
+        for _ in range(c.randint(1, 3)):
+            body = self.stmts(depth - 1, c.randint(1, 2))
+            if simple:
+                vals = [self.cast(self.expr(sel[1], 1), sel[1])
+                        for _ in range(c.choice([1, 1, 1, 2, 3]))]
+                for x in vals:
+                    self.op2(sel, "=", x)
+                whens.append((", ".join("(%s)" % x[0] for x in vals), body))
+            else:
+                whens.append((self.boolean(2)[0], body))
+        other = self.stmts(depth - 1, c.randint(1, 2)) if c.random() < 0.6 else None
+        return {"k": "case", "sel": sel[0] if sel else None, "whens": whens,
+                "else": other}
+
     def stmt(self, depth):
         r = self.r
+        if self.cx is not None and depth > 0 and self.cx.random() < 0.15:
+            return self.cx_stmt(depth)
         x = r.random()
         if depth > 0 and r.random() < 0.08:
             return self.raise_stmt()
@@ -582,6 +636,15 @@ def render(s, ind):
         return "%sRETURN %s;\n" % (p, s["e"])
     if k == "raise":
         return "%s%s;\n" % (p, s["text"])
+    if k == "into":
+        return "%sSELECT %s INTO %s;\n" % (p, s["e"], s["v"])
+    if k == "case":
+        o = "%sCASE%s\n" % (p, " " + s["sel"] if s["sel"] else "")
+        for w, b in s["whens"]:
+            o += "%sWHEN %s THEN\n%s" % (p, w, render_stmts(b, ind + 1))
+        if s["else"] is not None:
+            o += "%sELSE\n%s" % (p, render_stmts(s["else"], ind + 1))
+        return o + "%sEND CASE;\n" % p
     if k == "exit":
         return "%s%s%s%s;\n" % (p, "CONTINUE" if s["cont"] else "EXIT",
                                 " " + s["label"] if s["label"] else "",
@@ -622,12 +685,12 @@ def render(s, ind):
 
 
 class Program:
-    def __init__(self, seed, cat):
+    def __init__(self, seed, cat, cx=False):
         r = random.Random(seed)
         self.rng = r
         self.seed = seed
         self.cat = cat
-        g = Gen(r, cat)
+        g = Gen(r, cat, random.Random("cx " + seed) if cx else None)
         self.g = g
         self.params = []
         for i in range(r.choice([0, 1, 1, 2, 2, 3])):
@@ -859,8 +922,11 @@ class RefGen:
     every condition can be flipped by a bit of the first argument, so that a
     few calls reach every branch."""
 
-    def __init__(self, rng, cat):
+    def __init__(self, rng, cat, cx=None):
         self.r = rng
+        self.cx = cx                # as in Gen
+        self.used = set()
+        self.top = set()
         self.cat = cat
         self.procs = set()
         self.nvar = 0
@@ -1113,8 +1179,52 @@ class RefGen:
     def stmts(self, depth, n):
         return [self.stmt(depth) for _ in range(n)]
 
+    def cx_stmt(self, depth):
+        """A CASE over a selector of text, varchar, numeric or integer, or a
+        SELECT INTO a variable of one of them."""
+        c = self.cx
+        av = self.assignable()
+        if av and c.random() < 0.3:
+            v = c.choice(av)
+            self.used.add("into")
+            if depth == 3:
+                self.top.add("into")
+            e = self.value(v["ty"])
+            self.note_typmod(v)
+            return {"k": "into", "v": v["name"], "e": e}
+        self.used.add("case")
+        if depth == 3:
+            self.top.add("case")
+        whens, sel = [], None
+        if c.random() < 0.4:
+            for _ in range(c.randint(1, 3)):
+                whens.append((self.boolean(2), self.stmts(depth - 1, c.randint(1, 2))))
+        else:
+            # the selector takes one of four values, by two bits of the first
+            # argument, so that every arm is reached by some call
+            ty = c.choice(["text", "text", "varchar", "numeric", "int4"])
+            pool = [c.choice(REF_LITS["text" if ty == "varchar" else ty])
+                    if c.random() < 0.9 else "NULL" for _ in range(4)]
+            bit = self.nbit
+            self.nbit += 2
+            for op in (">>", "&", "+"):
+                self.use(self.cat.op("integer", op, "integer"))
+            self.use(self.cat.op(self.base(ty), "=", self.base(ty)))
+            sel = "(ARRAY[%s]::%s[])[((sel >> %d) & 3) + 1]" % (
+                ", ".join(pool), self.base(ty), bit)
+            if ty == "varchar":
+                sel = "(%s)::varchar" % sel
+            sel = "(%s)" % sel
+            for _ in range(c.randint(1, 3)):
+                vals = ["(%s)" % c.choice(pool) for _ in range(c.choice([1, 1, 2]))]
+                whens.append((", ".join(vals), self.stmts(depth - 1, c.randint(1, 2))))
+        other = self.stmts(depth - 1, c.randint(1, 2)) if c.random() < 0.6 else None
+        return {"k": "case", "sel": sel, "whens": whens, "else": other}
+
     def stmt(self, depth):
         r = self.r
+        if self.cx is not None and depth > 0 and self.cx.random() < 0.18:
+            return self.cx_stmt(depth)
         if r.random() < 0.1 and self.var("arr") is not None:
             return self.arr_stmt()
         x = r.random()
@@ -1223,18 +1333,19 @@ class RefProgram(Program):
     """f(sel, ...) over text, varchar, numeric and integer arguments, locals
     and results; w(), the steps and the walk are those of Program."""
 
-    def __init__(self, seed, cat):
+    def __init__(self, seed, cat, cx=False):
         r = random.Random(seed)
         self.rng = r
         self.seed = seed
         self.cat = cat
-        g = RefGen(r, cat)
+        g = RefGen(r, cat, random.Random("cx " + seed) if cx else None)
         self.g = g
         self.params = [{"name": "sel", "ty": "int4", "assign": False}]
         for i in range(r.choice([1, 1, 2, 2, 3])):
             v = {"name": "p%d" % (i + 1), "ty": r.choice(REF_POOL), "assign": True}
             self.params.append(v)
             g.scope.append(v)
+        self.cx = cx
         self.rettype = r.choice(["text", "text", "numeric", "int4", "varchar"])
         g.rettype = self.rettype
         self.attrs = r.choice(["", "", "IMMUTABLE", "STABLE", "IMMUTABLE STRICT"])
@@ -1294,7 +1405,7 @@ class RefProgram(Program):
         # every condition both ways: a mask and its complement
         st.append("SELECT f(%s);" % self.args("harmless", 0))
         st.append("SELECT f(%s);" % self.args("harmless", full))
-        for _ in range(8):
+        for _ in range(24 if self.cx else 8):
             m = r.randrange(full + 1)
             st.append("SELECT f(%s);" % self.args("harmless", m))
             st.append("SELECT f(%s);" % self.args("harmless", full ^ m))
@@ -1747,7 +1858,7 @@ def script(prog, lang, status=False):
     o += "\\echo @@ end\nROLLBACK;\nRESET ROLE;\n\\echo @@ leak\n" + LEAK
     if status:
         o += ("\\echo @@ status\n"
-              "SELECT state, coalesce(reason, ''), compiled_calls, calls FROM "
+              "SELECT state, coalesce(reason, ''), compiled_calls, calls, deopts FROM "
               "plllvm_pj_status('%s.f%s'::regprocedure);\n" % (sch, prog.sig()))
     return o + CLEAN
 
@@ -1893,6 +2004,8 @@ def main():
     ap.add_argument("--out", default="results-fuzz")
     ap.add_argument("--floor", type=float, default=0.5)
     ap.add_argument("--mode", choices=["flat", "rec", "ref"], default="flat")
+    ap.add_argument("--cx", action="store_true", help="CASE and SELECT INTO (flat, ref)")
+    ap.add_argument("--floor-cx", type=float, default=0.15, dest="floor_cx")
     ap.add_argument("-v", action="store_true")
     ap.add_argument("--selftest", action="store_true", help="check frame_mix, no cluster")
     args = ap.parse_args()
@@ -1904,6 +2017,8 @@ def main():
     os.makedirs(args.out, exist_ok=True)
     setup(args)
     if args.mode == "rec":
+        if args.cx:
+            ap.error("--cx is for flat and ref programs")
         sys.exit(main_rec(args))
     cat = load_catalog(lambda q: admin(args, q))
     if args.mode == "ref":
@@ -1912,10 +2027,11 @@ def main():
         cat.universe = universe
     tally = Counter()
     reasons = Counter()
+    cx_reasons = {"case": Counter(), "into": Counter()}
     failed = False
     for i in range(args.start, args.start + args.n):
         seed = "%d:%d" % (args.seed, i)
-        prog = (RefProgram if args.mode == "ref" else Program)(seed, cat)
+        prog = (RefProgram if args.mode == "ref" else Program)(seed, cat, args.cx)
         a, b = run_pair(args, prog)
         verdict, step = compare(args, prog, a, b, tally)
         tally[verdict] += 1
@@ -1924,10 +2040,26 @@ def main():
         tally["jit-42501"] += b.count("ERROR:  42501") + b.count("\n42501 ")
         m = re.search(r"@@ status\n(.*)", b, re.S)
         st = m.group(1).strip().split("\n")[0].split("|") if m else []
-        if len(st) == 4 and int(st[2]) > 0:
+        ok = len(st) == 5
+        ran = ok and int(st[2]) > 0
+        if ran:
             tally["compiled"] += 1
         else:
-            reasons["%s %s" % tuple(st[:2]) if len(st) == 4 else "no status"] += 1
+            reasons["%s %s" % tuple(st[:2]) if ok else "no status"] += 1
+        for k in prog.g.used:
+            tally["has-" + k] += 1
+            # the construct ran compiled: it stands outside any branch, and no
+            # call left the code at a deopt point
+            if k in prog.g.top:
+                tally["top-" + k] += 1
+            if ran and k in prog.g.top and int(st[4]) == 0:
+                tally["compiled-" + k] += 1
+            elif ran and k in prog.g.top:
+                cx_reasons[k]["deopt"] += 1
+            elif ran:
+                cx_reasons[k]["nested in a branch"] += 1
+            else:
+                cx_reasons[k]["%s %s" % tuple(st[:2]) if ok else "no status"] += 1
         if args.v or verdict != "equal":
             print("seed %s: %s%s" % (seed, verdict, "" if step is None else " at step %d" % step))
         if verdict in ("MISMATCH", "PERMISSIVE"):
@@ -1959,6 +2091,17 @@ def main():
     if comp < args.floor * args.n:
         print("pj_fuzz: compiled fraction below the floor of %.0f%%" % (100 * args.floor))
         failed = True
+    if args.cx:
+        for k in ("case", "into"):
+            print("pj_fuzz: %s: programs with it %d, in the body %d, compiled %d" % (
+                k, tally["has-" + k], tally["top-" + k], tally["compiled-" + k]))
+            for why, v in cx_reasons[k].most_common(6):
+                print("  with %s, not compiled: %5d  %s" % (k, v, why))
+            if tally["top-" + k] < 5 or \
+                    tally["compiled-" + k] < args.floor_cx * tally["top-" + k]:
+                print("pj_fuzz: %s: too few programs, or compiled below the floor of "
+                      "%.0f%%" % (k, 100 * args.floor_cx))
+                failed = True
     sys.exit(1 if failed else 0)
 
 

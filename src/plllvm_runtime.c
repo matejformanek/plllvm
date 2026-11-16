@@ -49,6 +49,7 @@ const plllvm_host_symbol plllvm_host_symbols[] =
 	{"plllvm_pj_no_return", (void *) plllvm_pj_no_return},
 	{"plllvm_pj_not_null", (void *) plllvm_pj_not_null},
 	{"plllvm_pj_for_error", (void *) plllvm_pj_for_error},
+	{"plllvm_pj_case_not_found", (void *) plllvm_pj_case_not_found},
 	{"plllvm_pj_params", (void *) plllvm_pj_params},
 	{"plllvm_pj_boxed_eval", (void *) plllvm_pj_boxed_eval},
 	{"plllvm_pj_boxed_reset", (void *) plllvm_pj_boxed_reset},
@@ -177,6 +178,16 @@ plllvm_pj_not_null(const char *name)
 				   (errcode(ERRCODE_NULL_VALUE_NOT_ALLOWED),
 					errmsg("null value cannot be assigned to variable \"%s\" declared NOT NULL",
 						   name)));
+}
+
+/* a CASE statement with no ELSE that matched nothing (exec_stmt_case) */
+void
+plllvm_pj_case_not_found(void)
+{
+	ereport_domain(ERROR, PG_TEXTDOMAIN("plpgsql"),
+				   (errcode(ERRCODE_CASE_NOT_FOUND),
+					errmsg("case not found"),
+					errhint("CASE statement is missing ELSE part.")));
 }
 
 /* the errors of exec_stmt_fori */

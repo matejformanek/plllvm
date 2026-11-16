@@ -629,6 +629,7 @@ void	   *referenced_functions[] =
 	plllvm_pj_no_return,
 	plllvm_pj_not_null,
 	plllvm_pj_for_error,
+	plllvm_pj_case_not_found,
 	plllvm_pj_params,
 	plllvm_pj_boxed_eval,
 	plllvm_pj_boxed_reset,

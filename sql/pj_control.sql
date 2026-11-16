@@ -182,7 +182,7 @@ SELECT pc_end(0);  -- fail
 SELECT pc_end(0);  -- fail
 SELECT pj_expect('pc_end(int)', 'compiled') \gset
 
--- what is not compiled: a label of the function, CASE
+-- what is not compiled: a label of the function
 CREATE FUNCTION pc_fnlabel() RETURNS int LANGUAGE :pj_lang AS $$
 BEGIN
   LOOP EXIT pc_fnlabel; END LOOP;
@@ -192,7 +192,7 @@ CREATE FUNCTION pc_case(n int) RETURNS int LANGUAGE :pj_lang AS $$
 BEGIN
   CASE WHEN n > 0 THEN RETURN 1; ELSE RETURN 2; END CASE;
 END $$;
--- RAISE is compiled (pj_raise)
+-- CASE and RAISE are compiled (pj_case, pj_raise)
 CREATE FUNCTION pc_raise(n int) RETURNS int LANGUAGE :pj_lang AS $$
 BEGIN
   RAISE NOTICE 'x';
@@ -203,5 +203,5 @@ SELECT pc_fnlabel();  -- fail
 SELECT pc_case(1), pc_case(0), pc_raise(1);
 SELECT pc_case(1), pc_case(0), pc_raise(1);
 SELECT pj_expect('pc_fnlabel()', 'declined:label') \gset
-SELECT pj_expect('pc_case(int)', 'declined:statement:CASE') \gset
+SELECT pj_expect('pc_case(int)', 'compiled') \gset
 SELECT pj_expect('pc_raise(int)', 'compiled') \gset
