@@ -258,6 +258,19 @@ Only `plllvm_jit.c` and `plllvm_error.cpp` include LLVM headers.
   the function; one below ERROR has sent a message, so like a site it leaves
   no deopt point to a variant that has an expression unplanned, and the
   function waits.
+* A simple CASE keeps its selector in a variable of the function, which
+  PL/pgSQL declares `int4` and retypes to the type of the value when it
+  runs. The harvest keeps a copy of that variable with the type of the
+  selector's plan, built by PL/pgSQL's own function, and every reader of a
+  datum (slots, parameters of the executor, entry stores, the assignment of
+  a value passed by reference) goes through it, so the WHENs, which carry a
+  Param of that type, are read right. A selector of a domain, an array or a
+  type we keep in no slot declines the function, and so does a statement
+  that names the variable outside its WHENs. A WHEN counts as not planned
+  while its selector is not. The variable is NULL again before an arm runs
+  and before the ELSE. A CASE without an ELSE that matches nothing raises
+  from the statement, which names no expression, so the call after it is
+  not sent to PL/pgSQL.
 * Statements are walked twice in the same order, skipping what a RETURN, EXIT,
   CONTINUE or RAISE that raises makes unreachable: the first walk collects the expressions and
   positions, the second emits code and takes the expressions back in that

@@ -8,7 +8,7 @@ SET plllvm.regress_test_mode = on;
 CREATE FUNCTION ps_inc(n int) RETURNS int LANGUAGE plpgsql_jit AS $$
 BEGIN RETURN n + 1; END $$;
 CREATE FUNCTION ps_if(n int) RETURNS int LANGUAGE plpgsql_jit AS $$
-BEGIN CASE WHEN n > 0 THEN RETURN 1; ELSE RETURN 2; END CASE; END $$;
+BEGIN PERFORM n; RETURN 1; END $$;
 CREATE FUNCTION ps_decl(n int) RETURNS int LANGUAGE plpgsql_jit AS $$
 DECLARE x numeric := n; BEGIN RETURN x; END $$;
 CREATE FUNCTION ps_exc(n int) RETURNS int LANGUAGE plpgsql_jit AS $$
@@ -64,18 +64,18 @@ SELECT p.proname, s.state, s.reason, s.last_path, s.calls, s.compiled_calls,
   FROM pg_proc p, LATERAL plllvm_pj_status(p.oid::regprocedure) s
  WHERE p.proname LIKE 'ps\_%' AND p.prolang = (SELECT oid FROM pg_language WHERE lanname = 'plpgsql_jit')
  ORDER BY 1;
- proname |  state   |     reason      |        last_path         | calls | compiled_calls | translations 
----------+----------+-----------------+--------------------------+-------+----------------+--------------
- ps_cast | declined | cast            | declined:cast            |     2 |              0 |            0
- ps_decl | declined | cast            | declined:cast            |     2 |              0 |            0
- ps_exc  | declined | exception block | declined:exception block |     2 |              0 |            0
- ps_if   | declined | statement:CASE  | declined:statement:CASE  |     2 |              0 |            0
- ps_inc  | compiled |                 | compiled                 |     2 |              1 |            1
- ps_poly | declined | signature       | declined:signature       |     2 |              0 |            0
- ps_rnd  | declined | volatile callee | declined:volatile callee |     2 |              0 |            0
- ps_sub  | declined | not simple      | declined:not simple      |     2 |              0 |            0
- ps_text | compiled |                 | compiled                 |     2 |              1 |            1
- ps_user | compiled |                 | compiled                 |     2 |              1 |            1
+ proname |  state   |      reason       |         last_path          | calls | compiled_calls | translations 
+---------+----------+-------------------+----------------------------+-------+----------------+--------------
+ ps_cast | declined | cast              | declined:cast              |     2 |              0 |            0
+ ps_decl | declined | cast              | declined:cast              |     2 |              0 |            0
+ ps_exc  | declined | exception block   | declined:exception block   |     2 |              0 |            0
+ ps_if   | declined | statement:PERFORM | declined:statement:PERFORM |     2 |              0 |            0
+ ps_inc  | compiled |                   | compiled                   |     2 |              1 |            1
+ ps_poly | declined | signature         | declined:signature         |     2 |              0 |            0
+ ps_rnd  | declined | volatile callee   | declined:volatile callee   |     2 |              0 |            0
+ ps_sub  | declined | not simple        | declined:not simple        |     2 |              0 |            0
+ ps_text | compiled |                   | compiled                   |     2 |              1 |            1
+ ps_user | compiled |                   | compiled                   |     2 |              1 |            1
 (10 rows)
 
 -- a declined function keeps no code and no translation

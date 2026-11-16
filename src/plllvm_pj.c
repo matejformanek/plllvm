@@ -62,11 +62,16 @@ typedef Datum (*plpgsql_call_handler_t) (PG_FUNCTION_ARGS);
 typedef const char *(*plpgsql_stmt_typename_t) (PLpgSQL_stmt *stmt);
 typedef int (*plpgsql_recognize_err_condition_t) (const char *condname,
 												  bool allow_sqlstate);
+typedef PLpgSQL_type *(*plpgsql_build_datatype_t) (Oid typeOid, int32 typmod,
+												   Oid collation,
+												   TypeName *origtypname);
 
 StaticAssertVariableIsOfType(&plpgsql_compile, plpgsql_compile_t);
 StaticAssertVariableIsOfType(&plpgsql_stmt_typename, plpgsql_stmt_typename_t);
 StaticAssertVariableIsOfType(&plpgsql_recognize_err_condition,
 							 plpgsql_recognize_err_condition_t);
+StaticAssertVariableIsOfType(&plpgsql_build_datatype,
+							 plpgsql_build_datatype_t);
 
 typedef enum PjState
 {
@@ -128,6 +133,7 @@ static plpgsql_compile_t compile_p = NULL;
 static plpgsql_call_handler_t call_handler_p = NULL;
 static plpgsql_stmt_typename_t stmt_typename_p = NULL;
 static plpgsql_recognize_err_condition_t err_condition_p = NULL;
+static plpgsql_build_datatype_t build_datatype_p = NULL;
 
 PG_FUNCTION_INFO_V1(plllvm_pj_call_handler);
 
@@ -256,6 +262,8 @@ load_plpgsql(void)
 	err_condition_p = (plpgsql_recognize_err_condition_t)
 		load_external_function(lib, "plpgsql_recognize_err_condition", true,
 							   NULL);
+	build_datatype_p = (plpgsql_build_datatype_t)
+		load_external_function(lib, "plpgsql_build_datatype", true, NULL);
 	call_handler_p = (plpgsql_call_handler_t)
 		load_external_function(lib, "plpgsql_call_handler", true, NULL);
 }
@@ -264,6 +272,13 @@ const char *
 plllvm_pj_stmt_typename(void *stmt)
 {
 	return stmt_typename_p((PLpgSQL_stmt *) stmt);
+}
+
+/* the type of a value, as PL/pgSQL builds it for a variable */
+PLpgSQL_type *
+plllvm_pj_build_datatype(Oid typid, int32 typmod, Oid collation)
+{
+	return build_datatype_p(typid, typmod, collation, NULL);
 }
 
 /* the SQLSTATE of a condition name or of a SQLSTATE literal, as RAISE does */

@@ -76,6 +76,7 @@ typedef struct PjEnv
 typedef struct PjParams
 {
 	PLpgSQL_function *func;
+	PjHarvest  *h;
 	Bitmapset  *ids;
 } PjParams;
 
@@ -109,6 +110,7 @@ typedef struct PjScopeWalk
 	PjScope    *scope;
 	List	   *frames;			/* PjFrame, innermost first */
 	int			cur_pos;		/* position of the statement or variable */
+	Bitmapset  *case_vars;		/* the variables of the simple CASEs so far */
 } PjScopeWalk;
 
 typedef struct PjEmit
@@ -178,6 +180,10 @@ static bool funcs_callback(Oid funcid, void *context);
 static const char *harvest_expr(PLpgSQL_function *func, PjHarvest *h,
 								PjEnv *env, PjExpr *pe, List **funcs);
 static PLpgSQL_var *arg_var(PLpgSQL_function *func, int dno);
+static PLpgSQL_var *pj_var(PjHarvest *h, PLpgSQL_function *func, int dno);
+static const char *case_view(PLpgSQL_function *func, PjHarvest *h,
+							 const PjExpr *pe);
+static bool case_param_walker(Node *node, Bitmapset **found);
 static bool byref_type(Oid typid);
 static Param *rw_param(PLpgSQL_expr *expr, Expr *tree, int paramid);
 static bool fold_array_ok(PjExpr *pe);
@@ -189,6 +195,8 @@ static void emit_stmts(PjEmit *em, List *stmts);
 static void emit_stmt(PjEmit *em, PLpgSQL_stmt *stmt);
 static void emit_block(PjEmit *em, PLpgSQL_stmt_block *block);
 static void emit_assign(PjEmit *em, PLpgSQL_stmt_assign *stmt);
+static void emit_case(PjEmit *em, PLpgSQL_stmt_case *stmt);
+static void case_discard(PjEmit *em, PLpgSQL_var *var);
 static void emit_if(PjEmit *em, PLpgSQL_stmt_if *stmt);
 static void emit_loop(PjEmit *em, PLpgSQL_stmt *stmt);
 static void emit_fori(PjEmit *em, PLpgSQL_stmt_fori *stmt);
@@ -309,6 +317,8 @@ walk_stmt(PjScopeWalk *w, PLpgSQL_stmt *stmt)
 				reason = var_reason(func, assign->varno);
 				if (reason != NULL)
 					return reason;
+				if (bms_is_member(assign->varno, w->case_vars))
+					return "datum:case variable";
 				var = (PLpgSQL_var *) func->datums[assign->varno];
 				scope_expr(w, assign->expr, assign->expr, var->datatype->typoid,
 						   var->datatype->atttypmod);
@@ -395,7 +405,7 @@ walk_stmt(PjScopeWalk *w, PLpgSQL_stmt *stmt)
 				{
 					PLpgSQL_var *var = arg_var(func, ret->retvarno);
 
-					if (var == NULL)
+					if (var == NULL || bms_is_member(ret->retvarno, w->case_vars))
 						return "datum:record";
 					scope_expr(w, ret, NULL, func->fn_rettype, -1);
 					((PjExpr *) llast(w->scope->exprs))->retvarno =
@@ -424,6 +434,34 @@ walk_stmt(PjScopeWalk *w, PLpgSQL_stmt *stmt)
 				if (!raise_terminal(raise) || list_length(raise->params) > 1)
 					w->scope->has_notice = true;
 				return NULL;
+			}
+
+		case PLPGSQL_STMT_CASE:
+			{
+				PLpgSQL_stmt_case *cs = (PLpgSQL_stmt_case *) stmt;
+				int			sel = -1;
+
+				/*
+				 * A simple CASE keeps its value in a variable of the
+				 * function, which has the type of the value (exec_stmt_case)
+				 */
+				if (cs->t_expr != NULL)
+				{
+					scope_expr(w, cs->t_expr, cs->t_expr, InvalidOid, -1);
+					sel = list_length(w->scope->exprs) - 1;
+					((PjExpr *) llast(w->scope->exprs))->case_var = cs->t_varno;
+					w->case_vars = bms_add_member(w->case_vars, cs->t_varno);
+				}
+				foreach_ptr(PLpgSQL_case_when, cwt, cs->case_when_list)
+				{
+					w->cur_pos = stmt->stmtid;
+					scope_expr(w, cwt->expr, cwt->expr, BOOLOID, -1);
+					((PjExpr *) llast(w->scope->exprs))->case_sel = sel;
+					reason = walk_stmts(w, cwt->stmts);
+					if (reason != NULL)
+						return reason;
+				}
+				return walk_stmts(w, cs->else_stmts);
 			}
 
 		default:
@@ -513,6 +551,8 @@ scope_expr(PjScopeWalk *w, const void *owner, PLpgSQL_expr *expr,
 	pe->dsttype = dsttype;
 	pe->dsttypmod = dsttypmod;
 	pe->pos = w->cur_pos;
+	pe->case_var = -1;
+	pe->case_sel = -1;
 	w->scope->exprs = lappend(w->scope->exprs, pe);
 }
 
@@ -642,6 +682,14 @@ plllvm_pj_classify(PjScope *scope)
 		else
 			pe->h1 = PJ_H1_READY;
 
+		/*
+		 * A WHEN is read against the type of its selector's value, which only
+		 * a selector that is planned has
+		 */
+		if (pe->h1 == PJ_H1_READY && pe->case_sel >= 0 &&
+			((PjExpr *) list_nth(scope->exprs, pe->case_sel))->h1 != PJ_H1_READY)
+			pe->h1 = PJ_H1_UNPLANNED;
+
 		switch (pe->h1)
 		{
 			case PJ_H1_READY:
@@ -670,7 +718,23 @@ plllvm_pj_harvest(PLpgSQL_function *func, const PjScope *scope, PjHarvest *h)
 	List	   *funcs = NIL;
 	const char *reason = NULL;
 
+	Bitmapset  *case_vars = NULL;
+
 	env_init(&env, func, h);
+
+	/* before anything reads a datum: a simple CASE's variable has its type */
+	foreach_ptr(PjExpr, pe, scope->exprs)
+	{
+		if (pe->case_var < 0)
+			continue;
+		case_vars = bms_add_member(case_vars, pe->case_var);
+		if (pe->h1 == PJ_H1_READY)
+		{
+			reason = case_view(func, h, pe);
+			if (reason != NULL)
+				return reason;
+		}
+	}
 
 	oldcxt = MemoryContextSwitchTo(h->cxt);
 	/* then a copy of its statement's for each expression, naming it */
@@ -692,7 +756,7 @@ plllvm_pj_harvest(PLpgSQL_function *func, const PjScope *scope, PjHarvest *h)
 	h->ptypes = palloc0_array(Oid, h->nparams);
 	for (int dno = 0; dno < func->ndatums; dno++)
 	{
-		PLpgSQL_var *var = arg_var(func, dno);
+		PLpgSQL_var *var = pj_var(h, func, dno);
 
 		if (var != NULL)
 			h->ptypes[dno] = h->ptypes[func->ndatums + dno] =
@@ -722,7 +786,7 @@ plllvm_pj_harvest(PLpgSQL_function *func, const PjScope *scope, PjHarvest *h)
 			}
 			else
 			{
-				PLpgSQL_var *var = arg_var(func, pe->retvarno);
+				PLpgSQL_var *var = pj_var(h, func, pe->retvarno);
 				Param	   *p = makeNode(Param);
 
 				p->paramkind = PARAM_EXTERN;
@@ -740,11 +804,30 @@ plllvm_pj_harvest(PLpgSQL_function *func, const PjScope *scope, PjHarvest *h)
 			if (reason == NULL)
 				reason = harvest_expr(func, h, &env, copy, &funcs);
 
+			/*
+			 * The variable of a simple CASE is read by its WHENs, with the
+			 * type of the selector, and by nothing else
+			 */
+			if (reason == NULL && case_vars != NULL)
+			{
+				Bitmapset  *found = NULL;
+
+				case_param_walker((Node *) copy->tree, &found);
+				if (copy->case_sel >= 0)
+				{
+					PjExpr	   *sel = list_nth(scope->exprs, copy->case_sel);
+
+					found = bms_del_member(found, sel->case_var);
+				}
+				if (bms_overlap(found, case_vars))
+					reason = "datum:case variable";
+			}
+
 			/* the one Param that may change the target in place */
 			if (reason == NULL && pe->expr != NULL &&
 				copy->path == PJ_PATH_BOXED && pe->expr->target_param >= 0)
 			{
-				PLpgSQL_var *target = arg_var(func, pe->expr->target_param);
+				PLpgSQL_var *target = pj_var(h, func, pe->expr->target_param);
 				Param	   *rw = NULL;
 
 				if (target != NULL && target->datatype->typisarray)
@@ -799,7 +882,7 @@ harvest_expr(PLpgSQL_function *func, PjHarvest *h, PjEnv *env, PjExpr *pe,
 	{
 		Param	   *p = (Param *) tree;
 		PLpgSQL_var *var = p->paramkind == PARAM_EXTERN ?
-			arg_var(func, p->paramid - 1) : NULL;
+			pj_var(h, func, p->paramid - 1) : NULL;
 
 		move = var != NULL && var->datatype->typoid == p->paramtype &&
 			(!var->datatype->typisarray || pe->retvarno >= 0);
@@ -817,7 +900,7 @@ harvest_expr(PLpgSQL_function *func, PjHarvest *h, PjEnv *env, PjExpr *pe,
 		pe->path = PJ_PATH_MOVE;
 	else
 	{
-		PjParams	params = {func, NULL};
+		PjParams	params = {func, h, NULL};
 
 		initStringInfo(&key);
 		initStringInfo(&facts);
@@ -957,6 +1040,65 @@ arg_var(PLpgSQL_function *func, int dno)
 		(!var->datatype->typbyval && !byref_type(var->datatype->typoid)))
 		return NULL;
 	return var;
+}
+
+/*
+ * arg_var() as this harvest reads it: the variable of a simple CASE has the
+ * type of its selector's value, which PL/pgSQL gives it at run time
+ */
+static PLpgSQL_var *
+pj_var(PjHarvest *h, PLpgSQL_function *func, int dno)
+{
+	PLpgSQL_var *var = arg_var(func, dno);
+
+	if (var != NULL && h->vars != NULL && h->vars[dno] != NULL)
+		return h->vars[dno];
+	return var;
+}
+
+/*
+ * The variable of a simple CASE for the type of the value of its selector.
+ * PL/pgSQL builds the type the same way, for the copy of the datum it
+ * executes with (exec_stmt_case).  A type we would not keep in a slot, or
+ * that checks its value at the assignment, declines.
+ */
+static const char *
+case_view(PLpgSQL_function *func, PjHarvest *h, const PjExpr *pe)
+{
+	PLpgSQL_expr *expr = pe->expr;
+	PLpgSQL_var *view;
+	PLpgSQL_type *type;
+	MemoryContext oldcxt = MemoryContextSwitchTo(h->cxt);
+
+	if (h->vars == NULL)
+		h->vars = palloc0_array(PLpgSQL_var *, func->ndatums);
+	type = plllvm_pj_build_datatype(expr->expr_simple_type,
+									expr->expr_simple_typmod,
+									func->fn_input_collation);
+	view = palloc_object(PLpgSQL_var);
+	memcpy(view, func->datums[pe->case_var], sizeof(PLpgSQL_var));
+	view->datatype = type;
+	h->vars[pe->case_var] = view;
+	MemoryContextSwitchTo(oldcxt);
+
+	if (type->typtype == TYPTYPE_DOMAIN || type->typisarray ||
+		(!type->typbyval && !byref_type(type->typoid)))
+		return psprintf("datum:%s", type->typname);
+	return NULL;
+}
+
+/* the datums the Params of a tree read */
+static bool
+case_param_walker(Node *node, Bitmapset **found)
+{
+	if (node == NULL)
+		return false;
+	if (IsA(node, Param) && ((Param *) node)->paramkind == PARAM_EXTERN)
+	{
+		*found = bms_add_member(*found, ((Param *) node)->paramid - 1);
+		return false;
+	}
+	return expression_tree_walker(node, case_param_walker, found);
 }
 
 /*
@@ -1123,7 +1265,7 @@ param_check(plllvm_expr_env *base, const Param *p, StringInfo facts)
 
 	if (p->paramkind != PARAM_EXTERN)
 		return false;
-	var = arg_var(env->func, p->paramid - 1);
+	var = pj_var(env->h, env->func, p->paramid - 1);
 	if (var == NULL || var->datatype->typoid != p->paramtype ||
 		var->datatype->typisarray)
 		return false;
@@ -1462,7 +1604,7 @@ params_walker(Node *node, PjParams *ctx)
 	{
 		Param	   *p = (Param *) node;
 		PLpgSQL_var *var = p->paramkind == PARAM_EXTERN ?
-			arg_var(ctx->func, p->paramid - 1) : NULL;
+			pj_var(ctx->h, ctx->func, p->paramid - 1) : NULL;
 
 		if (var == NULL || var->datatype->typoid != p->paramtype)
 			return true;
@@ -1598,11 +1740,11 @@ plllvm_pj_emit(PLpgSQL_function *func, PjHarvest *h, PjVariant *v)
 
 	for (int dno = 0; dno < func->ndatums; dno++)
 	{
-		if (arg_var(func, dno) == NULL)
+		if (pj_var(h, func, dno) == NULL)
 			continue;
 		plllvm_ir_emit(em.ir, "%%v%d = alloca i64", dno);
 		plllvm_ir_emit(em.ir, "%%n%d = alloca i1", dno);
-		if (!arg_var(func, dno)->datatype->typbyval)
+		if (!pj_var(h, func, dno)->datatype->typbyval)
 			plllvm_ir_emit(em.ir, "%%o%d = alloca i1", dno);
 	}
 	foreach_int(id, h->fori)
@@ -1614,13 +1756,13 @@ plllvm_pj_emit(PLpgSQL_function *func, PjHarvest *h, PjVariant *v)
 
 	for (int dno = 0; dno < func->ndatums; dno++)
 	{
-		if (arg_var(func, dno) == NULL)
+		if (pj_var(h, func, dno) == NULL)
 			continue;
 		/* FOUND is false, other variables NULL, arguments are stored below */
 		plllvm_ir_emit(em.ir, "store i64 0, ptr %%v%d", dno);
 		plllvm_ir_emit(em.ir, "store i1 %s, ptr %%n%d",
 					   dno == func->found_varno ? "false" : "true", dno);
-		if (!arg_var(func, dno)->datatype->typbyval)
+		if (!pj_var(h, func, dno)->datatype->typbyval)
 			plllvm_ir_emit(em.ir, "store i1 false, ptr %%o%d", dno);
 
 		for (int i = 0; i < func->fn_nargs; i++)
@@ -1638,7 +1780,7 @@ plllvm_pj_emit(PLpgSQL_function *func, PjHarvest *h, PjVariant *v)
 			value = plllvm_ir_tmp(em.ir);
 			plllvm_ir_emit(em.ir, "%s = load i64, ptr %s", value, slot);
 			/* an array is expanded once, and the copy is ours */
-			if (arg_var(func, dno)->datatype->typisarray)
+			if (pj_var(h, func, dno)->datatype->typisarray)
 			{
 				const char *expanded = plllvm_ir_tmp(em.ir);
 
@@ -1749,6 +1891,9 @@ emit_stmt(PjEmit *em, PLpgSQL_stmt *stmt)
 		case PLPGSQL_STMT_IF:
 			emit_if(em, (PLpgSQL_stmt_if *) stmt);
 			break;
+		case PLPGSQL_STMT_CASE:
+			emit_case(em, (PLpgSQL_stmt_case *) stmt);
+			break;
 		case PLPGSQL_STMT_LOOP:
 		case PLPGSQL_STMT_WHILE:
 			emit_loop(em, stmt);
@@ -1839,6 +1984,81 @@ emit_assign(PjEmit *em, PLpgSQL_stmt_assign *stmt)
 		store_var(em, stmt->varno, datum, isnull);
 	else
 		assign_var(em, var, datum, isnull, true);
+}
+
+/*
+ * exec_stmt_case().  A simple CASE assigns the value of its selector to a
+ * variable of that value's type, each WHEN tests it, and the variable is
+ * NULL again before the arm runs, or the ELSE.  A CASE that matches nothing
+ * and has no ELSE is an error of the statement, not of any expression.
+ */
+static void
+emit_case(PjEmit *em, PLpgSQL_stmt_case *stmt)
+{
+	const char *done = plllvm_ir_label(em->ir);
+	PLpgSQL_var *var = NULL;
+	int			boxed0 = em->nboxed;
+
+	if (stmt->t_expr != NULL)
+	{
+		const char *datum;
+		const char *isnull;
+
+		var = pj_var(em->h, em->func, stmt->t_varno);
+		em->hold_reset = !var->datatype->typbyval;
+		expr_value(em, stmt->t_expr, &datum, &isnull);
+		em->hold_reset = false;
+		if (var->datatype->typbyval)
+			store_var(em, stmt->t_varno, datum, isnull);
+		else
+			assign_var(em, var, datum, isnull, true);
+	}
+
+	foreach_ptr(PLpgSQL_case_when, cwt, stmt->case_when_list)
+	{
+		const char *taken = expr_taken(em, cwt->expr);
+		const char *then = plllvm_ir_label(em->ir);
+		const char *next = plllvm_ir_label(em->ir);
+		bool		pending = em->poll_pending;
+
+		branch_if(em, taken, then, next);
+		begin_block(em, then);
+		case_discard(em, var);
+		emit_stmts(em, cwt->stmts);
+		if (em->open)
+			branch(em, done);
+		begin_block(em, next);
+		em->poll_pending = pending;
+	}
+
+	case_discard(em, var);
+	if (stmt->have_else)
+		emit_stmts(em, stmt->else_stmts);
+	else
+	{
+		plllvm_ir_declare(em->ir, "declare void @plllvm_pj_case_not_found()");
+		set_pos(em, stmt->stmtid);
+		plllvm_ir_emit(em->ir, "call void @plllvm_pj_case_not_found()");
+		plllvm_ir_emit(em->ir, "unreachable");
+		em->open = false;
+	}
+	if (em->open)
+		branch(em, done);
+	begin_block(em, done);
+
+	poll_if_boxed(em, boxed0);
+}
+
+/* the variable of a simple CASE is NULL once the WHENs are done with it */
+static void
+case_discard(PjEmit *em, PLpgSQL_var *var)
+{
+	if (var == NULL)
+		return;
+	if (var->datatype->typbyval)
+		store_var(em, var->dno, "0", "true");
+	else
+		assign_var(em, var, "0", "true", false);
 }
 
 static void
@@ -2413,7 +2633,7 @@ boxed_value(PjEmit *em, int index, const PjExpr *pe, const char **datum,
 			plllvm_ir_emit(ir, "%s = load i64, ptr %%v%d", value, dno);
 			plllvm_ir_emit(ir, "%s = load i1, ptr %%n%d", n, dno);
 			plllvm_ir_emit(ir, "%s = zext i1 %s to i8", z, n);
-			if (((PLpgSQL_var *) em->func->datums[dno])->datatype->typisarray)
+			if (pj_var(em->h, em->func, dno)->datatype->typisarray)
 			{
 				const char *ro = plllvm_ir_tmp(ir);
 

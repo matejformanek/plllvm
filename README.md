@@ -214,9 +214,9 @@ its own. A function is created as with PL/pgSQL, with `LANGUAGE plpgsql_jit`.
 The first call of a function runs in PL/pgSQL, which plans what it runs. The
 second translates the function to LLVM IR if it is in scope, and later calls
 run the code. In scope so far: blocks with `DECLARE` (defaults, `NOT NULL`,
-`CONSTANT`), assignment to a variable, `IF`, `LOOP`, `WHILE`, `FOR` over
-integers (`REVERSE`, `BY`), `EXIT` and `CONTINUE` with labels, `RETURN`, and
-`RAISE` without `USING`,
+`CONSTANT`), assignment to a variable, `IF`, `CASE` (searched and simple),
+`LOOP`, `WHILE`, `FOR` over integers (`REVERSE`, `BY`), `EXIT` and `CONTINUE`
+with labels, `RETURN`, and `RAISE` without `USING`,
 with arguments and variables of a type passed by value that is no domain, or
 of a built-in base type passed by reference (`text`, `varchar`, `numeric`,
 `name`, `uuid`, `interval`, `bytea`, `jsonb`, ...), or an array of one, and

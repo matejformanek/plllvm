@@ -9,7 +9,7 @@ SET plllvm.regress_test_mode = on;
 CREATE FUNCTION ps_inc(n int) RETURNS int LANGUAGE plpgsql_jit AS $$
 BEGIN RETURN n + 1; END $$;
 CREATE FUNCTION ps_if(n int) RETURNS int LANGUAGE plpgsql_jit AS $$
-BEGIN CASE WHEN n > 0 THEN RETURN 1; ELSE RETURN 2; END CASE; END $$;
+BEGIN PERFORM n; RETURN 1; END $$;
 CREATE FUNCTION ps_decl(n int) RETURNS int LANGUAGE plpgsql_jit AS $$
 DECLARE x numeric := n; BEGIN RETURN x; END $$;
 CREATE FUNCTION ps_exc(n int) RETURNS int LANGUAGE plpgsql_jit AS $$

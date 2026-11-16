@@ -148,6 +148,10 @@ typedef struct PjExpr
 	int32		dsttypmod;
 	PjH1		h1;
 	int			pos;			/* of its statement or variable */
+	int			case_var;		/* selector of a simple CASE: the datum of its
+								 * variable, else -1 */
+	int			case_sel;		/* WHEN of a simple CASE: index of the
+								 * selector, else -1 */
 	/* READY only, copies in the harvest context */
 	Expr	   *tree;
 	Oid			type;
@@ -275,6 +279,9 @@ typedef struct PjHarvest
 	int			ndatums;
 	int			nparams;		/* the datums, then a read/write twin of each */
 	Oid		   *ptypes;			/* of the params a boxed tree may read */
+	struct PLpgSQL_var **vars;	/* the variable of a datum as this harvest
+								 * reads it, where that is not the function's:
+								 * a simple CASE's; or NULL */
 	List	   *funcids;		/* of the trees and the casts: EXECUTE is
 								 * checked on them */
 	LocalTransactionId key_lxid;	/* they were checked in this transaction
@@ -314,5 +321,7 @@ extern PjEmitResult plllvm_pj_emit(struct PLpgSQL_function *func, PjHarvest *h,
 								   PjVariant *v);
 extern const char *plllvm_pj_stmt_typename(void *stmt);
 extern int	plllvm_pj_err_condition(const char *condname);
+extern struct PLpgSQL_type *plllvm_pj_build_datatype(Oid typid, int32 typmod,
+													 Oid collation);
 
 #endif							/* PLLLVM_PJ_H */

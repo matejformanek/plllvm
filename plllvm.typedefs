@@ -201,6 +201,7 @@ OpInfo
 OpKind
 OverridingKind
 PGFunction
+PLpgSQL_case_when
 PLpgSQL_datum
 PLpgSQL_datum_type
 PLpgSQL_exception_block
@@ -216,6 +217,7 @@ PLpgSQL_rwopt
 PLpgSQL_stmt
 PLpgSQL_stmt_assign
 PLpgSQL_stmt_block
+PLpgSQL_stmt_case
 PLpgSQL_stmt_exit
 PLpgSQL_stmt_fori
 PLpgSQL_stmt_if
@@ -465,6 +467,7 @@ plllvm_repr
 plllvm_site
 plllvm_spi_stmt
 plllvm_value
+plpgsql_build_datatype_t
 plpgsql_call_handler_t
 plpgsql_compile_t
 plpgsql_recognize_err_condition_t
