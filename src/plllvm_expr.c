@@ -36,6 +36,12 @@
  *    one; the operators and the other nodes see only the four native
  *    representations, so a tree with another type elsewhere is refused.
  *
+ * 6) An element of an array is the caller's too, if it has the
+ *    subscript_ callbacks: its container is a variable of the caller, whose
+ *    Datum the tree never sees as a value of a representation.  A fetch
+ *    reads the container first and its subscript only if the container is
+ *    not NULL, as the interpreter's JUMP_IF_NULL does.
+ *
  */
 #include "postgres.h"
 
@@ -198,6 +204,8 @@ static void emit_coalesce(plllvm_ir *ir, const CoalesceExpr *c,
 						  EmitState *es, plllvm_value *out);
 static void emit_nullif(plllvm_ir *ir, const NullIfExpr *n, EmitState *es,
 						plllvm_value *out);
+static void emit_subscript(plllvm_ir *ir, const SubscriptingRef *sb,
+						   EmitState *es, plllvm_value *out);
 static void emit_booltest(plllvm_ir *ir, const BooleanTest *b,
 						  EmitState *es, plllvm_value *out);
 static const char *emit_not(plllvm_ir *ir, const char *v);
@@ -640,6 +648,32 @@ check_node(const Expr *e, CheckState *cs, plllvm_repr *repr)
 					*repr = PLLLVM_DATUM;
 				return check_call_arg(io->arg, cs, &arepr);
 			}
+		case T_SubscriptingRef:
+			{
+				const SubscriptingRef *sb = (const SubscriptingRef *) e;
+				plllvm_repr erepr;
+
+				if (cs->env->subscript_check == NULL ||
+					sb->refassgnexpr != NULL ||
+					list_length(sb->refupperindexpr) != 1 ||
+					linitial(sb->refupperindexpr) == NULL ||
+					sb->reflowerindexpr != NIL ||
+					!cs->env->subscript_check(cs->env, sb, &erepr, cs->facts))
+				{
+					cs->why = "node";
+					return false;
+				}
+				/* the container counts as a node */
+				if (++cs->nnodes > PLLLVM_EXPR_MAX_NODES)
+				{
+					cs->why = "too many nodes";
+					return false;
+				}
+				cs->nops++;
+				appendStringInfo(cs->hash_key, "R%u ", sb->refcontainertype);
+				*repr = erepr;
+				return check_arg(linitial(sb->refupperindexpr), cs, PLLLVM_I32);
+			}
 		default:
 			cs->why = "node";
 			return false;
@@ -915,6 +949,9 @@ emit_node(plllvm_ir *ir, const Expr *e, EmitState *es, plllvm_value *out)
 			return;
 		case T_CoerceViaIO:
 			emit_call(ir, e, list_make1(((const CoerceViaIO *) e)->arg), es, out);
+			return;
+		case T_SubscriptingRef:
+			emit_subscript(ir, (const SubscriptingRef *) e, es, out);
 			return;
 		default:
 			elog(ERROR, "unrecognized node type: %d", (int) nodeTag(e));
@@ -1307,6 +1344,47 @@ emit_nullif(plllvm_ir *ir, const NullIfExpr *n, EmitState *es,
 							 emit_logic(ir, "and",
 										emit_not(ir, av[1].isnull), eq));
 	out->type = n->opresulttype;
+}
+
+/*
+ * An element of an array: a fetch is NULL for a NULL container, whose
+ * subscript is not evaluated, and for a NULL subscript.
+ */
+static void
+emit_subscript(plllvm_ir *ir, const SubscriptingRef *sb, EmitState *es,
+			   plllvm_value *out)
+{
+	plllvm_expr_env *env = es->env;
+	plllvm_value container;
+	plllvm_value sub;
+	plllvm_value r;
+	plllvm_repr repr;
+	const char *lsub = plllvm_ir_label(ir);
+	const char *lacc = plllvm_ir_label(ir);
+	const char *ldone = plllvm_ir_label(ir);
+	PhiJoin		j;
+
+	if (!plllvm_expr_type_repr(sb->refrestype, &repr))
+		elog(ERROR, "unsupported type %u", sb->refrestype);
+
+	env->subscript_container(env, ir, sb, &container);
+
+	join_init(&j);
+	join_edge(&j, repr_zero(repr), "true", plllvm_ir_current(ir));
+	plllvm_ir_emit(ir, "br i1 %s, label %%%s, label %%%s",
+				   container.isnull, ldone, lsub);
+	plllvm_ir_block(ir, lsub);
+	emit_node(ir, linitial(sb->refupperindexpr), es, &sub);
+	plllvm_ir_emit(ir, "br i1 %s, label %%%s, label %%%s",
+				   sub.isnull, ldone, lacc);
+	join_edge(&j, repr_zero(repr), "true", plllvm_ir_current(ir));
+	plllvm_ir_block(ir, lacc);
+	env->subscript_access(env, ir, sb, &container, &sub, NULL, &r);
+	join_edge(&j, r.v, r.isnull, plllvm_ir_current(ir));
+	plllvm_ir_emit(ir, "br label %%%s", ldone);
+
+	join_end(ir, &j, ldone, repr, out);
+	out->type = sb->refrestype;
 }
 
 static const char *

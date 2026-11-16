@@ -29,6 +29,7 @@
 #include "postgres.h"
 
 #include "access/xact.h"
+#include "catalog/pg_type.h"
 #include "executor/executor.h"
 #include "miscadmin.h"
 #include "tcop/pquery.h"
@@ -181,6 +182,50 @@ plllvm_pj_assign_array(PjCtx *ctx, Datum old, bool owned, Datum value,
 	}
 
 	return result;
+}
+
+/* the length and alignment of the element types of plpgsql_jit's arrays */
+static void
+elem_layout(Oid elemtype, int *len, char *align)
+{
+	switch (elemtype)
+	{
+		case INT4OID:
+			*len = sizeof(int32);
+			*align = TYPALIGN_INT;
+			break;
+		case INT8OID:
+			*len = sizeof(int64);
+			*align = TYPALIGN_DOUBLE;
+			break;
+		case FLOAT8OID:
+			*len = sizeof(float8);
+			*align = TYPALIGN_DOUBLE;
+			break;
+		default:
+			elog(ERROR, "unexpected array element type %u", elemtype);
+			*len = 0;
+			*align = 0;
+	}
+}
+
+/*
+ * An element of a variable's array that the inline code did not read: an
+ * array of no Datums yet, which array_get_element() makes, or of other
+ * dimensions, for which it answers NULL.
+ */
+NullableDatum
+plllvm_pj_elem_get_slow(Datum array, int32 sub, Oid elemtype)
+{
+	NullableDatum r;
+	int			len;
+	char		align;
+
+	plllvm_pj_count.elem_slow++;
+	elem_layout(elemtype, &len, &align);
+	r.value = array_get_element(array, 1, &sub, -1, len, true, align,
+								&r.isnull);
+	return r;
 }
 
 /* an array argument, expanded once as plpgsql_exec_function() does */

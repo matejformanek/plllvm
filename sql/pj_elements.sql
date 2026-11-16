@@ -27,13 +27,17 @@ INSERT INTO pv_arrs VALUES (1, '{1,2,3}'), (2, '[0:2]={4,5,6}'),
     (6, '{}'), (7, '[2:3]={NULL,1}');
 
 -- fetch: below, in and above the range, lower bounds 1, 0, -3 and 5, a NULL
--- element, an empty array
+-- element, an empty array.  The second read of a call is the one that reads
+-- the array as it is when the first has made the elements of the array.
 CREATE FUNCTION pv_get4(a int4[], i int) RETURNS int4 LANGUAGE :pj_lang AS $$
-BEGIN RETURN a[i]; END $$;
+DECLARE x int4;
+BEGIN x := a[i]; RETURN a[i]; END $$;
 CREATE FUNCTION pv_get8(a int8[], i int) RETURNS int8 LANGUAGE :pj_lang AS $$
-BEGIN RETURN a[i]; END $$;
+DECLARE x int8;
+BEGIN x := a[i]; RETURN a[i]; END $$;
 CREATE FUNCTION pv_getf(a float8[], i int) RETURNS float8 LANGUAGE :pj_lang AS $$
-BEGIN RETURN a[i]; END $$;
+DECLARE x float8;
+BEGIN x := a[i]; RETURN a[i]; END $$;
 SELECT pv_get4('{1,2,3}', 2), pv_get8('{1,2,3}', 2), pv_getf('{1,2,3}', 2);
 SELECT pv_get4('{1,2,3}', 5), pv_get8('{1,2,3}', 0), pv_getf('{1,2,3}', 3);
 SELECT pj_expect('pv_get4(int4[],int)', 'compiled') \gset
@@ -44,7 +48,21 @@ SELECT id, string_agg(coalesce(pv_get4(a::int4[], i)::text, 'N'), ',' ORDER BY i
        string_agg(coalesce(pv_get8(a::int8[], i)::text, 'N'), ',' ORDER BY i) AS i8,
        string_agg(coalesce(pv_getf(a::float8[], i)::text, 'N'), ',' ORDER BY i) AS f8
   FROM pv_arrs, generate_series(-4, 8) i GROUP BY id ORDER BY id;
-SELECT pj_delta(273, 0, 273, 0, 0) \gset
+SELECT pj_delta(273, 0, 0, 0, 0, 495) \gset
+
+-- the reads that follow one in range find the elements made: neighbours of
+-- the subscript below, in and above the range, and of a NULL element
+CREATE FUNCTION pv_walk(a int4[], i int) RETURNS int8 LANGUAGE :pj_lang AS $$
+BEGIN
+  RETURN coalesce(a[i - 1], -1)::int8 * 1000000 + coalesce(a[i], -1)::int8 * 1000
+         + coalesce(a[i + 1], -1);
+END $$;
+SELECT pv_walk('{1,2,3}', 2), pv_walk('{1,NULL,3}', 2);
+SELECT pj_expect('pv_walk(int4[],int)', 'compiled') \gset
+SELECT pj_mark() \gset
+SELECT id, string_agg(pv_walk(a::int4[], i)::text, ' ' ORDER BY i) AS walk
+  FROM pv_arrs, generate_series(-4, 8) i GROUP BY id ORDER BY id;
+SELECT pj_delta(91, 0, 0, 0, 0, 233) \gset
 
 -- a two-dimensional argument read with one subscript, extreme subscripts
 SELECT pj_mark() \gset
@@ -53,7 +71,7 @@ SELECT pv_get4('{{1,2},{3,4}}', 1), pv_get4('{{1,2},{3,4}}', 2),
 SELECT i, pv_get4('[-5:-3]={7,8,9}', i), pv_get8('[-5:-3]={7,8,9}', i),
        pv_getf('[-5:-3]={7,8,9}', i)
   FROM (VALUES (2147483647), (-2147483647 - 1), (-5), (-3), (-6), (-2)) v(i);
-SELECT pj_delta(22, 0, 22, 0, 0) \gset
+SELECT pj_delta(22, 0, 0, 0, 0, 38) \gset
 
 -- a NULL array reads NULL without evaluating its subscript, a NULL subscript
 -- reads NULL
@@ -68,7 +86,37 @@ SELECT pj_expect('pv_nullarr(int)', 'compiled') \gset
 SELECT pj_expect('pv_nullsub(int4[],int)', 'compiled') \gset
 SELECT pj_mark() \gset
 SELECT pv_nullarr(3), pv_nullsub('{1,2,3}', 3), pv_nullsub('{}', 3);
-SELECT pj_delta(3, 0, 3, 0, 0) \gset
+SELECT pj_delta(3, 0, 0, 0, 0, 0) \gset
+
+-- the first read of an array whose elements are not made yet, an argument of a
+-- column or a text constant, is the slow function's, and the reads after it
+-- are not; an array passed from a compiled caller has them
+CREATE FUNCTION pv_first(k int) RETURNS int4 LANGUAGE :pj_lang AS $$
+DECLARE a int4[];
+BEGIN a := '{5,6,7}'; RETURN a[k] + a[k + 1] + a[k]; END $$;
+CREATE TABLE pv_c (id int, a4 int4[]);
+INSERT INTO pv_c VALUES (1, '{1,2,3}'), (2, '[0:1]={4,5}'), (3, '{}');
+CREATE FUNCTION pv_callee(a int4[], i int) RETURNS int4 LANGUAGE :pj_lang STABLE AS $$
+BEGIN RETURN a[i] + a[i + 1]; END $$;
+CREATE FUNCTION pv_caller(k int) RETURNS int4 LANGUAGE :pj_lang AS $$
+DECLARE a int4[] := '{1,2,3,4}'; x int4;
+BEGIN x := a[1]; RETURN x + pv_callee(a, k); END $$;
+SELECT pv_first(1), pv_first(2), pv_first(3);
+SELECT pv_first(1), pv_first(0);
+SELECT pv_caller(1), pv_caller(2);
+SELECT pv_caller(3), pv_caller(1), pv_caller(0);
+SELECT pj_expect('pv_first(int)', 'compiled') \gset
+SELECT pj_expect('pv_callee(int4[],int)', 'compiled') \gset
+SELECT pj_expect('pv_caller(int)', 'compiled') \gset
+SELECT pj_mark() \gset
+SELECT pv_first(1), pv_first(2), pv_first(3), pv_first(1);
+SELECT pj_delta(4, 0, 0, 0, 0, 4) \gset
+SELECT pj_mark() \gset
+SELECT id, pv_get4(a4, 2), pv_get4(a4, 0) FROM pv_c ORDER BY id;
+SELECT pj_delta(6, 0, 0, 0, 0, 10) \gset
+SELECT pj_mark() \gset
+SELECT pv_caller(1), pv_caller(2), pv_caller(3);
+SELECT pj_delta(6, 0, 3, 0, 0, 3) \gset
 
 -- the arms that the interpreter skips are not evaluated
 CREATE FUNCTION pv_and(a int4[], k int) RETURNS bool LANGUAGE :pj_lang AS $$
@@ -124,13 +172,13 @@ SELECT id, string_agg(coalesce(pv_set4(a::int4[], i, 9)::text, 'N'), ' ' ORDER B
        string_agg(coalesce(pv_set8(a::int8[], i, 9)::text, 'N'), ' ' ORDER BY i) AS i8,
        string_agg(coalesce(pv_setf(a::float8[], i, 9)::text, 'N'), ' ' ORDER BY i) AS f8
   FROM pv_arrs, generate_series(-4, 8, 3) i GROUP BY id ORDER BY id;
-SELECT pj_delta(105, 0, 105, 0, 0) \gset
+SELECT pj_delta(105, 0, 105, 0, 0, 0) \gset
 SELECT pj_mark() \gset
 SELECT i, pv_setnull(i, 5), pv_setempty(i, 5)
   FROM generate_series(-2, 2) i ORDER BY i;
 SELECT id, i, pv_setnullv(a::int4[], i) FROM pv_arrs,
     generate_series(0, 4) i WHERE id IN (1, 5, 6) ORDER BY id, i;
-SELECT pj_delta(25, 0, 25, 0, 0) \gset
+SELECT pj_delta(25, 0, 25, 0, 0, 0) \gset
 
 -- the subscript is checked before the value is computed, and a two-dimensional
 -- target, a size over the limit
@@ -165,7 +213,7 @@ SELECT pj_expect('pv_self(int4[],int,int)', 'compiled') \gset
 SELECT pj_mark() \gset
 SELECT pv_self('{1,2,3}', 3, 2), pv_self('{2,5,7}', 1, 3),
        pv_self('{3,5,7}', 2, 2);
-SELECT pj_delta(3, 0, 6, 0, 0) \gset
+SELECT pj_delta(3, 0, 6, 0, 0, 0) \gset
 
 -- the answer that the array gives out after a store.  A value read before the
 -- store left the flat copy of the array standing, and a stored element must
@@ -196,7 +244,7 @@ SELECT pv_size();
 SELECT pj_expect('pv_size()', 'compiled') \gset
 SELECT pj_mark() \gset
 SELECT pv_ret(), pv_size();
-SELECT pj_delta(2, 0, 6, 0, 0) \gset
+SELECT pj_delta(2, 0, 5, 0, 0, 1) \gset
 
 -- an element read after a store of the same call; the arrays of a call in
 -- another call's frames
@@ -360,7 +408,11 @@ BEGIN
 END $$;
 SELECT pv_d1('{1,2,3}', 3, 0), pv_d1('{1,2,3}', 3, 0), pv_d1('{4,5,6}', 2, 0);
 SELECT pv_d2(3, 0), pv_d2(4, 0), pv_d2(5, 0);
-SELECT pj_expect('pv_d1(int4[],int,int)', 'waiting') \gset
+SELECT pj_expect('pv_d1(int4[],int,int)', 'compiled') \gset
+SELECT pj_variant('pv_d1(int4[],int,int)', false, true) \gset
 SELECT pj_expect('pv_d2(int,int)', 'waiting') \gset
-SELECT pv_d1('{1,2,3}', 3, 99), pv_d2(3, 99);
+SELECT pj_mark() \gset
+SELECT pv_d1('{1,2,3}', 3, 99);
+SELECT pj_delta(0, 0, 0, 1, 0) \gset
+SELECT pv_d2(3, 99);
 SELECT pv_d1('{1,2,3}', 3, 0), pv_d2(3, 0), pv_d1('{1,2,3}', 3, 99), pv_d2(5, 99);

@@ -51,7 +51,13 @@
 		offsetof(FmgrInfo, fn_addr), \
 		offsetof(FmgrInfo, fn_strict), \
 		sizeof(ArrayType), \
-		ARR_OVERHEAD_NONULLS(1) \
+		ARR_OVERHEAD_NONULLS(1), \
+		offsetof(ExpandedArrayHeader, ndims), \
+		offsetof(ExpandedArrayHeader, dims), \
+		offsetof(ExpandedArrayHeader, lbound), \
+		offsetof(ExpandedArrayHeader, element_type), \
+		offsetof(ExpandedArrayHeader, dvalues), \
+		offsetof(ExpandedArrayHeader, dnulls) \
 	}
 
 /* a call site of JIT-compiled code (plllvm_sites.c); its address is in the code */
@@ -117,6 +123,13 @@ extern void plllvm_pj_raise_param(struct PjCtx *ctx, Datum value, bool isnull,
 extern void plllvm_pj_raise(struct PjCtx *ctx, int32 level, int32 sqlstate,
 							const char *msg);
 pg_noreturn extern void plllvm_pj_raise_bare(void);
+
+/*
+ * Elements of an array in a variable of plpgsql_jit, when the inline code
+ * (plllvm_types.c) finds the array in no shape it can read
+ */
+extern NullableDatum plllvm_pj_elem_get_slow(Datum array, int32 sub,
+											 Oid elemtype);
 
 /*
  * A call of a function from compiled code, for plllvm_pj_invoke(): the

@@ -51,6 +51,7 @@ const plllvm_host_symbol plllvm_host_symbols[] =
 	{"plllvm_pj_for_error", (void *) plllvm_pj_for_error},
 	{"plllvm_pj_case_not_found", (void *) plllvm_pj_case_not_found},
 	{"plllvm_pj_params", (void *) plllvm_pj_params},
+	{"plllvm_pj_elem_get_slow", (void *) plllvm_pj_elem_get_slow},
 	{"plllvm_pj_boxed_eval", (void *) plllvm_pj_boxed_eval},
 	{"plllvm_pj_boxed_reset", (void *) plllvm_pj_boxed_reset},
 	{"plllvm_pj_assign", (void *) plllvm_pj_assign},

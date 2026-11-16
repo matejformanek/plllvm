@@ -68,6 +68,7 @@ typedef struct PjEnv
 	/* reset for each expression checked */
 	bool		need;
 	int			ncalls;
+	int			nfetch;			/* elements read */
 	/* the sites made so far by an emit */
 	List	   *sites;
 } PjEnv;
@@ -158,6 +159,15 @@ static bool param_check(plllvm_expr_env *env, const Param *p,
 						StringInfo facts);
 static void param_emit(plllvm_expr_env *env, plllvm_ir *ir, const Param *p,
 					   plllvm_value *out);
+static bool subscript_check(plllvm_expr_env *env, const SubscriptingRef *sb,
+							plllvm_repr *elem, StringInfo facts);
+static void subscript_container(plllvm_expr_env *env, plllvm_ir *ir,
+								const SubscriptingRef *sb, plllvm_value *out);
+static void subscript_access(plllvm_expr_env *env, plllvm_ir *ir,
+							 const SubscriptingRef *sb,
+							 const plllvm_value *container,
+							 const plllvm_value *sub, const plllvm_value *value,
+							 plllvm_value *out);
 static bool call_check(plllvm_expr_env *base, const Node *node);
 static void call_emit(plllvm_expr_env *base, plllvm_ir *ir, const Node *node,
 					  const plllvm_value *args, int nargs, plllvm_value *out);
@@ -961,12 +971,16 @@ harvest_expr(PLpgSQL_function *func, PjHarvest *h, PjEnv *env, PjExpr *pe,
 		initStringInfo(&facts);
 		env->need = pe->need;
 		env->ncalls = 0;
+		env->nfetch = 0;
 		pe->path = plllvm_expr_check(tree, &env->base, &key, &facts, &why) ?
 			PJ_PATH_NATIVE : PJ_PATH_BOXED;
 		if (contain_volatile_functions((Node *) tree))
 			return "volatile callee";
 		if (pe->path == PJ_PATH_NATIVE)
+		{
 			pe->ncalls = env->ncalls;
+			pe->elem_fetch = env->nfetch > 0;
+		}
 
 		/* a tree for the executor reads the datums by number */
 		if (params_walker((Node *) tree, &params))
@@ -1302,6 +1316,9 @@ env_init(PjEnv *env, PLpgSQL_function *func, PjHarvest *h)
 	env->base.call_check = call_check;
 	env->base.call_emit = call_emit;
 	env->base.bare_emit = bare_emit;
+	env->base.subscript_check = subscript_check;
+	env->base.subscript_container = subscript_container;
+	env->base.subscript_access = subscript_access;
 	env->base.arg = env;
 	env->func = func;
 	env->h = h;
@@ -1338,6 +1355,111 @@ param_emit(plllvm_expr_env *base, plllvm_ir *ir, const Param *p,
 	plllvm_ir_emit(ir, "%s = load i64, ptr %%v%d", value, p->paramid - 1);
 	plllvm_ir_emit(ir, "%s = load i1, ptr %%n%d", isnull, p->paramid - 1);
 	unbox(ir, value, isnull, p->paramtype, out);
+}
+
+/*
+ * An element of a variable of one of the array types of the compiler, one
+ * subscript, as the interpreter fetches it from the variable's Param
+ */
+static bool
+subscript_check(plllvm_expr_env *base, const SubscriptingRef *sb,
+				plllvm_repr *elem, StringInfo facts)
+{
+	PjEnv	   *env = (PjEnv *) base->arg;
+	const Param *p;
+	PLpgSQL_var *var;
+	Oid			elemtype;
+
+	if (!IsA(sb->refexpr, Param))
+		return false;
+	p = (const Param *) sb->refexpr;
+	if (p->paramkind != PARAM_EXTERN)
+		return false;
+
+	switch (p->paramtype)
+	{
+		case INT4ARRAYOID:
+			elemtype = INT4OID;
+			break;
+		case INT8ARRAYOID:
+			elemtype = INT8OID;
+			break;
+		case FLOAT8ARRAYOID:
+			elemtype = FLOAT8OID;
+			break;
+		default:
+			return false;
+	}
+	var = pj_var(env->h, env->func, p->paramid - 1);
+	if (var == NULL || var->datatype->typoid != p->paramtype ||
+		sb->refcontainertype != p->paramtype || sb->reftypmod != -1 ||
+		sb->refrestype != elemtype ||
+		!plllvm_expr_type_repr(elemtype, elem))
+		return false;
+
+	appendStringInfo(facts, "%d:%u ", p->paramid, p->paramtype);
+	env->nfetch++;
+	return true;
+}
+
+/* the variable's Datum and its null flag */
+static void
+subscript_container(plllvm_expr_env *base, plllvm_ir *ir,
+					const SubscriptingRef *sb, plllvm_value *out)
+{
+	const Param *p = (const Param *) sb->refexpr;
+	int			dno = p->paramid - 1;
+
+	out->v = plllvm_ir_tmp(ir);
+	out->isnull = plllvm_ir_tmp(ir);
+	plllvm_ir_emit(ir, "%s = load i64, ptr %%v%d", out->v, dno);
+	plllvm_ir_emit(ir, "%s = load i1, ptr %%n%d", out->isnull, dno);
+	out->repr = PLLLVM_DATUM;
+	out->type = p->paramtype;
+}
+
+/*
+ * The element, by the helper of the element type.  The helper writes the null
+ * flag of the element to %en, a slot of the function that nothing but the
+ * helper, once inlined, touches, so that it is not kept.
+ */
+static void
+subscript_access(plllvm_expr_env *base, plllvm_ir *ir,
+				 const SubscriptingRef *sb, const plllvm_value *container,
+				 const plllvm_value *sub, const plllvm_value *value,
+				 plllvm_value *out)
+{
+	const char *r = plllvm_ir_tmp(ir);
+	const char *flag = plllvm_ir_tmp(ir);
+	const char *byte = plllvm_ir_tmp(ir);
+	const char *suffix;
+	const char *rtype;
+
+	switch (sb->refcontainertype)
+	{
+		case INT4ARRAYOID:
+			suffix = "i32";
+			rtype = "i32";
+			break;
+		case INT8ARRAYOID:
+			suffix = "i64";
+			rtype = "i64";
+			break;
+		default:
+			suffix = "f64";
+			rtype = "double";
+	}
+
+	plllvm_ir_declare(ir, psprintf("declare %s @plllvm_pj_elem_get_%s(i64, i32, ptr)",
+								   rtype, suffix));
+	plllvm_ir_emit(ir, "%s = call %s @plllvm_pj_elem_get_%s(i64 %s, i32 %s, ptr %%en)",
+				   r, rtype, suffix, container->v, sub->v);
+	plllvm_ir_emit(ir, "%s = load i8, ptr %%en", byte);
+	plllvm_ir_emit(ir, "%s = icmp ne i8 %s, 0", flag, byte);
+	out->v = r;
+	out->isnull = flag;
+	plllvm_expr_type_repr(sb->refrestype, &out->repr);
+	out->type = sb->refrestype;
 }
 
 /*
@@ -1747,6 +1869,7 @@ plllvm_pj_emit(PLpgSQL_function *func, PjHarvest *h, PjVariant *v)
 	bool		has_boxed = false;
 	bool		has_compiled = false;
 	bool		has_calls = false;
+	bool		has_elem = false;
 
 	em.all_boxed = v->codegen == PLLLVM_PJ_BOXED;
 	foreach_ptr(PjExpr, pe, h->exprs)
@@ -1759,6 +1882,7 @@ plllvm_pj_emit(PLpgSQL_function *func, PjHarvest *h, PjVariant *v)
 		{
 			has_compiled = true;
 			has_calls |= pe->ncalls > 0;
+			has_elem |= pe->elem_fetch;
 		}
 	}
 
@@ -1802,6 +1926,8 @@ plllvm_pj_emit(PLpgSQL_function *func, PjHarvest *h, PjVariant *v)
 		if (!pj_var(h, func, dno)->datatype->typbyval)
 			plllvm_ir_emit(em.ir, "%%o%d = alloca i1", dno);
 	}
+	if (has_elem)
+		plllvm_ir_emit(em.ir, "%%en = alloca i8");
 	foreach_int(id, h->fori)
 	{
 		plllvm_ir_emit(em.ir, "%%fc%d = alloca i32", id);
@@ -2250,6 +2376,7 @@ may_raise(Node *node, void *context)
 		case T_BoolExpr:
 		case T_NullTest:
 		case T_BooleanTest:
+		case T_SubscriptingRef:
 			break;
 		case T_OpExpr:
 			{
