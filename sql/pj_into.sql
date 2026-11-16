@@ -185,9 +185,11 @@ SELECT pi_call(-1);  -- fail
 \set SHOW_CONTEXT errors
 SELECT pj_expect('pi_call(integer)', 'compiled') \gset
 
--- a callee that the user may not run: PL/pgSQL's own error
+-- a callee that the user may not run: PL/pgSQL's own error.  The callee is
+-- not inlined, or the plan would hold no call to check.
 CREATE ROLE regress_pj_i1;
-CREATE FUNCTION pi_secret(n int) RETURNS int LANGUAGE sql STABLE AS $$ SELECT n + 1 $$;
+CREATE FUNCTION pi_secret(n int) RETURNS int LANGUAGE plpgsql STABLE AS $$
+BEGIN RETURN n + 1; END $$;
 CREATE FUNCTION pi_priv(n int) RETURNS int LANGUAGE :pj_lang AS $$
 DECLARE a int;
 BEGIN
@@ -202,14 +204,17 @@ SELECT pi_priv(1);
 SELECT pi_priv(2);
 RESET ROLE;
 SELECT pi_priv(3);
+SELECT pj_expect('pi_priv(integer)', 'compiled') \gset
 REVOKE EXECUTE ON FUNCTION pi_secret(int) FROM PUBLIC;
 SELECT pi_priv(4);
 SELECT pi_priv(5);
+SELECT pj_expect('pi_priv(integer)', 'compiled') \gset
 SET ROLE regress_pj_i1;
 SELECT pi_priv(6);  -- fail
 SELECT pi_priv(7);  -- fail
 RESET ROLE;
 SELECT pi_priv(8);
+SELECT pj_expect('pi_priv(integer)', 'compiled') \gset
 
 -- not an expression: a FROM, two targets, a record, no INTO; these stay SPI's
 CREATE TABLE pi_t(a int);
@@ -239,9 +244,12 @@ BEGIN
 END $$;
 SELECT pi_from(1), pi_two(1), pi_rec(1);
 SELECT pi_from(1), pi_two(1), pi_rec(1);
+SELECT pi_sql(1);  -- fail
+SELECT pi_sql(1);  -- fail
 SELECT pj_expect('pi_from(integer)', 'declined:not simple') \gset
 SELECT pj_expect('pi_two(integer)', 'declined:statement:SQL statement') \gset
 SELECT pj_expect('pi_rec(integer)', 'declined:datum:record') \gset
+SELECT pj_expect('pi_sql(integer)', 'declined:statement:SQL statement') \gset
 
 -- a query with a FROM in an arm that has not run is not planned yet: the
 -- function is translated, runs, and is declined once the arm has run
@@ -290,23 +298,29 @@ SELECT pi_simplecaller();
 SELECT pi_simplecaller();
 SELECT pj_expect('pi_simplecaller()', 'declined:not simple') \gset
 
--- the memory of a text target is released at each assignment
+-- the memory of a text target is flat inside one call, measured inside it.
+-- The copy of a target is freed by the next assignment, so a leak of the
+-- old copy would show here; one left until the end of the call would not
+-- show after it.
 CREATE FUNCTION pi_mem() RETURNS bigint LANGUAGE sql STABLE AS
   $$ SELECT sum(total_bytes)::bigint FROM pg_backend_memory_contexts $$;
-CREATE FUNCTION pi_loop(n int) RETURNS int LANGUAGE :pj_lang AS $$
-DECLARE t text; s int := 0;
+CREATE FUNCTION pi_loop(n int) RETURNS bigint LANGUAGE :pj_lang AS $$
+DECLARE t text; s int := 0; m0 bigint;
 BEGIN
+  FOR i IN 1..10 LOOP
+    SELECT repeat('x', i % 50) INTO t;
+    s := s + length(t);
+  END LOOP;
+  m0 := pi_mem();
   FOR i IN 1..n LOOP
     SELECT repeat('x', i % 50) INTO t;
     s := s + length(t);
   END LOOP;
-  RETURN s;
+  RETURN pi_mem() - m0;
 END $$;
-SELECT pi_loop(10), pi_loop(10);
-SELECT pi_loop(10);
-SELECT pi_mem() AS before \gset
-SELECT pi_loop(100000);
-SELECT pi_mem() - :before < 1048576 AS flat;
+SELECT pi_loop(10) IS NOT NULL;
+SELECT pi_loop(10) IS NOT NULL;
+SELECT pi_loop(100000) < 1048576 AS flat;
 SELECT pj_expect('pi_loop(integer)', 'compiled') \gset
 
 DROP TABLE pi_t;

@@ -274,22 +274,41 @@ SELECT pj_mark() \gset
 SELECT pk_native(1), pk_native(2), pk_native(3);
 SELECT pj_delta(3, 0, 0, 0, 0);
 
--- the memory of a text selector is released with each iteration
-CREATE FUNCTION pk_text(n int) RETURNS int LANGUAGE :pj_lang AS $$
+-- the memory of a text selector (the value of a call of upper) is flat inside one call, measured inside it:
+-- every iteration's selector is a copy in a variable, freed by the next.  A
+-- selector variable that were not set to NULL after the WHENs would free its
+-- copy at the next assignment all the same, so no pin can tell that apart;
+-- the values of this call, under a build that clobbers freed memory, catch a
+-- selector read after it is freed.
+CREATE FUNCTION pk_text(n int) RETURNS bigint LANGUAGE :pj_lang AS $$
+DECLARE s int := 0; t text; m0 bigint;
+BEGIN
+  FOR i IN 1..10 LOOP
+    t := (i % 3)::text;
+    CASE upper(t || 'x') WHEN '0X' THEN s := s + 1; WHEN '1X' THEN s := s + 2; ELSE s := s + 3; END CASE;
+  END LOOP;
+  m0 := pk_mem();
+  FOR i IN 1..n LOOP
+    t := (i % 3)::text;
+    CASE upper(t || 'x') WHEN '0X' THEN s := s + 1; WHEN '1X' THEN s := s + 2; ELSE s := s + 3; END CASE;
+  END LOOP;
+  RETURN pk_mem() - m0;
+END $$;
+CREATE FUNCTION pk_text_sum(n int) RETURNS int LANGUAGE :pj_lang AS $$
 DECLARE s int := 0; t text;
 BEGIN
   FOR i IN 1..n LOOP
     t := (i % 3)::text;
-    CASE t || 'x' WHEN '0x' THEN s := s + 1; WHEN '1x' THEN s := s + 2; ELSE s := s + 3; END CASE;
+    CASE upper(t || 'x') WHEN '0X' THEN s := s + 1; WHEN '1X' THEN s := s + 2; ELSE s := s + 3; END CASE;
   END LOOP;
   RETURN s;
 END $$;
-SELECT pk_text(10), pk_text(10);
-SELECT pk_text(10);
-SELECT pk_mem() AS before \gset
-SELECT pk_text(100000);
-SELECT pk_mem() - :before < 1048576 AS flat;
+SELECT pk_text(10) IS NOT NULL;
+SELECT pk_text(10) IS NOT NULL;
+SELECT pk_text(100000) < 1048576 AS flat;
 SELECT pj_expect('pk_text(integer)', 'compiled') \gset
+SELECT pk_text_sum(10), pk_text_sum(10), pk_text_sum(99999);
+SELECT pj_expect('pk_text_sum(integer)', 'compiled') \gset
 
 -- the shape of a callback over raster pixels: a text selector that picks the
 -- arm, array reads that the executor evaluates, an arm for each unit.  While

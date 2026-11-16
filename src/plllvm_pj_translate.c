@@ -583,7 +583,6 @@ scope_expr(PjScopeWalk *w, const void *owner, PLpgSQL_expr *expr,
 	pe->dsttype = dsttype;
 	pe->dsttypmod = dsttypmod;
 	pe->pos = w->cur_pos;
-	pe->build_pos = w->cur_pos;
 	pe->case_var = -1;
 	pe->case_sel = -1;
 	w->scope->exprs = lappend(w->scope->exprs, pe);
@@ -750,9 +749,10 @@ plllvm_pj_harvest(PLpgSQL_function *func, const PjScope *scope, PjHarvest *h)
 	PjEnv		env;
 	List	   *funcs = NIL;
 	const char *reason = NULL;
-
 	Bitmapset  *case_vars = NULL;
 	int			nextra = 0;
+	int		   *build_pos;
+	int			nexpr = 0;
 
 	env_init(&env, func, h);
 
@@ -778,6 +778,7 @@ plllvm_pj_harvest(PLpgSQL_function *func, const PjScope *scope, PjHarvest *h)
 		nextra += pe->into_sql;
 	h->npos = scope->npos + list_length(scope->exprs) + nextra;
 	h->pos = palloc_array(PjPos, h->npos);
+	build_pos = palloc_array(int, list_length(scope->exprs));
 	memcpy(h->pos, scope->pos, sizeof(PjPos) * scope->npos);
 	nextra = 0;
 	for (int i = 0; i < list_length(scope->exprs); i++)
@@ -786,6 +787,7 @@ plllvm_pj_harvest(PLpgSQL_function *func, const PjScope *scope, PjHarvest *h)
 
 		h->pos[scope->npos + i] = scope->pos[pe->pos];
 		h->pos[scope->npos + i].expr = i;
+		build_pos[i] = pe->pos;
 		if (pe->into_sql)
 		{
 			/*
@@ -795,10 +797,10 @@ plllvm_pj_harvest(PLpgSQL_function *func, const PjScope *scope, PjHarvest *h)
 			 * expression.
 			 */
 			h->pos[scope->npos + i].sql = pstrdup(pe->expr->query);
-			pe->build_pos = scope->npos + list_length(scope->exprs) + nextra;
-			h->pos[pe->build_pos] = scope->pos[pe->pos];
-			h->pos[pe->build_pos].expr = -1;
-			h->pos[pe->build_pos].sql = h->pos[scope->npos + i].sql;
+			build_pos[i] = scope->npos + list_length(scope->exprs) + nextra;
+			h->pos[build_pos[i]] = scope->pos[pe->pos];
+			h->pos[build_pos[i]].expr = -1;
+			h->pos[build_pos[i]].sql = h->pos[scope->npos + i].sql;
 			nextra++;
 		}
 	}
@@ -821,6 +823,7 @@ plllvm_pj_harvest(PLpgSQL_function *func, const PjScope *scope, PjHarvest *h)
 		PjExpr	   *copy = MemoryContextAlloc(h->cxt, sizeof(PjExpr));
 
 		*copy = *pe;
+		copy->build_pos = build_pos[nexpr++];
 		if (pe->h1 == PJ_H1_READY)
 		{
 			oldcxt = MemoryContextSwitchTo(h->cxt);

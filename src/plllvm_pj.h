@@ -156,7 +156,8 @@ typedef struct PjExpr
 								 * variable, else -1 */
 	int			case_sel;		/* WHEN of a simple CASE: index of the
 								 * selector, else -1 */
-	bool		into_sql;		/* the expression of a SELECT INTO */
+	bool		into_sql;		/* true, when the expression is the query of a
+								 * SELECT INTO */
 	/* READY only, copies in the harvest context */
 	Expr	   *tree;
 	Oid			type;

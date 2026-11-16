@@ -72,7 +72,10 @@ come from a generator of their own, so that a program without --cx is the
 same as it was; with --cx the programs are other ones.  Equal output is also
 what a function gives that PL/pgSQL ran, so the programs that contain each
 construct are counted, and so are those among them whose function ran
-compiled: --floor-cx is the share of those that must have.
+compiled: --floor-cx is the share of those that must have.  The CASE or
+SELECT INTO then counts only if it stands in the body outside any branch,
+and the function had compiled calls and no deopt (a RETURN before it is not
+excluded).
 
 A third of the programs call f directly instead of through the wrapper.  The
 schema name is normalised.  Every statement of a script is a step.
@@ -169,6 +172,7 @@ class Gen:
         self.r = rng
         self.cx = cx                # a generator for CASE and SELECT INTO, or None
         self.used = set()           # the constructs of cx the program has
+        self.top = set()            # those that stand in the body, outside any branch
         self.cat = cat
         self.procs = set()          # the functions the program may call
         self.nvar = 0
@@ -440,20 +444,27 @@ class Gen:
     def cx_stmt(self, depth):
         """A CASE or a SELECT INTO.  The selector and the values of a simple
         CASE have one type, so the operator of each WHEN is known, and a role
-        that lacks it is refused as the walk expects."""
+        that lacks it is refused (42501) by the walk of privileges like any
+        other function the body calls."""
         c = self.cx
         av = self.assignable()
         if av and c.random() < 0.3:
             v = c.choice(av)
             self.used.add("into")
+            if depth == 3:
+                self.top.add("into")
             return {"k": "into", "v": v["name"], "e": self.assign_expr(v["ty"])}
         self.used.add("case")
+        if depth == 3:
+            self.top.add("case")
         whens, simple = [], c.random() < 0.55
         sel = None
         if simple:
             ty = c.choice(["int4", "int4", "int8", "float8", "bool"])
             sel = self.cast(self.expr(ty, 1), ty)
-            sel = ("(%s)" % sel[0], sel[1])      # CASE WHEN of the expression ends PL/pgSQL's
+            # parenthesised: a selector that is itself a CASE expression
+            # would take the END of the statement's WHEN list for its own
+            sel = ("(%s)" % sel[0], sel[1])
         for _ in range(c.randint(1, 3)):
             body = self.stmts(depth - 1, c.randint(1, 2))
             if simple:
@@ -915,6 +926,7 @@ class RefGen:
         self.r = rng
         self.cx = cx                # as in Gen
         self.used = set()
+        self.top = set()
         self.cat = cat
         self.procs = set()
         self.nvar = 0
@@ -1175,10 +1187,14 @@ class RefGen:
         if av and c.random() < 0.3:
             v = c.choice(av)
             self.used.add("into")
+            if depth == 3:
+                self.top.add("into")
             e = self.value(v["ty"])
             self.note_typmod(v)
             return {"k": "into", "v": v["name"], "e": e}
         self.used.add("case")
+        if depth == 3:
+            self.top.add("case")
         whens, sel = [], None
         if c.random() < 0.4:
             for _ in range(c.randint(1, 3)):
@@ -1842,7 +1858,7 @@ def script(prog, lang, status=False):
     o += "\\echo @@ end\nROLLBACK;\nRESET ROLE;\n\\echo @@ leak\n" + LEAK
     if status:
         o += ("\\echo @@ status\n"
-              "SELECT state, coalesce(reason, ''), compiled_calls, calls FROM "
+              "SELECT state, coalesce(reason, ''), compiled_calls, calls, deopts FROM "
               "plllvm_pj_status('%s.f%s'::regprocedure);\n" % (sch, prog.sig()))
     return o + CLEAN
 
@@ -2024,17 +2040,20 @@ def main():
         tally["jit-42501"] += b.count("ERROR:  42501") + b.count("\n42501 ")
         m = re.search(r"@@ status\n(.*)", b, re.S)
         st = m.group(1).strip().split("\n")[0].split("|") if m else []
-        ran = len(st) == 4 and int(st[2]) > 0
+        ok = len(st) == 5
+        ran = ok and int(st[2]) > 0
         if ran:
             tally["compiled"] += 1
         else:
-            reasons["%s %s" % tuple(st[:2]) if len(st) == 4 else "no status"] += 1
+            reasons["%s %s" % tuple(st[:2]) if ok else "no status"] += 1
         for k in prog.g.used:
             tally["has-" + k] += 1
-            if ran:
+            # the construct ran compiled: it stands outside any branch, and no
+            # call left the code at a deopt point
+            if ran and k in prog.g.top and int(st[4]) == 0:
                 tally["compiled-" + k] += 1
             else:
-                cx_reasons[k]["%s %s" % tuple(st[:2]) if len(st) == 4 else "no status"] += 1
+                cx_reasons[k]["%s %s" % tuple(st[:2]) if ok else "no status"] += 1
         if args.v or verdict != "equal":
             print("seed %s: %s%s" % (seed, verdict, "" if step is None else " at step %d" % step))
         if verdict in ("MISMATCH", "PERMISSIVE"):
