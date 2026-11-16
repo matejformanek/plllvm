@@ -213,11 +213,13 @@ PLpgSQL_nsitem_type
 PLpgSQL_plugin
 PLpgSQL_promise_type
 PLpgSQL_resolve_option
+PLpgSQL_row
 PLpgSQL_rwopt
 PLpgSQL_stmt
 PLpgSQL_stmt_assign
 PLpgSQL_stmt_block
 PLpgSQL_stmt_case
+PLpgSQL_stmt_execsql
 PLpgSQL_stmt_exit
 PLpgSQL_stmt_fori
 PLpgSQL_stmt_if

@@ -195,6 +195,9 @@ static void emit_stmts(PjEmit *em, List *stmts);
 static void emit_stmt(PjEmit *em, PLpgSQL_stmt *stmt);
 static void emit_block(PjEmit *em, PLpgSQL_stmt_block *block);
 static void emit_assign(PjEmit *em, PLpgSQL_stmt_assign *stmt);
+static void emit_assign_expr(PjEmit *em, PLpgSQL_var *var, int dno,
+							 const void *owner);
+static void emit_execsql(PjEmit *em, PLpgSQL_stmt_execsql *stmt);
 static void emit_case(PjEmit *em, PLpgSQL_stmt_case *stmt);
 static void case_discard(PjEmit *em, PLpgSQL_var *var);
 static void emit_if(PjEmit *em, PLpgSQL_stmt_if *stmt);
@@ -464,6 +467,35 @@ walk_stmt(PjScopeWalk *w, PLpgSQL_stmt *stmt)
 				return walk_stmts(w, cs->else_stmts);
 			}
 
+		case PLPGSQL_STMT_EXECSQL:
+			{
+				PLpgSQL_stmt_execsql *sql = (PLpgSQL_stmt_execsql *) stmt;
+				PLpgSQL_row *row;
+				PLpgSQL_var *var;
+
+				/*
+				 * Only what PL/pgSQL runs without SPI: a query into one
+				 * variable.  Whether the query is a simple expression is for
+				 * its plan to say.
+				 */
+				if (!sql->into || sql->target == NULL ||
+					sql->target->dtype != PLPGSQL_DTYPE_ROW ||
+					((PLpgSQL_row *) sql->target)->nfields != 1)
+					return psprintf("statement:%s",
+									plllvm_pj_stmt_typename(stmt));
+				row = (PLpgSQL_row *) sql->target;
+				reason = var_reason(func, row->varnos[0]);
+				if (reason != NULL)
+					return reason;
+				if (bms_is_member(row->varnos[0], w->case_vars))
+					return "datum:case variable";
+				var = (PLpgSQL_var *) func->datums[row->varnos[0]];
+				scope_expr(w, sql->sqlstmt, sql->sqlstmt,
+						   var->datatype->typoid, var->datatype->atttypmod);
+				((PjExpr *) llast(w->scope->exprs))->into_sql = true;
+				return NULL;
+			}
+
 		default:
 			return psprintf("statement:%s", plllvm_pj_stmt_typename(stmt));
 	}
@@ -551,6 +583,7 @@ scope_expr(PjScopeWalk *w, const void *owner, PLpgSQL_expr *expr,
 	pe->dsttype = dsttype;
 	pe->dsttypmod = dsttypmod;
 	pe->pos = w->cur_pos;
+	pe->build_pos = w->cur_pos;
 	pe->case_var = -1;
 	pe->case_sel = -1;
 	w->scope->exprs = lappend(w->scope->exprs, pe);
@@ -719,6 +752,7 @@ plllvm_pj_harvest(PLpgSQL_function *func, const PjScope *scope, PjHarvest *h)
 	const char *reason = NULL;
 
 	Bitmapset  *case_vars = NULL;
+	int			nextra = 0;
 
 	env_init(&env, func, h);
 
@@ -740,15 +774,33 @@ plllvm_pj_harvest(PLpgSQL_function *func, const PjScope *scope, PjHarvest *h)
 	/* then a copy of its statement's for each expression, naming it */
 	h->nbase = scope->npos;
 	h->has_notice = scope->has_notice;
-	h->npos = scope->npos + list_length(scope->exprs);
+	foreach_ptr(PjExpr, pe, scope->exprs)
+		nextra += pe->into_sql;
+	h->npos = scope->npos + list_length(scope->exprs) + nextra;
 	h->pos = palloc_array(PjPos, h->npos);
 	memcpy(h->pos, scope->pos, sizeof(PjPos) * scope->npos);
+	nextra = 0;
 	for (int i = 0; i < list_length(scope->exprs); i++)
 	{
 		PjExpr	   *pe = list_nth(scope->exprs, i);
 
 		h->pos[scope->npos + i] = scope->pos[pe->pos];
 		h->pos[scope->npos + i].expr = i;
+		if (pe->into_sql)
+		{
+			/*
+			 * The query is part of the context while the expression is
+			 * evaluated, not at the cast or the assignment after it. Building
+			 * the executor state belongs to the evaluation and names no
+			 * expression.
+			 */
+			h->pos[scope->npos + i].sql = pstrdup(pe->expr->query);
+			pe->build_pos = scope->npos + list_length(scope->exprs) + nextra;
+			h->pos[pe->build_pos] = scope->pos[pe->pos];
+			h->pos[pe->build_pos].expr = -1;
+			h->pos[pe->build_pos].sql = h->pos[scope->npos + i].sql;
+			nextra++;
+		}
 	}
 	h->fori = list_copy(scope->fori);
 	h->ndatums = func->ndatums;
@@ -1894,6 +1946,9 @@ emit_stmt(PjEmit *em, PLpgSQL_stmt *stmt)
 		case PLPGSQL_STMT_CASE:
 			emit_case(em, (PLpgSQL_stmt_case *) stmt);
 			break;
+		case PLPGSQL_STMT_EXECSQL:
+			emit_execsql(em, (PLpgSQL_stmt_execsql *) stmt);
+			break;
 		case PLPGSQL_STMT_LOOP:
 		case PLPGSQL_STMT_WHILE:
 			emit_loop(em, stmt);
@@ -1972,18 +2027,41 @@ emit_block(PjEmit *em, PLpgSQL_stmt_block *block)
 static void
 emit_assign(PjEmit *em, PLpgSQL_stmt_assign *stmt)
 {
-	PLpgSQL_var *var = (PLpgSQL_var *) em->func->datums[stmt->varno];
+	emit_assign_expr(em, (PLpgSQL_var *) em->func->datums[stmt->varno],
+					 stmt->varno, stmt->expr);
+}
+
+/* the next expression into a variable, as exec_assign_value() */
+static void
+emit_assign_expr(PjEmit *em, PLpgSQL_var *var, int dno, const void *owner)
+{
 	const char *datum;
 	const char *isnull;
 
 	em->hold_reset = !var->datatype->typbyval;
-	expr_value(em, stmt->expr, &datum, &isnull);
+	expr_value(em, owner, &datum, &isnull);
 	em->hold_reset = false;
 	check_not_null(em, var, isnull);
 	if (var->datatype->typbyval)
-		store_var(em, stmt->varno, datum, isnull);
+		store_var(em, dno, datum, isnull);
 	else
 		assign_var(em, var, datum, isnull, true);
+}
+
+/*
+ * exec_stmt_execsql() for a query that PL/pgSQL evaluates as an expression
+ * (the INTO of one variable): the value is assigned, and FOUND is true.
+ * Only the evaluation has the query in its context, so the cast and the
+ * NOT NULL check, which come after, are the statement's.
+ */
+static void
+emit_execsql(PjEmit *em, PLpgSQL_stmt_execsql *stmt)
+{
+	int			dno = ((PLpgSQL_row *) stmt->target)->varnos[0];
+
+	emit_assign_expr(em, (PLpgSQL_var *) em->func->datums[dno], dno,
+					 stmt->sqlstmt);
+	set_found(em, true);
 }
 
 /*

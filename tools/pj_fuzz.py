@@ -66,8 +66,8 @@ slices and subscripts past the ends, in the same steps as flat ones; a bit
 of the first argument inverts each condition, so that a few warm calls reach
 every branch.
 --cx adds CASE statements, searched and simple (a selector of any type of the
-mode, a list of values in a WHEN, with and without ELSE) to a flat or ref
-program.  The choices of these
+mode, a list of values in a WHEN, with and without ELSE), and SELECT
+expression INTO a variable to a flat or ref program.  The choices of these
 come from a generator of their own, so that a program without --cx is the
 same as it was; with --cx the programs are other ones.  Equal output is also
 what a function gives that PL/pgSQL ran, so the programs that contain each
@@ -167,7 +167,7 @@ def load_catalog(run_sql):
 class Gen:
     def __init__(self, rng, cat, cx=None):
         self.r = rng
-        self.cx = cx                # a generator for CASE, or None
+        self.cx = cx                # a generator for CASE and SELECT INTO, or None
         self.used = set()           # the constructs of cx the program has
         self.cat = cat
         self.procs = set()          # the functions the program may call
@@ -438,10 +438,15 @@ class Gen:
             level, msg, "".join(", " + a for a in args))}
 
     def cx_stmt(self, depth):
-        """A CASE.  The selector and the values of a simple
+        """A CASE or a SELECT INTO.  The selector and the values of a simple
         CASE have one type, so the operator of each WHEN is known, and a role
         that lacks it is refused as the walk expects."""
         c = self.cx
+        av = self.assignable()
+        if av and c.random() < 0.3:
+            v = c.choice(av)
+            self.used.add("into")
+            return {"k": "into", "v": v["name"], "e": self.assign_expr(v["ty"])}
         self.used.add("case")
         whens, simple = [], c.random() < 0.55
         sel = None
@@ -620,6 +625,8 @@ def render(s, ind):
         return "%sRETURN %s;\n" % (p, s["e"])
     if k == "raise":
         return "%s%s;\n" % (p, s["text"])
+    if k == "into":
+        return "%sSELECT %s INTO %s;\n" % (p, s["e"], s["v"])
     if k == "case":
         o = "%sCASE%s\n" % (p, " " + s["sel"] if s["sel"] else "")
         for w, b in s["whens"]:
@@ -1161,8 +1168,16 @@ class RefGen:
         return [self.stmt(depth) for _ in range(n)]
 
     def cx_stmt(self, depth):
-        """A CASE over a selector of text, varchar, numeric or integer."""
+        """A CASE over a selector of text, varchar, numeric or integer, or a
+        SELECT INTO a variable of one of them."""
         c = self.cx
+        av = self.assignable()
+        if av and c.random() < 0.3:
+            v = c.choice(av)
+            self.used.add("into")
+            e = self.value(v["ty"])
+            self.note_typmod(v)
+            return {"k": "into", "v": v["name"], "e": e}
         self.used.add("case")
         whens, sel = [], None
         if c.random() < 0.4:
@@ -1973,7 +1988,7 @@ def main():
     ap.add_argument("--out", default="results-fuzz")
     ap.add_argument("--floor", type=float, default=0.5)
     ap.add_argument("--mode", choices=["flat", "rec", "ref"], default="flat")
-    ap.add_argument("--cx", action="store_true", help="CASE (flat, ref)")
+    ap.add_argument("--cx", action="store_true", help="CASE and SELECT INTO (flat, ref)")
     ap.add_argument("--floor-cx", type=float, default=0.15, dest="floor_cx")
     ap.add_argument("-v", action="store_true")
     ap.add_argument("--selftest", action="store_true", help="check frame_mix, no cluster")
@@ -1996,7 +2011,7 @@ def main():
         cat.universe = universe
     tally = Counter()
     reasons = Counter()
-    cx_reasons = {"case": Counter()}
+    cx_reasons = {"case": Counter(), "into": Counter()}
     failed = False
     for i in range(args.start, args.start + args.n):
         seed = "%d:%d" % (args.seed, i)
@@ -2052,7 +2067,7 @@ def main():
         print("pj_fuzz: compiled fraction below the floor of %.0f%%" % (100 * args.floor))
         failed = True
     if args.cx:
-        for k in ("case",):
+        for k in ("case", "into"):
             print("pj_fuzz: %s: programs with it %d, compiled %d" % (
                 k, tally["has-" + k], tally["compiled-" + k]))
             for why, v in cx_reasons[k].most_common(6):

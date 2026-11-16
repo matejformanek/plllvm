@@ -271,6 +271,18 @@ Only `plllvm_jit.c` and `plllvm_error.cpp` include LLVM headers.
   and before the ELSE. A CASE without an ELSE that matches nothing raises
   from the statement, which names no expression, so the call after it is
   not sent to PL/pgSQL.
+* `SELECT` *expression* `INTO` a variable is the one SQL statement that
+  PL/pgSQL runs without SPI, when its query is a simple expression and the
+  target is one variable (`exec_stmt_execsql`). It is an assignment whose
+  value converts to the type of the target as a DECLARE default does, and
+  sets FOUND. Whether the query is simple is for its plan to say: one that
+  is not (a `FROM`, an aggregate, a set-returning function, or an error at
+  plan time) declines the function as `not simple`, once it has been
+  planned. The context lines are PL/pgSQL's: while the expression runs, and
+  while its executor state is built, the query is part of the context
+  (`SQL statement "..."`, from the position of the expression and of the
+  build); the conversion, the NOT NULL check and the copy come after
+  PL/pgSQL has left the query, so they are positioned at the statement.
 * Statements are walked twice in the same order, skipping what a RETURN, EXIT,
   CONTINUE or RAISE that raises makes unreachable: the first walk collects the expressions and
   positions, the second emits code and takes the expressions back in that

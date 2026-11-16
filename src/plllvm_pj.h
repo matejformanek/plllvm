@@ -109,6 +109,8 @@ typedef struct PjPos
 	const char *stmt;			/* statement type name, or NULL */
 	const char *text;			/* err_text, or NULL */
 	int			expr;			/* the expression running there, or -1 */
+	const char *sql;			/* the SQL statement an error context names
+								 * while it runs, or NULL */
 } PjPos;
 
 #define PJ_POS_NONE		0
@@ -148,10 +150,13 @@ typedef struct PjExpr
 	int32		dsttypmod;
 	PjH1		h1;
 	int			pos;			/* of its statement or variable */
+	int			build_pos;		/* where an error of building its executor
+								 * state is reported */
 	int			case_var;		/* selector of a simple CASE: the datum of its
 								 * variable, else -1 */
 	int			case_sel;		/* WHEN of a simple CASE: index of the
 								 * selector, else -1 */
+	bool		into_sql;		/* the expression of a SELECT INTO */
 	/* READY only, copies in the harvest context */
 	Expr	   *tree;
 	Oid			type;

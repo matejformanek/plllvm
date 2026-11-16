@@ -216,7 +216,9 @@ second translates the function to LLVM IR if it is in scope, and later calls
 run the code. In scope so far: blocks with `DECLARE` (defaults, `NOT NULL`,
 `CONSTANT`), assignment to a variable, `IF`, `CASE` (searched and simple),
 `LOOP`, `WHILE`, `FOR` over integers (`REVERSE`, `BY`), `EXIT` and `CONTINUE`
-with labels, `RETURN`, and `RAISE` without `USING`,
+with labels, `RETURN`, `RAISE` without `USING`, and `SELECT` *expression*
+`INTO` one variable, the form PL/pgSQL evaluates without SPI (a `FROM`, a
+second target or a record target is declined),
 with arguments and variables of a type passed by value that is no domain, or
 of a built-in base type passed by reference (`text`, `varchar`, `numeric`,
 `name`, `uuid`, `interval`, `bytea`, `jsonb`, ...), or an array of one, and

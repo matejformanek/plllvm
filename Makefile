@@ -50,7 +50,7 @@ REGRESS = plllvm_setup $(REGRESS_FEATURES) $(REGRESS_KERNELS) expr_plugin \
 # variant only, REGRESS_PJ_OPT at opt level 3.
 REGRESS_PJ = pj_language pj_basic pj_errors pj_guards pj_execute pj_casts pj_sessions \
 		pj_control pj_kernels pj_ops pj_bounds pj_memory pj_boxed pj_abort pj_planfree pj_calls \
-		pj_byref pj_udf pj_typmod pj_raise pj_array pj_case
+		pj_byref pj_udf pj_typmod pj_raise pj_array pj_case pj_into
 REGRESS_PJ_ONCE = pj_states pj_discard pj_execute_diff pj_arms pj_ctxraw \
 		pj_sessions_midcall
 REGRESS_PJ_OPT = pj_kernels pj_ops
@@ -452,8 +452,8 @@ check-pj-cmodule: port-ok
 # at opt level 0 and 2, NREC recursive ones and NREF over text and numeric,
 # in the throwaway database pj_fuzz.  A difference is reported by seed, with
 # the program and both outputs in results-fuzz/.  Not part of installcheck or
-# verify.  NCX programs of each of the flat and ref modes also have CASE
-# (--cx).
+# verify.  NCX programs of each of the flat and ref modes also have CASE and
+# SELECT INTO (--cx).
 N ?= 2000
 NREC ?= 500
 NREF ?= 500
@@ -481,7 +481,7 @@ fuzz-pj: port-ok
 	done; exit $$rc
 
 # The classes of the fuzzer on programs of known shape, and 60 programs with
-# CASE, flat and ref: seed 22:745 is
+# CASE and SELECT INTO, flat and ref: seed 22:745 is
 # stale-privilege (L2), seed 21:597 frame-mix ((g)); and frame_mix refuses a
 # wrong value.  setup() drops and recreates the fuzz database, so the
 # cluster must be a throwaway

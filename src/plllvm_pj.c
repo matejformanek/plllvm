@@ -903,6 +903,25 @@ exec_error_callback(void *arg)
 
 	set_errcontext_domain(PG_TEXTDOMAIN("plpgsql"));
 
+	/*
+	 * A query that PL/pgSQL evaluates itself, as
+	 * plpgsql_execsql_error_callback does; an error with a position in the
+	 * query is reported against it
+	 */
+	if (pos->sql != NULL)
+	{
+		int			position = geterrposition();
+
+		if (position > 0)
+		{
+			errposition(0);
+			internalerrposition(position);
+			internalerrquery(pos->sql);
+		}
+		else
+			errcontext("SQL statement \"%s\"", pos->sql);
+	}
+
 	if (pos->text != NULL && pos->lineno > 0)
 		errcontext("PL/pgSQL function %s line %d %s", signature, pos->lineno,
 				   dgettext(PG_TEXTDOMAIN("plpgsql"), pos->text));

@@ -86,7 +86,7 @@ plllvm_pj_boxed_eval(PjCtx *ctx, int32 idx)
 		/* a build that fails stops no expression: PL/pgSQL stamps nothing */
 		int			expr_pos = ctx->pos;
 
-		ctx->pos = pe->pos;
+		ctx->pos = pe->build_pos;
 		slot_build(lv, slot, pe, ctx);
 		ctx->pos = expr_pos;
 	}
