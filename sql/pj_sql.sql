@@ -48,6 +48,7 @@ END $$;
 SELECT psq_perform(1), psq_perform(19), psq_perform(25);
 SELECT psq_perform(1), psq_perform(19), psq_perform(25);
 SELECT psq_perform(1), psq_perform(19), psq_perform(25);
+SELECT pj_expect('psq_perform(integer)', 'compiled') \gset
 
 -- a callee that is not VOLATILE is allowed, and runs once per statement
 CREATE FUNCTION psq_callee(n int) RETURNS text LANGUAGE :pj_lang AS $$
@@ -59,6 +60,7 @@ END $$;
 SELECT psq_callee(1);
 SELECT psq_callee(2);
 SELECT psq_callee(3);
+SELECT pj_expect('psq_callee(integer)', 'compiled') \gset
 
 -- an error inside the statement has SPI's line above PL/pgSQL's
 CREATE FUNCTION psq_err(n int) RETURNS int LANGUAGE :pj_lang AS $$
@@ -71,6 +73,7 @@ SELECT psq_err(1), psq_err(2);
 SELECT psq_try('SELECT psq_err(0)');
 SELECT psq_try('SELECT psq_err(0)');
 SELECT psq_err(3);
+SELECT pj_expect('psq_err(integer)', 'compiled') \gset
 
 -- PERFORM of a SELECT INTO creates the table, and PL/pgSQL says so
 CREATE FUNCTION psq_selinto(n int) RETURNS int LANGUAGE :pj_lang AS $$
@@ -96,6 +99,7 @@ SELECT psq_noint(0), psq_noint(0);
 SELECT psq_try('SELECT psq_noint(1)');
 SELECT psq_try('SELECT psq_noint(1)');
 SELECT psq_noint(0);
+SELECT pj_expect('psq_noint(integer)', 'compiled') \gset
 
 -- what the parameters carry: every kind of variable the statement reads
 CREATE FUNCTION psq_vars(v_i int, v_b bigint, v_f float8, v_t text, v_ok bool,
@@ -123,6 +127,7 @@ SELECT psq_vars(5, 5, 2.5, 'row9', true, ARRAY[1, 5, 9], 5.5),
 SELECT psq_vars(5, 5, 2.5, 'row9', true, ARRAY[1, 5, 9], 5.5),
        psq_vars(3, 9, 9.5, 'row3', true, ARRAY[3], 4),
        psq_vars(5, 5, 2.5, 'row9', false, ARRAY[1, 5, 9], 5.5);
+SELECT pj_expect('psq_vars(integer,bigint,double precision,text,boolean,integer[],numeric)', 'compiled') \gset
 
 -- a loop variable, a local and FOUND are parameters too
 CREATE FUNCTION psq_locals(n int) RETURNS text LANGUAGE :pj_lang AS $$
@@ -139,6 +144,7 @@ END $$;
 SELECT psq_locals(5), psq_locals(25);
 SELECT psq_locals(5), psq_locals(25);
 SELECT psq_locals(5), psq_locals(25);
+SELECT pj_expect('psq_locals(integer)', 'compiled') \gset
 
 -- variable_conflict: error and use_variable are compiled, use_column is not
 CREATE FUNCTION psq_conf_error(a int) RETURNS bool LANGUAGE :pj_lang AS $$
@@ -174,6 +180,9 @@ SELECT psq_conf_var(1), psq_conf_var(30);
 SELECT psq_conf_col(1), psq_conf_col(30);
 SELECT psq_conf_col(1), psq_conf_col(30);
 SELECT psq_conf_col(1), psq_conf_col(30);
+SELECT pj_expect('psq_conf_error(integer)', 'compiled') \gset
+SELECT pj_expect('psq_conf_var(integer)', 'compiled') \gset
+SELECT pj_expect('psq_conf_col(integer)', 'declined:variable_conflict') \gset
 
 -- plan identity: the custom and generic plans of the statement are PL/pgSQL's,
 -- so a call that PL/pgSQL runs and one that we run count towards the same
@@ -246,6 +255,8 @@ END $$;
 SELECT psq_b1(1), psq_b1(2);
 SELECT psq_b1(1), psq_b1(2);
 SELECT psq_b1(1), psq_b1(2);
+SELECT pj_expect('psq_b1(integer)', 'compiled') \gset
+SELECT pj_mark() \gset
 -- TRUNCATE and ANALYZE: the plan is invalid at the next call
 TRUNCATE psq_b1;
 SELECT psq_b1(1), psq_b1(2);
@@ -261,6 +272,8 @@ DISCARD PLANS;
 SELECT psq_b1(3), psq_b1(99);
 DROP INDEX psq_b1_a;
 SELECT psq_b1(3), psq_b1(99);
+SELECT pj_expect('psq_b1(integer)', 'compiled') \gset
+SELECT pj_delta(12, 0, NULL, 0, 0);
 
 -- a column added or a table replaced: the next call goes on, or says why not
 ALTER TABLE psq_b1 ADD COLUMN c int DEFAULT 7;
@@ -268,6 +281,7 @@ SELECT psq_b1(3), psq_b1(99);
 ALTER TABLE psq_b1 DROP COLUMN b;
 SELECT psq_b1(3), psq_b1(99);
 SELECT psq_b1(3), psq_b1(99);
+SELECT pj_expect('psq_b1(integer)', 'compiled') \gset
 -- a column the statement names goes
 CREATE FUNCTION psq_b1c(n int) RETURNS bool LANGUAGE :pj_lang AS $$
 BEGIN

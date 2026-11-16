@@ -8,8 +8,9 @@ SET plllvm.regress_test_mode = on;
 -- the answer for every reason to decline, and the path of each call
 CREATE FUNCTION ps_inc(n int) RETURNS int LANGUAGE plpgsql_jit AS $$
 BEGIN RETURN n + 1; END $$;
-CREATE FUNCTION ps_perform(n int) RETURNS int LANGUAGE plpgsql_jit AS $$
-BEGIN PERFORM n; RETURN 1; END $$;
+CREATE FUNCTION ps_diag(n int) RETURNS int LANGUAGE plpgsql_jit AS $$
+DECLARE r int;
+BEGIN GET DIAGNOSTICS r = ROW_COUNT; RETURN 1; END $$;
 CREATE FUNCTION ps_decl(n int) RETURNS int LANGUAGE plpgsql_jit AS $$
 DECLARE x numeric := n; BEGIN RETURN x; END $$;
 CREATE FUNCTION ps_exc(n int) RETURNS int LANGUAGE plpgsql_jit AS $$
@@ -29,13 +30,13 @@ BEGIN RETURN n + 1; END $$;
 CREATE FUNCTION ps_user(n int) RETURNS int LANGUAGE plpgsql_jit AS $$
 BEGIN RETURN ps_callee(n); END $$;
 
-SELECT ps_inc(1), ps_perform(1), ps_decl(1), ps_exc(1), ps_text('a'), ps_poly(1),
+SELECT ps_inc(1), ps_diag(1), ps_decl(1), ps_exc(1), ps_text('a'), ps_poly(1),
        ps_cast(), ps_rnd(), ps_sub(1), ps_user(1);
 SELECT p.proname, s.state, s.reason, s.last_path
   FROM pg_proc p, LATERAL plllvm_pj_status(p.oid::regprocedure) s
  WHERE p.proname LIKE 'ps\_%' AND p.prolang = (SELECT oid FROM pg_language WHERE lanname = 'plpgsql_jit')
  ORDER BY 1;
-SELECT ps_inc(1), ps_perform(1), ps_decl(1), ps_exc(1), ps_text('a'), ps_poly(1),
+SELECT ps_inc(1), ps_diag(1), ps_decl(1), ps_exc(1), ps_text('a'), ps_poly(1),
        ps_cast(), ps_rnd(), ps_sub(1), ps_user(1);
 SELECT p.proname, s.state, s.reason, s.last_path, s.calls, s.compiled_calls,
        s.translations
@@ -44,7 +45,7 @@ SELECT p.proname, s.state, s.reason, s.last_path, s.calls, s.compiled_calls,
  ORDER BY 1;
 -- a declined function keeps no code and no translation
 SELECT s.exprs, s.unplanned, s.variants, s.native, s.translate_ms
-  FROM plllvm_pj_status('ps_perform(int)') s;
+  FROM plllvm_pj_status('ps_diag(int)') s;
 -- the compiled one has
 SELECT s.exprs, s.unplanned, s.variants, s.native, s.boxed, s.restartable,
        s.translate_ms > 0 AS translate_ms
@@ -55,7 +56,7 @@ SELECT kind, translate_ms > 0 AS translate_ms, ir_instructions > 0 AS ir
 SELECT s.symbol IS NOT NULL AS has_symbol,
        (SELECT count(*) FROM plllvm_code_cache() c WHERE c.symbol = s.symbol) AS in_cache
   FROM plllvm_pj_status('ps_inc(int)') s;
-SELECT s.symbol IS NULL AS declined_has_none FROM plllvm_pj_status('ps_perform(int)') s;
+SELECT s.symbol IS NULL AS declined_has_none FROM plllvm_pj_status('ps_diag(int)') s;
 
 -- a variant that waits for plans has no code: no symbol and no IR, and the
 -- variant of the other codegen keeps its own
@@ -75,7 +76,7 @@ SELECT count(*) AS expr_modules FROM plllvm_code_cache() WHERE kind <> 'pj' AND 
 
 -- the IR is there for the variant of the session, and NULL otherwise
 SELECT plllvm_pj_ir('ps_inc(int)') LIKE 'declare void @plllvm_cfi()%' AS ir,
-       plllvm_pj_ir('ps_perform(int)') IS NULL AS declined_has_none;
+       plllvm_pj_ir('ps_diag(int)') IS NULL AS declined_has_none;
 
 -- the options of the session select another variant of the same harvest
 SELECT pj_mark() \gset

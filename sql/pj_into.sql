@@ -250,7 +250,8 @@ SELECT pi_sql(1);  -- fail
 SELECT pj_expect('pi_from(integer)', 'declined:not simple') \gset
 SELECT pj_expect('pi_two(integer)', 'declined:statement:SQL statement') \gset
 SELECT pj_expect('pi_rec(integer)', 'declined:datum:record') \gset
-SELECT pj_expect('pi_sql(integer)', 'declined:statement:SQL statement') \gset
+-- no INTO: the statement runs through SPI, and fails there as PL/pgSQL's does
+SELECT pj_expect('pi_sql(integer)', 'compiled') \gset
 
 -- a query with a FROM in an arm that has not run is not planned yet: the
 -- function is translated, runs, and is declined once the arm has run

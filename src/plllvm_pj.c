@@ -454,7 +454,7 @@ seen_step(PLpgSQL_function *func, PjEntry *e)
 	{
 		PjExpr	   *pe = list_nth(scope.exprs, e->deopt_expr);
 
-		if (pe->h1 != PJ_H1_READY)
+		if (pe->h1 != PJ_H1_READY && pe->h1 != PJ_H1_SQL)
 		{
 			e->last_path = "interpreted:unplanned";
 			return false;
@@ -820,6 +820,14 @@ run(PLpgSQL_function *func, FunctionCallInfo fcinfo, PjEntry *e, PjVariant *v)
 		MemoryContextSwitchTo(entry_cxt);
 		if (ctx.deopt == 0 && !fcinfo->isnull && !func->fn_retbyval)
 			retval = datumCopy(retval, false, func->fn_rettyplen);
+
+		/*
+		 * The memory of the statements goes now that the result is out.  A
+		 * variant with a statement has no deopt point once one has run.
+		 */
+		Assert(!(ctx.spi && ctx.deopt != 0));
+		plllvm_pj_sql_finish(&ctx);
+		MemoryContextSwitchTo(entry_cxt);
 	}
 	PG_CATCH();
 	{
