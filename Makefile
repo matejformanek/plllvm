@@ -450,11 +450,11 @@ check-pj-cmodule: port-ok
 
 # The differential fuzzer: N programs from SEED, as plpgsql and as plpgsql_jit
 # at opt level 0 and 2, NREC recursive ones, NREF over text and numeric and
-# NELEM of reads and stores of array elements, NSQL of statements for SPI, in
-# the throwaway database pj_fuzz.  A difference is reported by seed, with
-# the program and both outputs in results-fuzz/.  Not part of installcheck or
-# verify.  NCX programs of each of the flat and ref modes also have CASE and
-# SELECT INTO (--cx).
+# NELEM of reads and stores of array elements, NSQL of PERFORM, SELECT INTO and
+# statements for SPI, in the throwaway database pj_fuzz.  A difference is
+# reported by seed, with the program and both outputs in results-fuzz/.  Not
+# part of installcheck or verify.  NCX programs of each of the flat and ref
+# modes also have CASE and SELECT INTO (--cx).
 N ?= 2000
 NREC ?= 500
 NREF ?= 500
@@ -493,8 +493,9 @@ fuzz-pj: port-ok
 # stale-privilege (L2), seed 21:597 frame-mix ((g)); and frame_mix refuses a
 # wrong value.  150 programs of element reads and stores must have no call
 # of the executor in 90% of them, and deopt.  150 programs of statements for
-# SPI must have run one in compiled code in 40% of them.  setup() drops and recreates the
-# fuzz database, so the cluster must be a throwaway
+# SPI must have run one in compiled code in 40% of them, and 30% of those that
+# have SELECT INTO alone.  setup() drops and recreates the fuzz database, so
+# the cluster must be a throwaway
 check-pj-fuzz: port-ok
 	@case "$(origin PLLLVM_PORT):$(PLLLVM_PORT)" in file:*|*:|*:544[2-5]) \
 	  echo "check-pj-fuzz needs the PLLLVM_PORT of a throwaway cluster" >&2; \

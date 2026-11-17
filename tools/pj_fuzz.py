@@ -73,17 +73,22 @@ are arrays of the other lower bounds, with NULL elements, empty, two-dimensional
 or NULL; subscripts are NULL, raising, out of range, past either end or at the
 ends of int4.  The run fails if no program had a deopt, or if fewer than
 --floor-elem of the programs have a variant without a call of the executor.
---mode sql writes functions of PERFORM and of statements with no INTO over a
-small table, that run through SPI in compiled code: parameters of every kind
-the statement may name, statements that raise, the plan of 1 / n over no rows
-that tells a custom plan from a generic one, a callee that says when it runs,
-branches, loops.  Between the calls the script truncates and refills the table,
-analyses it, creates and drops an index, discards the plans, changes
-plan_cache_mode, adds a column; a second argument that is NULL sends a call to
-the interpreter, so that the plans of the two paths are the same ones.  Equal
-output is also what a function gives that PL/pgSQL ran, so the run fails if
-fewer than --floor-sql of the programs ran a statement through SPI in compiled
-code (plllvm_pj_stats() sql_execs).
+--mode sql writes functions of PERFORM, of statements with no INTO and of
+SELECT INTO over a small table, that run through SPI in compiled code:
+parameters of every kind the statement may name, statements that raise, the
+plan of 1 / n over no rows that tells a custom plan from a generic one, a
+callee that says when it runs, branches, loops.  A SELECT INTO has one target
+or several, STRICT or not, over no row, one or two, with a column more or
+fewer than the targets.  Between the calls the script truncates and refills
+the table, analyses it, creates and drops an index, discards the plans, changes
+plan_cache_mode, the extra checks of PL/pgSQL and the type of a column, adds a
+column; a second argument that is NULL sends a call to the interpreter, so
+that the plans of the two paths are the same ones.  Equal output is also what
+a function gives that PL/pgSQL ran, so the run fails if fewer than --floor-sql
+of the programs ran a statement through SPI in compiled code
+(plllvm_pj_stats() sql_execs), and if fewer than --floor-into of the programs
+whose statements are all SELECT INTO did.  Of the 1500 programs of seeds 21 to
+23 about 61% and 43% did.
 --cx adds CASE statements, searched and simple (a selector of any type of the
 mode, a list of values in a WHEN, with and without ELSE), and SELECT
 expression INTO a variable to a flat or ref program.  The choices of these
@@ -102,7 +107,7 @@ schema name is normalised.  Every statement of a script is a step.
 Usage: pj_fuzz.py --psql <psql> --host <dir> --port <port> [--n N] [--start I]
                   [--seed S] [--opt-level 0|2|3] [--out dir] [--floor 0.5]
                   [--mode flat|rec|ref|elem|sql] [--cx] [--floor-cx 0.15]
-                  [--floor-elem 0.9] [--floor-sql 0.4]
+                  [--floor-elem 0.9] [--floor-sql 0.4] [--floor-into 0.3]
 """
 import argparse
 import os
@@ -2060,15 +2065,63 @@ SQL_RARE = 9                     # the n of the branch no warm call takes
 
 class SqlGen:
     """Statements over the table sq_t, the arguments n and t, the local
-    r that collects what each statement saw, the loop variable i."""
+    r that collects what each statement saw, the loop variable i.  The
+    targets of an INTO are tx, ty (text), ix, iy (integer), big (bigint) and
+    nn (integer NOT NULL), which a statement's collect() appends to r."""
 
-    def __init__(self, rng):
+    def __init__(self, rng, into=False):
         self.r = rng
+        self.into = into
+
+    def collect(self):
+        return " r := r || found::text || coalesce(tx, '-') || coalesce(ix::text, '-') || coalesce(big::text, '-');"
+
+    def select_into(self, loop, raising=False):
+        """A SELECT INTO.  Most of them have one row for every n of the
+        warm-up calls, since a call that raises leaves the statements after it
+        unplanned; those that raise by the argument are RAISING ones, which
+        stand where only an edge call goes."""
+        r = self.r
+        v = "i" if loop else "n"
+        k = "1 + abs(%s) %% 5" % v      # a key that has a row
+        if raising:
+            return r.choice([
+                "SELECT b INTO STRICT tx FROM sq_t WHERE a = %s;" % v,
+                "SELECT a INTO STRICT ix FROM sq_t WHERE a > %s;" % v,
+                "SELECT a, b INTO STRICT ix, tx FROM sq_t WHERE a > %s;" % v,
+                "SELECT a INTO nn FROM sq_t WHERE a = %s;" % v,
+                "SELECT 1 / (%s - %d) INTO ix FROM sq_t WHERE a = %s;" % (v, SQL_BAD, k)])
+        x = r.random()
+        if x < 0.15:
+            return "SELECT b INTO tx FROM sq_t WHERE a = %s;" % v
+        if x < 0.27:
+            return "SELECT a, b INTO ix, tx FROM sq_t WHERE a > %s ORDER BY a;" % v
+        if x < 0.35:
+            return "SELECT a, b INTO ix, ty FROM sq_t WHERE a > %s ORDER BY a DESC;" % v
+        if x < 0.45:
+            return "SELECT count(*) INTO big FROM sq_t WHERE a > %s AND b <> t;" % v
+        if x < 0.52:
+            return "SELECT b INTO STRICT tx FROM sq_t WHERE a = %s;" % k
+        if x < 0.58:
+            return "SELECT a, b INTO STRICT ix, tx FROM sq_t WHERE a = %s;" % k
+        if x < 0.65:
+            return "SELECT a INTO ix, iy FROM sq_t WHERE a = %s;" % v
+        if x < 0.72:
+            return "SELECT a, b, a + 1 INTO ix, tx FROM sq_t WHERE a = %s;" % v
+        if x < 0.78:
+            return "SELECT a INTO nn FROM sq_t WHERE a = %s;" % k
+        if x < 0.84:
+            return "SELECT 1 / n INTO ix FROM sq_t WHERE false;"
+        if x < 0.90:
+            return "SELECT sq_noisy(%s) INTO ix FROM sq_t WHERE a = 1;" % v
+        if x < 0.95:
+            return "SELECT false, 1 INTO found, ix FROM sq_t WHERE a = %s;" % v
+        return "SELECT %s + 1 INTO ix FROM sq_t WHERE a = %s;" % (v, v)
 
     def cond(self):
         r = self.r
         return r.choice(["n > 2", "n % 2 = 0", "t = 'row3'", "n < %d" % SQL_BAD,
-                         "found", "n = %d" % r.randint(0, 6)])
+                         "found", "n = %d" % r.randint(1, 6)])
 
     def perform(self, loop):
         r = self.r
@@ -2096,6 +2149,8 @@ class SqlGen:
         r = self.r
         x = r.random()
         if x < 0.55 or d <= 0:
+            if self.into or r.random() < 0.35:
+                return self.select_into(loop) + self.collect()
             return self.perform(loop) + " r := r || found::text;"
         if x < 0.75 and not loop:
             body = " ".join(self.stmt(d - 1, True) for _ in range(r.randint(1, 3)))
@@ -2112,15 +2167,22 @@ class SqlProgram:
         r = random.Random(seed)
         self.rng = r
         self.seed = seed
-        g = SqlGen(r)
+        # a part of the programs has no PERFORM at all, to count them
+        self.into = r.random() < 0.4
+        g = SqlGen(r, self.into)
         self.body = [g.stmt(2, False) for _ in range(r.randint(2, 5))]
         # a statement no warm call reaches: planned by the call that takes it
+        rare = g.select_into(False) + g.collect() if self.into else \
+            g.perform(False) + " r := r || found::text;"
         self.body.insert(r.randint(0, len(self.body)),
-                         "IF n = %d THEN %s r := r || found::text; END IF;"
-                         % (SQL_RARE, g.perform(False)))
+                         "IF n = %d THEN %s END IF;" % (SQL_RARE, rare))
         if r.random() < 0.15:
             # SELECT with no INTO, which raises
             self.body.append("IF n = %d THEN SELECT n; END IF;" % (SQL_RARE + 1))
+        if self.into and r.random() < 0.5:
+            # an INTO that raises, which only an edge call reaches
+            self.body.append("IF n = %d THEN %s END IF;"
+                             % (SQL_RARE + 1, g.select_into(False, True) + g.collect()))
         self.priv = False
         self.real = {}
         self.status_cols = ("state, coalesce(reason, ''), compiled_calls, calls, deopts, "
@@ -2132,7 +2194,9 @@ class SqlProgram:
 
     def function(self):
         o = ("CREATE FUNCTION f(n integer, h integer, t text) RETURNS text "
-             "LANGUAGE :lang AS $f$\nDECLARE\n  r text := '';\n  i integer;\nBEGIN\n")
+             "LANGUAGE :lang AS $f$\nDECLARE\n  r text := '';\n  i integer;\n"
+             "  tx text; ty text; ix integer; iy integer; big bigint; nn integer NOT NULL := 1;\n"
+             "BEGIN\n")
         for st in self.body:
             o += "  %s\n" % st
         return o + "  RETURN r;\nEND\n$f$;\n"
@@ -2168,6 +2232,17 @@ class SqlProgram:
             "SET plan_cache_mode = force_generic_plan;",
             "SET plan_cache_mode = auto;",
             "DELETE FROM sq_t WHERE a > 5;",
+            "SET plpgsql.extra_warnings = 'too_many_rows, strict_multi_assignment';",
+            "RESET plpgsql.extra_warnings;",
+            # an error check for one call, which a persistent one would fail
+            # every call after it
+            "SET plpgsql.extra_errors = '%s'; SELECT w(%d, 1, 'x'); RESET plpgsql.extra_errors;"
+            % (self.rng.choice(["too_many_rows", "strict_multi_assignment", "all"]),
+               self.rng.randint(0, 6)),
+            # a column of another type for one call, which converts it; for
+            # more the statements would be declined, as a cast is
+            "ALTER TABLE sq_t ALTER COLUMN a TYPE bigint; SELECT w(%d, 1, 'x'); "
+            "ALTER TABLE sq_t ALTER COLUMN a TYPE integer;" % self.rng.randint(0, 6),
         ])
 
     def make_steps(self):
@@ -2175,7 +2250,8 @@ class SqlProgram:
         st = ["@setup", "@create", "@wrapper"]
         # every n a condition tests, with each t, so that the branches are
         # planned before the code is translated
-        for n in range(7):
+        # (and the n that takes the branch with a statement that raises)
+        for n in list(range(7)) + [SQL_RARE + 1]:
             st.append("SELECT f(%d, 1, '%s');" % (n, ["row3", "x", "row1"][n % 3]))
         for _ in range(r.randint(5, 10)):
             if r.random() < 0.4:
@@ -2183,6 +2259,12 @@ class SqlProgram:
             st.append(self.call(r.choice(["harmless", "edge", "edge"]),
                                 r.choice(["f", "f", "w"])))
         st.append(self.call("rare"))
+        # the plans the DDL above made stale are made again by the interpreter
+        # (h is NULL), at each branch, and the function is then run compiled
+        for n in list(range(1, 7)) + [SQL_RARE, SQL_RARE + 1]:
+            st.append("SELECT w(%d, NULL, '%s');" % (n, ["row3", "x", "row1"][n % 3]))
+        for n in list(range(1, 7)) + [SQL_RARE, SQL_RARE + 1]:
+            st.append("SELECT w(%d, 1, '%s');" % (n, ["row3", "x", "row1"][n % 3]))
         for _ in range(3):
             st.append(self.call("harmless"))
         st.append(self.call("rare", "w"))
@@ -2206,9 +2288,13 @@ def main_sql(args):
         ok = len(st) == 7
         if ok and int(st[2]) > 0:
             tally["compiled"] += 1
+        if prog.into:
+            tally["into-programs"] += 1
         if ok and int(st[5]) > 0:
             tally["ran-sql"] += 1
             tally["sql-execs"] += int(st[5])
+            if prog.into:
+                tally["into-ran-sql"] += 1
         else:
             reasons["%s %s, last path %s" % (st[0], st[1], st[6]) if ok else "no status"] += 1
         if ok:
@@ -2226,16 +2312,21 @@ def main_sql(args):
                             script(prog, "plpgsql_jit", True), a, b))
             print("  program and outputs: %s" % f)
     print("pj_fuzz sql: seed=%d programs=%d opt_level=%s equal=%d permissive=%d mismatch=%d "
-          "compiled=%d (%.1f%%) ran SQL compiled=%d (%.1f%%), %d statements, deopts=%d"
+          "compiled=%d (%.1f%%) ran SQL compiled=%d (%.1f%%), %d statements, deopts=%d, "
+          "SELECT INTO programs=%d ran SQL compiled=%d"
           % (args.seed, args.n, args.opt_level, tally["equal"], tally["PERMISSIVE"],
              tally["MISMATCH"], tally["compiled"], 100.0 * tally["compiled"] / max(args.n, 1),
              tally["ran-sql"], 100.0 * tally["ran-sql"] / max(args.n, 1), tally["sql-execs"],
-             tally["deopts"]))
+             tally["deopts"], tally["into-programs"], tally["into-ran-sql"]))
     for k, v in reasons.most_common(8):
         print("  no SQL compiled: %5d  %s" % (v, k))
     if tally["ran-sql"] < args.floor_sql * args.n:
         print("pj_fuzz: programs that ran SQL compiled below the floor of %.0f%%"
               % (100 * args.floor_sql))
+        failed = True
+    if tally["into-ran-sql"] < args.floor_into * tally["into-programs"]:
+        print("pj_fuzz: programs of SELECT INTO that ran SQL compiled below the floor of %.0f%%"
+              % (100 * args.floor_into))
         failed = True
     return 1 if failed else 0
 
@@ -2426,6 +2517,7 @@ def main():
     ap.add_argument("--floor-cx", type=float, default=0.15, dest="floor_cx")
     ap.add_argument("--floor-elem", type=float, default=0.9, dest="floor_elem")
     ap.add_argument("--floor-sql", type=float, default=0.4, dest="floor_sql")
+    ap.add_argument("--floor-into", type=float, default=0.3, dest="floor_into")
     ap.add_argument("-v", action="store_true")
     ap.add_argument("--selftest", action="store_true", help="check frame_mix, no cluster")
     args = ap.parse_args()
