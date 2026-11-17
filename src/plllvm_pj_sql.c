@@ -562,6 +562,7 @@ sql_facts_ok(PjSql *sql)
 	/* the lists are in the caller's context, which lasts as long as the call */
 	if (bms_equal(sql->expr->paramnos, sql->paramnos) &&
 		(!sql->into || sql_result_same(sql, psrc)) &&
+		(!sql->writes || !psrc->dependsOnRLS) &&
 		!sql_scan_walker((Node *) psrc->query_list, &facts) &&
 		(!sql_cmd_writes(psrc) || facts.result) &&
 		facts.has_view == sql->has_view &&
@@ -629,6 +630,15 @@ plllvm_pj_sql_harvest(PLpgSQL_function *func, PjHarvest *h, PjExpr *pe)
 	 */
 	if (sql_cmd_writes(psrc) && !facts.result)
 		return "relation:none";
+
+	/*
+	 * Which policies apply to a table depends on the role (membership,
+	 * BYPASSRLS, the owner of the database), and a change of that reaches the
+	 * plan through no lock on a relation: a write to such a table is the
+	 * interpreter's.
+	 */
+	if ((facts.writes || sql_cmd_writes(psrc)) && psrc->dependsOnRLS)
+		return "relation:rls";
 	if (stmt != NULL && stmt->into)
 	{
 		const char *reason = sql_into_admit(func, psrc, stmt);

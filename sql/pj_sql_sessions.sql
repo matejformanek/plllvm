@@ -226,10 +226,13 @@ BEGIN
   RETURN n;
 END $$;
 SELECT psy_w(1), psy_w(2), psy_w(3);
+SELECT pj_expect('psy_w(integer)', 'declined:relation:view') \gset
 BEGIN;
 DELETE FROM psy_b WHERE id = 99;
+SELECT pj_mark() \gset
 SELECT dblink_exec('other', 'DROP RULE psy_v_d ON psy_v; CREATE TRIGGER psy_v_t INSTEAD OF DELETE ON psy_v FOR EACH ROW EXECUTE FUNCTION psy_fn()');
 SELECT psy_w(4);
+SELECT pj_delta(0, 1, NULL, 0, 0, NULL, 0);
 COMMIT;
 SELECT psy_w(5);
 SELECT * FROM psy_b ORDER BY id;

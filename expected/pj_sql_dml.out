@@ -920,6 +920,7 @@ SELECT * FROM psd_vdb ORDER BY id;
   8 | x
 (4 rows)
 
+SELECT pj_expect('psd_viewd(integer)', 'declined:relation:view') \gset
 -- a table with row level security: which policies apply depends on the role,
 -- a state that no relation lock protects, so a write to it is the
 -- interpreter's, as the values show equal
@@ -967,6 +968,53 @@ SELECT * FROM psd_rls ORDER BY a;
  4 | p
 (4 rows)
 
+SELECT pj_expect('psd_rlsw(integer)', 'declined:relation:rls') \gset
+-- row level security turned on after the function was compiled
+CREATE TABLE psd_rls2 (a int) WITH (autovacuum_enabled = false);
+CREATE FUNCTION psd_rlsl(n int) RETURNS int LANGUAGE :pj_lang AS $$
+BEGIN
+  INSERT INTO psd_rls2 VALUES (n);
+  RETURN n;
+END $$;
+SELECT psd_rlsl(1), psd_rlsl(2), psd_rlsl(3);
+ psd_rlsl | psd_rlsl | psd_rlsl 
+----------+----------+----------
+        1 |        2 |        3
+(1 row)
+
+SELECT pj_expect('psd_rlsl(integer)', 'compiled') \gset
+ALTER TABLE psd_rls2 ENABLE ROW LEVEL SECURITY;
+CREATE POLICY psd_rls2_p ON psd_rls2 USING (true) WITH CHECK (true);
+SELECT psd_rlsl(4);
+ psd_rlsl 
+----------
+        4
+(1 row)
+
+SELECT psd_rlsl(5);
+ psd_rlsl 
+----------
+        5
+(1 row)
+
+SELECT psd_rlsl(6);
+ psd_rlsl 
+----------
+        6
+(1 row)
+
+SELECT * FROM psd_rls2 ORDER BY a;
+ a 
+---
+ 1
+ 2
+ 3
+ 4
+ 5
+ 6
+(6 rows)
+
+SELECT pj_expect('psd_rlsl(integer)', 'declined:relation:rls') \gset
 -- MERGE stays PL/pgSQL's
 CREATE TABLE psd_mg (a int PRIMARY KEY, b text);
 INSERT INTO psd_mg VALUES (1, 'one');
