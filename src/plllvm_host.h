@@ -116,6 +116,9 @@ extern Datum plllvm_pj_assign(struct PjCtx *ctx, Datum old, bool owned,
 extern Datum plllvm_pj_assign_array(struct PjCtx *ctx, Datum old, bool owned,
 									Datum value, bool isnull);
 extern Datum plllvm_pj_arg_array(struct PjCtx *ctx, Datum value);
+extern Datum plllvm_pj_ret_row(struct PjCtx *ctx, Datum *values, bool *nulls);
+extern Datum plllvm_pj_ret_tuple(struct PjCtx *ctx, FunctionCallInfo fcinfo,
+								 Datum value, bool isnull, Oid valtype);
 extern Datum plllvm_pj_param_ro(Datum value, bool isnull);
 extern Datum plllvm_pj_param_rw(Datum value, bool isnull, bool owned);
 extern void plllvm_pj_raise_start(struct PjCtx *ctx);

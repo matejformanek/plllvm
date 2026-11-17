@@ -806,6 +806,8 @@ void	   *referenced_functions[] =
 	plllvm_pj_assign,
 	plllvm_pj_assign_array,
 	plllvm_pj_arg_array,
+	plllvm_pj_ret_row,
+	plllvm_pj_ret_tuple,
 	plllvm_pj_param_ro,
 	plllvm_pj_param_rw,
 	plllvm_pj_raise_start,

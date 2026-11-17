@@ -186,3 +186,17 @@ COMMIT;
 SELECT pj_expect('pm_ma(int)', 'compiled') \gset
 DROP OWNED BY regress_pj_ma;
 DROP ROLE regress_pj_ma;
+
+-- a composite result and OUT parameters: the row of a call is made in the
+-- memory of the activation and goes with it
+CREATE TYPE pm_pair AS (a int, b text);
+CREATE FUNCTION pm_row(n int) RETURNS pm_pair LANGUAGE :pj_lang AS $$
+BEGIN RETURN ROW(n, 'x' || n); END $$;
+CREATE FUNCTION pm_out(n int, OUT a int, OUT b text) LANGUAGE :pj_lang AS $$
+BEGIN a := n; b := 'x' || n; END $$;
+SELECT pm_row(1), pm_out(1);
+SELECT pm_row(2), pm_out(2);
+SELECT sum((pm_row(i)).a + (pm_out(i)).a) FROM generate_series(1, 100000) i \g /dev/null
+SELECT pm_total() AS before \gset
+SELECT sum((pm_row(i)).a + (pm_out(i)).a) FROM generate_series(1, 100000) i \g /dev/null
+SELECT pm_total() - :before < 1048576 AS flat_rows;

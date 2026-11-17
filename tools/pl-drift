@@ -1,0 +1,82 @@
+#!/usr/bin/env python3
+"""Fail when a function of PostgreSQL that plllvm re-implements has changed.
+
+plpgsql_jit cannot call the static functions of pl_exec.c, so some of what
+they do is written again in src/ (the list is in tools/pl-drift.txt, and
+each source file that does this says so).  Nothing but this check notices
+when a newer PostgreSQL changes one of them: the copy still compiles.
+
+tools/pl-drift.txt has one row per function: the file, relative to the
+PostgreSQL source tree, the function and the first 16 hex digits of the
+sha256 of its whole body.  The body runs from the line with the return type,
+the line before "name(" in column 0, to the first "}" in column 0, each line
+ended by a newline.  A row, with "#", may end with a comment.
+
+On a failure: read the changed function against what src/ takes from it,
+adapt the copy, and put the new hash in the same commit.
+
+A script of the standard library, run by make pl-drift.
+
+Usage: pl-drift <PostgreSQL source tree> <list>
+"""
+import hashlib
+import sys
+
+
+def body(path, name):
+    """The lines of function name in path, or None; an error if it is twice."""
+    with open(path, encoding="utf-8") as f:
+        lines = f.read().split("\n")
+    found = [i for i, line in enumerate(lines) if line.startswith(name + "(")]
+    if len(found) != 1:
+        return None if not found else "twice"
+    start = found[0] - 1
+    end = found[0]
+    while end < len(lines) and lines[end] != "}":
+        end += 1
+    if end == len(lines):
+        return None
+    return lines[start:end + 1]
+
+
+def main():
+    if len(sys.argv) != 3:
+        print(__doc__.split("Usage: ")[1].strip(), file=sys.stderr)
+        return 2
+    tree, listing = sys.argv[1:]
+    failed = 0
+    checked = 0
+    with open(listing, encoding="utf-8") as f:
+        for no, row in enumerate(f, 1):
+            row = row.split("#", 1)[0].split()
+            if not row:
+                continue
+            if len(row) != 3:
+                print(f"{listing}:{no}: want file function hash", file=sys.stderr)
+                return 2
+            path, name, want = row
+            lines = body(f"{tree}/{path}", name)
+            if lines is None:
+                print(f"{path}: no function {name}", file=sys.stderr)
+                failed += 1
+                continue
+            if lines == "twice":
+                print(f"{path}: {name} is defined twice", file=sys.stderr)
+                failed += 1
+                continue
+            got = hashlib.sha256(("\n".join(lines) + "\n").encode()).hexdigest()[:16]
+            checked += 1
+            if got != want:
+                print(f"{path}: {name} is {got}, the list has {want}",
+                      file=sys.stderr)
+                failed += 1
+    if failed:
+        print(f"pl-drift: {failed} of {checked + failed} functions differ",
+              file=sys.stderr)
+        return 1
+    print(f"pl-drift: {checked} functions as listed")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

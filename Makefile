@@ -50,7 +50,7 @@ REGRESS = plllvm_setup $(REGRESS_FEATURES) $(REGRESS_KERNELS) expr_plugin \
 # variant only, REGRESS_PJ_OPT at opt level 3.
 REGRESS_PJ = pj_language pj_basic pj_errors pj_guards pj_execute pj_casts pj_sessions \
 		pj_control pj_kernels pj_ops pj_bounds pj_memory pj_boxed pj_abort pj_planfree pj_calls \
-		pj_byref pj_udf pj_typmod pj_raise pj_array pj_case pj_into pj_elements pj_sql pj_sql_into pj_sql_dml
+		pj_byref pj_udf pj_typmod pj_raise pj_array pj_case pj_into pj_elements pj_sql pj_sql_into pj_sql_dml pj_results
 REGRESS_PJ_ONCE = pj_states pj_discard pj_execute_diff pj_arms pj_ctxraw pj_sql_once pj_sql_sessions \
 		pj_sessions_midcall
 REGRESS_PJ_OPT = pj_kernels pj_ops
@@ -184,7 +184,7 @@ endif
 .PHONY: port-ok doctor stage cluster-init cluster-start cluster-stop pgindent \
 	installcheck-discard installcheck-opt installcheck-hazard installcheck-plpgsql \
 	installcheck-expr installcheck-pj installcheck-pj-once installcheck-pj-opt installcheck-pj-fdw \
-	installcheck-plpgsql-pj check-pj-ir check-pj-cmodule verify check-host-api kernels check-kernels
+	installcheck-plpgsql-pj check-pj-ir check-pj-cmodule pl-drift verify check-host-api kernels check-kernels
 
 # 5432, 5433 belong to pg-claude, 5444 to the perf cluster
 port-ok:
@@ -349,7 +349,7 @@ installcheck-pj:
 	$(call pj_run,$(PLPGSQL_LOAD) -c plllvm.pj_opt_level=2,$(PJ_FIXTURE) $(REGRESS_PJ) pj_stats)
 	$(call pj_run,$(PLPGSQL_LOAD) -c plllvm.pj_codegen=v1,$(PJ_FIXTURE) $(REGRESS_PJ) pj_stats)
 	$(call pj_run,$(EXPR_JIT) -c plllvm.expr_eager=on,$(PJ_FIXTURE) $(REGRESS_PJ) pj_stats)
-	$(call pj_run,$(PLPGSQL_LOAD) -c debug_discard_caches=1,$(PJ_FIXTURE) pj_guards pj_array pj_stats)
+	$(call pj_run,$(PLPGSQL_LOAD) -c debug_discard_caches=1,$(PJ_FIXTURE) pj_guards pj_array pj_results pj_stats)
 
 # expected from plllvm, so not against stock
 installcheck-pj-once:
@@ -462,14 +462,19 @@ check-pj-ir: port-ok
 check-pj-cmodule: port-ok
 	sh tools/pj_cmodule_pins.sh '$(bindir)' $(PLLLVM_PORT)
 
+# The functions of PostgreSQL that src/ re-implements still have the bodies
+# they had when it was written (tools/pl-drift.txt)
+pl-drift:
+	python3 -I tools/pl-drift '$(PG_SRC)' tools/pl-drift.txt
+
 # The differential fuzzer: N programs from SEED, as plpgsql and as plpgsql_jit
 # at opt level 0 and 2, NREC recursive ones, NREF over text and numeric and
 # NELEM of reads and stores of array elements, NSQL of PERFORM, SELECT INTO and
-# statements for SPI, NDML of the same with INSERT, UPDATE and DELETE, in the
-# throwaway database pj_fuzz.  A difference is
-# reported by seed, with the program and both outputs in results-fuzz/.  Not
-# part of installcheck or verify.  NCX programs of each of the flat and ref
-# modes also have CASE and SELECT INTO (--cx).
+# statements for SPI, NDML of the same with INSERT, UPDATE and DELETE, NROW of
+# OUT parameters and composite results, in the throwaway database pj_fuzz.  A
+# difference is reported by seed, with the program and both outputs in
+# results-fuzz/.  Not part of installcheck or verify.  NCX programs of each of
+# the flat and ref modes also have CASE and SELECT INTO (--cx).
 N ?= 2000
 NREC ?= 500
 NREF ?= 500
@@ -477,6 +482,7 @@ NCX ?= 500
 NELEM ?= 500
 NSQL ?= 500
 NDML ?= 500
+NROW ?= 500
 SEED ?= 1
 
 .PHONY: fuzz-pj check-pj-fuzz
@@ -503,6 +509,8 @@ fuzz-pj: port-ok
 	    --mode sql --n $(NSQL) --seed $(SEED) --opt-level $$o --out results-fuzz/sql-O$$o || rc=1; \
 	  python3 -I tools/pj_fuzz.py --psql '$(bindir)/psql' --host /tmp --port $(PLLLVM_PORT) \
 	    --mode dml --n $(NDML) --seed $(SEED) --opt-level $$o --out results-fuzz/dml-O$$o || rc=1; \
+	  python3 -I tools/pj_fuzz.py --psql '$(bindir)/psql' --host /tmp --port $(PLLLVM_PORT) \
+	    --mode row --n $(NROW) --seed $(SEED) --opt-level $$o --out results-fuzz/row-O$$o || rc=1; \
 	done; exit $$rc
 
 # The classes of the fuzzer on programs of known shape, and 300 programs with
@@ -513,8 +521,9 @@ fuzz-pj: port-ok
 # of the executor in 90% of them, and deopt.  150 programs of statements for
 # SPI must have run one in compiled code in 40% of them, and 30% of those that
 # have SELECT INTO alone, and 150 programs of statements that write must have
-# run one in 25% of them.  setup() drops and recreates the fuzz database, so
-# the cluster must be a throwaway
+# run one in 25% of them, and 150 programs of OUT parameters and composite
+# results must have compiled in 60% and deopted.  setup() drops and recreates
+# the fuzz database, so the cluster must be a throwaway
 check-pj-fuzz: port-ok
 	@case "$(origin PLLLVM_PORT):$(PLLLVM_PORT)" in file:*|*:|*:544[2-5]) \
 	  echo "check-pj-fuzz needs the PLLLVM_PORT of a throwaway cluster" >&2; \
@@ -547,6 +556,9 @@ check-pj-fuzz: port-ok
 	python3 -I tools/pj_fuzz.py --psql '$(bindir)/psql' --host /tmp --port $(PLLLVM_PORT) \
 	  --mode dml --seed 21 --n 150 --opt-level 0 --floor-dml 0.25 --out results-fuzz/dml-O0 > results-fuzz/dml-O0.log; \
 	  rc=$$?; cat results-fuzz/dml-O0.log >&2; [ $$rc = 0 ]
+	python3 -I tools/pj_fuzz.py --psql '$(bindir)/psql' --host /tmp --port $(PLLLVM_PORT) \
+	  --mode row --seed 21 --n 150 --opt-level 0 --out results-fuzz/row-O0 > results-fuzz/row-O0.log; \
+	  rc=$$?; cat results-fuzz/row-O0.log >&2; [ $$rc = 0 ]
 
 #
 # Every suite of a PR in order; the commit and each exit code go to
@@ -564,7 +576,7 @@ verify: port-ok
 	for t in installcheck installcheck-opt installcheck-discard installcheck-hazard \
 	  check-host-api pgindent doctor installcheck-expr installcheck-plpgsql \
 	  installcheck-pj installcheck-pj-once installcheck-pj-opt installcheck-pj-fdw installcheck-plpgsql-pj \
-	  check-pj-ir check-pj-cmodule check-pj-fuzz; do \
+	  check-pj-ir check-pj-cmodule check-pj-fuzz pl-drift; do \
 	  step $(MAKE) $$t; \
 	  [ $$t != pgindent ] || step git diff --exit-code; \
 	done; \

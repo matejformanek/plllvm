@@ -96,6 +96,17 @@ from compiled to PL/pgSQL's and back), and a table that is truncated and
 refilled.  The table is printed after every call, so a write that differs is
 a difference.  The run fails if fewer than --floor-dml of the programs ran a
 statement that writes through SPI in compiled code.
+--mode row writes functions with OUT parameters (one, several, INOUT) and
+with a composite result: RETURN ROW(...), a cast to the row type of a table,
+a call of a function that returns it, NULL, RECORD, and the row type of a table
+with a dropped column.  The values are expressions of the arguments, some of
+them raising, with a branch that no warm call takes, a row of another shape
+that only an edge call returns, and called as a value, as a column list, as a
+text and as JSON, through the wrapper and directly.  Between the calls the
+script analyses, indexes or truncates the table of the result (the function must
+then still run compiled: --floor-recover of those programs ends with a compiled
+call), or adds a column to it and drops it again.  The run fails if fewer than
+--floor-row of the programs compiled, or no program deopted.
 --cx adds CASE statements, searched and simple (a selector of any type of the
 mode, a list of values in a WHEN, with and without ELSE), and SELECT
 expression INTO a variable to a flat or ref program.  The choices of these
@@ -113,9 +124,9 @@ schema name is normalised.  Every statement of a script is a step.
 
 Usage: pj_fuzz.py --psql <psql> --host <dir> --port <port> [--n N] [--start I]
                   [--seed S] [--opt-level 0|2|3] [--out dir] [--floor 0.5]
-                  [--mode flat|rec|ref|elem|sql|dml] [--cx] [--floor-cx 0.15]
+                  [--mode flat|rec|ref|elem|sql|dml|row] [--cx] [--floor-cx 0.15]
                   [--floor-elem 0.9] [--floor-sql 0.4] [--floor-into 0.3]
-                  [--floor-dml 0.25]
+                  [--floor-dml 0.25] [--floor-row 0.6] [--floor-recover 0.9]
 """
 import argparse
 import os
@@ -2426,6 +2437,272 @@ def main_sql(args):
     return 1 if failed else 0
 
 
+# ---- OUT parameters and composite results (--mode row)
+
+ROW_BAD = 4                      # the n that makes 10 / (n - ROW_BAD) raise
+ROW_RARE = 9                     # the n that no warm call passes
+ROW_KINDS = ["out1", "inout", "out3", "row", "cast", "call", "null", "record", "drop"]
+# the type of a result is the row type of a table, so that the script can
+# change the table the function returns
+ROW_TABLE = {"drop": "fzd"}
+
+
+class RowGen:
+    """Expressions of the arguments n and h (integer, h NULL in a third of the
+    calls) and t (text), some of them raising."""
+
+    def __init__(self, rng):
+        self.r = rng
+
+    def int_(self, d=1):
+        r = self.r
+        c = ["n", "n + 1", "n * 2", "coalesce(h, 0)", "n % 3", "h", "7",
+             "10 / (n - %d)" % ROW_BAD, "nullif(n, %d)" % ROW_BAD, "n - coalesce(h, 1)"]
+        if d > 0 and r.random() < 0.3:
+            return "(%s %s %s)" % (self.int_(d - 1), r.choice(["+", "-", "*"]), self.int_(d - 1))
+        return r.choice(c)
+
+    def text(self):
+        return self.r.choice(["t", "'x'::text", "'t' || n", "coalesce(t, 'z')", "t || t",
+                              "NULL::text", "repeat('a', n % 4)", "upper(t)"])
+
+    def flt(self):
+        return self.r.choice(["n * 0.5::float8", "coalesce(h, 1)::float8", "1.5::float8",
+                              "n / 4.0::float8", "NULL::float8"])
+
+
+class RowProgram:
+    def __init__(self, seed, cat=None, cx=False):
+        r = random.Random(seed)
+        self.rng = r
+        self.seed = seed
+        self.kind = r.choice(ROW_KINDS)
+        self.table = ROW_TABLE.get(self.kind, "fzr")
+        self.g = RowGen(r)
+        self.priv = False
+        self.real = {}
+        self.status_cols = ("state, coalesce(reason, ''), compiled_calls, calls, deopts, "
+                            "last_path")
+        g = self.g
+        # each of them is true for some of the warm calls (n 0 to 6, h 0 or 1)
+        # and false for the rare ones (n 9 and 10, h 0)
+        self.cond = [r.choice(["n < %d" % r.randint(1, 6), "coalesce(h, 0) > 0"])
+                     for _ in range(2)]
+        self.rare_body = self.assigns(False)
+        # (a function with a row expression runs in PL/pgSQL until all of them
+        # are planned: one condition, so that each branch is reached)
+        self.body = [self.piece() for _ in range(1 if self.composite() else r.randint(1, 3))]
+        # a row of another shape, which only an edge call reaches
+        self.bad = self.composite() and r.random() < 0.4
+        # (the function of RECORD or of OUT parameters has no table of its own,
+        # but fzr is there to be changed all the same)
+        self.ddl = r.choice([None, None, "recover", "type"])
+        self.steps = self.make_steps()
+
+    def composite(self):
+        return self.kind in ("row", "cast", "call", "null", "record", "drop")
+
+    def row_value(self):
+        g, k = self.g, self.kind
+        if k == "record":
+            return "ROW(%s, %s)" % (g.int_(), g.text())
+        if k == "drop":
+            return "ROW(%s, %s)" % (g.int_(), g.text())
+        if k == "cast":
+            return "(%s, %s, %s)::fzr" % (g.int_(), g.text(), g.flt())
+        if k == "call":
+            return "fzg(%s)" % g.int_()
+        return "ROW(%s, %s, %s)" % (g.int_(), g.text(), g.flt())
+
+    def assigns(self, branch=True):
+        g, k = self.g, self.kind
+        if k == "out1":
+            return "m := %s;" % g.int_()
+        if k == "inout":
+            return "n := %s;" % g.int_()
+        if k == "out3":
+            return " ".join(["x := %s;" % g.int_(), "y := %s;" % g.text(),
+                             "z := %s;" % g.flt()][:self.rng.randint(1, 3)])
+        if k == "null":
+            return "RETURN NULL;" if branch else "RETURN %s;" % self.row_value()
+        return "RETURN %s;" % self.row_value()
+
+    def piece(self):
+        r = self.rng
+        a = self.assigns()
+        # a composite result is returned by the piece that is reached first
+        if self.composite() or r.random() < 0.5:
+            if self.composite():
+                return "IF %s THEN %s END IF;" % (r.choice(self.cond), a)
+            return a
+        return "IF %s THEN %s%s END IF;" % (
+            r.choice(self.cond), a,
+            (" ELSE " + self.assigns()) if r.random() < 0.4 else "")
+
+    def sig(self):
+        return "(integer,integer,text)"
+
+    def function(self):
+        k = self.kind
+        args = "n integer, h integer, t text"
+        if k == "out1":
+            head, ret = "(%s, OUT m integer)" % args, ""
+        elif k == "inout":
+            head, ret = "(INOUT n integer, h integer, t text)", ""
+        elif k == "out3":
+            head, ret = "(%s, OUT x integer, OUT y text, OUT z double precision)" % args, ""
+        elif k == "record":
+            head, ret = "(%s) RETURNS record" % args, "RETURN ROW(n, t);"
+        elif k == "drop":
+            head, ret = "(%s) RETURNS fzd" % args, "RETURN ROW(n, t);"
+        else:
+            head, ret = "(%s) RETURNS fzr" % args, "RETURN (n, t, 0.5)::fzr;"
+        o = "CREATE FUNCTION f%s LANGUAGE :lang AS $f$\nBEGIN\n" % head
+        for st in self.body:
+            o += "  %s\n" % st
+        o += "  IF n = %d THEN %s END IF;\n" % (ROW_RARE, self.rare_body)
+        if self.bad:
+            o += "  IF n = %d THEN RETURN ROW(n); END IF;\n" % (ROW_RARE + 1)
+        return o + "  %s\nEND\n$f$;\n" % ret
+
+    def wrapper(self):
+        return ("CREATE FUNCTION w(n integer, h integer, t text) RETURNS text LANGUAGE plpgsql AS $w$\n"
+                "BEGIN PERFORM f(n, h, t); RETURN 'ok';\n"
+                "EXCEPTION WHEN OTHERS THEN RETURN SQLSTATE || ' ' || SQLERRM;\nEND $w$;\n")
+
+    def setup(self):
+        return ("CREATE TABLE fzr (a int, b text, c float8);\n"
+                "CREATE TABLE fzd (a int, gone int, b text);\n"
+                "ALTER TABLE fzd DROP COLUMN gone;\n"
+                "CREATE FUNCTION fzg(n int) RETURNS fzr LANGUAGE plpgsql IMMUTABLE AS "
+                "$q$ BEGIN RETURN (n * 2, 'g', 0.5)::fzr; END $q$;\n")
+
+    def call(self, kind, fn="f", last=False):
+        r = self.rng
+        n = {"harmless": r.randint(0, 6), "rare": ROW_RARE,
+             "edge": r.choice([0, 1, ROW_BAD, ROW_BAD, ROW_RARE + 1, -1, 7])}[kind]
+        # (the last calls are not for the interpreter, which a NULL is sent to)
+        h = r.choice(["1", "2"] if last else ["1", "1", "NULL", "2"])
+        t = r.choice(["'row3'", "'x'", "'abc'"])
+        k = self.kind
+        if fn == "w":
+            return "SELECT w(%d, %s, %s);" % (n, h, t)
+        c = "f(%d, %s, %s)" % (n, h, t)
+        if k in ("out1", "inout"):
+            form = r.choice(["SELECT %s;", "SELECT * FROM %s;"])
+        elif k == "out3":
+            form = r.choice(["SELECT %s;", "SELECT * FROM %s;", "SELECT (%s).y;",
+                             "SELECT row_to_json(%s);", "SELECT %s::text;"])
+        elif k == "record":
+            return r.choice(["SELECT %s;" % c, "SELECT * FROM %s AS (a int, b text);" % c,
+                             "SELECT * FROM %s AS (c bigint, d text);" % c])
+        elif k == "drop":
+            form = r.choice(["SELECT %s;", "SELECT row_to_json(%s);", "SELECT (%s).b;"])
+        else:
+            form = r.choice(["SELECT %s;", "SELECT * FROM %s;", "SELECT row_to_json(%s);",
+                             "SELECT %s IS NULL;", "SELECT (%s).b;", "SELECT %s::text;"])
+        return form % c
+
+    def warm(self):
+        """Every branch the conditions test is taken, so that the plans are made."""
+        st = []
+        for n in range(0, 7):
+            st.append("SELECT f(%d, 1, 'row3');" % n)
+            st.append("SELECT f(%d, 0, 'abc');" % n)
+        # a function with a row expression runs in PL/pgSQL until all of them
+        # are planned, so its rare branches are taken early; one of OUT
+        # parameters has a deopt point instead, and the call that takes the
+        # branch is the deopt
+        if self.composite():
+            st.append("SELECT w(%d, 0, 'x');" % ROW_RARE)
+            if self.bad:
+                st.append("SELECT w(%d, 0, 'x');" % (ROW_RARE + 1))
+        return st
+
+    def make_steps(self):
+        r = self.rng
+        tb = self.table
+        st = ["@setup", "@create", "@wrapper"] + self.warm()
+        for _ in range(r.randint(4, 8)):
+            st.append(self.call(r.choice(["harmless", "edge", "edge"]), r.choice(["f", "f", "w"])))
+        if self.ddl == "type":
+            st.append("ALTER TABLE %s ADD COLUMN d int;" % tb)
+            for _ in range(2):
+                st.append(self.call("harmless"))
+            st.append("ALTER TABLE %s DROP COLUMN d;" % tb)
+        st.append(self.call("rare"))
+        st.append(self.call("harmless"))
+        if self.ddl == "recover":
+            st.append(r.choice(["ANALYZE %s;", "CREATE INDEX IF NOT EXISTS fz_i ON %s (a);",
+                                "TRUNCATE %s;"]) % tb)
+            # what the DDL made stale, which only a call that takes the branch plans again
+            st += self.warm()
+        st.append(self.call("harmless", "f", True))
+        st.append(self.call("harmless", "f", True))
+        if self.bad:
+            st.append(self.call("edge", "w"))
+            st.append(self.call("harmless", "f", True))
+        return st
+
+
+def main_row(args):
+    tally = Counter()
+    kinds = Counter()
+    reasons = Counter()
+    failed = False
+    for i in range(args.start, args.start + args.n):
+        seed = "%d:%d" % (args.seed, i)
+        prog = RowProgram(seed)
+        a, b = run_pair(args, prog)
+        verdict, step = compare(args, prog, a, b, tally)
+        tally[verdict] += 1
+        m = re.search(r"@@ status\n(.*)", b, re.S)
+        st = m.group(1).strip().split("\n")[0].split("|") if m else []
+        ok = len(st) == 6
+        if ok and int(st[2]) > 0:
+            tally["compiled"] += 1
+            kinds[prog.kind] += 1
+        else:
+            reasons["%s: %s %s, last path %s" % (prog.kind, st[0], st[1], st[5]) if ok else "no status"] += 1
+        if ok:
+            tally["deopts"] += int(st[4])
+        if prog.ddl == "recover":
+            tally["recover-programs"] += 1
+            tally["recovered"] += ok and st[5] == "compiled"
+        if args.v or verdict != "equal":
+            print("seed %s: %s%s" % (seed, verdict, "" if step is None else " at step %d" % step))
+        if verdict in ("MISMATCH", "PERMISSIVE"):
+            failed = True
+            f = os.path.join(args.out, "fuzz-%s.txt" % seed.replace(":", "-"))
+            with open(f, "w") as fh:
+                fh.write("-- %s at step %s, seed %s, opt level %s\n== plpgsql script\n%s"
+                         "== plpgsql_jit script\n%s== plpgsql output\n%s\n"
+                         "== plpgsql_jit output\n%s\n"
+                         % (verdict, step, seed, args.opt_level, script(prog, "plpgsql"),
+                            script(prog, "plpgsql_jit", True), a, b))
+            print("  program and outputs: %s" % f)
+    print("pj_fuzz row: seed=%d programs=%d opt_level=%s equal=%d permissive=%d mismatch=%d "
+          "compiled=%d (%.1f%%) deopts=%d, after ANALYZE, CREATE INDEX or TRUNCATE of the "
+          "table of the result: %d of %d programs ended compiled"
+          % (args.seed, args.n, args.opt_level, tally["equal"], tally["PERMISSIVE"],
+             tally["MISMATCH"], tally["compiled"], 100.0 * tally["compiled"] / max(args.n, 1),
+             tally["deopts"], tally["recovered"], tally["recover-programs"]))
+    print("  compiled by shape: %s" % ", ".join("%s %d" % kv for kv in sorted(kinds.items())))
+    for k, v in reasons.most_common(8):
+        print("  not compiled: %5d  %s" % (v, k))
+    if tally["compiled"] < args.floor_row * args.n:
+        print("pj_fuzz: compiled fraction below the floor of %.0f%%" % (100 * args.floor_row))
+        failed = True
+    if tally["deopts"] == 0 and args.n >= 20:
+        print("pj_fuzz: no program deopted")
+        failed = True
+    if tally["recovered"] < args.floor_recover * tally["recover-programs"]:
+        print("pj_fuzz: programs compiled after the DDL below the floor of %.0f%%"
+              % (100 * args.floor_recover))
+        failed = True
+    return 1 if failed else 0
+
+
 # ---- running
 
 CLEAN = ("SET client_min_messages = warning;\n"
@@ -2610,13 +2887,15 @@ def main():
     ap.add_argument("--opt-level", type=int, default=None)
     ap.add_argument("--out", default="results-fuzz")
     ap.add_argument("--floor", type=float, default=0.5)
-    ap.add_argument("--mode", choices=["flat", "rec", "ref", "elem", "sql", "dml"], default="flat")
+    ap.add_argument("--mode", choices=["flat", "rec", "ref", "elem", "sql", "dml", "row"], default="flat")
     ap.add_argument("--cx", action="store_true", help="CASE and SELECT INTO (flat, ref)")
     ap.add_argument("--floor-cx", type=float, default=0.15, dest="floor_cx")
     ap.add_argument("--floor-elem", type=float, default=0.9, dest="floor_elem")
     ap.add_argument("--floor-sql", type=float, default=0.4, dest="floor_sql")
     ap.add_argument("--floor-into", type=float, default=0.3, dest="floor_into")
     ap.add_argument("--floor-dml", type=float, default=0.25, dest="floor_dml")
+    ap.add_argument("--floor-row", type=float, default=0.6, dest="floor_row")
+    ap.add_argument("--floor-recover", type=float, default=0.9, dest="floor_recover")
     ap.add_argument("-v", action="store_true")
     ap.add_argument("--selftest", action="store_true", help="check frame_mix, no cluster")
     args = ap.parse_args()
@@ -2639,6 +2918,10 @@ def main():
         if args.cx:
             ap.error("--cx is for flat and ref programs")
         sys.exit(main_sql(args))
+    if args.mode == "row":
+        if args.cx:
+            ap.error("--cx is for flat and ref programs")
+        sys.exit(main_row(args))
     cat = load_catalog(lambda q: admin(args, q))
     if args.mode == "ref":
         universe = cat.universe

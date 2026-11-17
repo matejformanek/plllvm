@@ -59,6 +59,8 @@ const plllvm_host_symbol plllvm_host_symbols[] =
 	{"plllvm_pj_assign", (void *) plllvm_pj_assign},
 	{"plllvm_pj_assign_array", (void *) plllvm_pj_assign_array},
 	{"plllvm_pj_arg_array", (void *) plllvm_pj_arg_array},
+	{"plllvm_pj_ret_row", (void *) plllvm_pj_ret_row},
+	{"plllvm_pj_ret_tuple", (void *) plllvm_pj_ret_tuple},
 	{"plllvm_pj_param_ro", (void *) plllvm_pj_param_ro},
 	{"plllvm_pj_param_rw", (void *) plllvm_pj_param_rw},
 	{"plllvm_pj_raise_start", (void *) plllvm_pj_raise_start},

@@ -200,6 +200,8 @@ typedef struct PjExpr
 								 * selector, else -1 */
 	bool		into_sql;		/* true, when the expression is the query of a
 								 * SELECT INTO */
+	bool		ret_tuple;		/* the value of a RETURN in a function with a
+								 * composite result */
 	PjSqlKind	sql_kind;		/* not PJ_SQL_NONE: a statement for SPI */
 	struct PLpgSQL_stmt_execsql *stmt;	/* its statement, if it has an INTO */
 	PjSql	   *sql;			/* PJ_H1_SQL only, in the harvest context */
@@ -339,6 +341,9 @@ typedef struct PjHarvest
 								 * made again, a table that is locked */
 	struct PjShadow *shadow;	/* the estate the parser hooks read */
 	List	   *fori;
+	int			exit_pos;		/* of the conversion of a composite result */
+	Oid			rettype;		/* of the function */
+	TupleDesc	rowdesc;		/* of the OUT parameters, if there are several */
 	int			ndatums;
 	int			nparams;		/* the datums, then a read/write twin of each */
 	Oid		   *ptypes;			/* of the params a boxed tree may read */
