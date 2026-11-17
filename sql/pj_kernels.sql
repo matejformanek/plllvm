@@ -481,3 +481,88 @@ SELECT revcomp_k(NULL);  -- fail
 SELECT tokenize_k(NULL);  -- fail
 SELECT spectralnorm_k(-1);  -- fail
 SELECT nbody_k(1), spectralnorm_k(10), revcomp_k(5), tokenize_k(40);
+
+-- A row lookup and a mixed kernel: native code around SELECT INTO through SPI.
+-- The tables are reset between calls, as a measurement does: TRUNCATE and
+-- ANALYZE leave the plans of the statements invalid at the next call.
+CREATE TABLE lk_item (
+  i_id integer PRIMARY KEY, i_im_id integer, i_name varchar(24), i_price numeric(5,2),
+  i_data varchar(50));
+CREATE TABLE lk_stock (
+  s_w_id integer, s_i_id integer, s_quantity integer, s_ytd integer, s_data varchar(50),
+  PRIMARY KEY (s_w_id, s_i_id));
+INSERT INTO lk_item
+SELECT i, 1 + (i * 31) % 10000, substr(md5('name' || i), 1, 14 + i % 10),
+       1.00 + ((i * 7907) % 9901) / 100.0, substr(md5('i' || i), 1, 26)
+FROM generate_series(1, 10000) i;
+CREATE TABLE lk_stock_init AS
+SELECT 1 AS s_w_id, i AS s_i_id, 10 + (i * 7) % 91 AS s_quantity, 0 AS s_ytd,
+       substr(md5('s' || i), 1, 30)::varchar(50) AS s_data
+FROM generate_series(1, 10000) i;
+INSERT INTO lk_stock SELECT * FROM lk_stock_init;
+ANALYZE lk_item, lk_stock;
+CREATE FUNCTION lk_reset() RETURNS void LANGUAGE plpgsql VOLATILE AS $$
+BEGIN
+  TRUNCATE lk_stock;
+  INSERT INTO lk_stock SELECT * FROM lk_stock_init;
+  ANALYZE lk_stock;
+END $$;
+
+CREATE FUNCTION lookup_k(n integer) RETURNS text LANGUAGE :pj_lang STABLE AS $$
+DECLARE
+  seed bigint := 777;
+  k integer; v_i_id integer;
+  v_price numeric(5,2); v_name varchar(24); v_qty integer;
+  acc numeric(16,2) := 0;
+  low integer := 0; vowel integer := 0;
+BEGIN
+  FOR k IN 1..n LOOP
+    seed := (seed * 1103515245 + 12345) % 2147483648;
+    v_i_id := 1 + (seed % 10000)::integer;
+    SELECT i_price, i_name INTO v_price, v_name FROM lk_item WHERE i_id = v_i_id;
+    SELECT s_quantity INTO v_qty FROM lk_stock WHERE s_w_id = 1 AND s_i_id = v_i_id;
+    acc := acc + v_price * v_qty;
+    IF v_qty < 20 THEN
+      low := low + 1;
+    END IF;
+    IF position(substr(v_name, 1, 1) IN 'aeiou') > 0 THEN
+      vowel := vowel + 1;
+    END IF;
+  END LOOP;
+  RETURN acc::text || '/' || low || '/' || vowel;
+END $$;
+SELECT lookup_k(0), lookup_k(1), lookup_k(7);
+SELECT lookup_k(0), lookup_k(1), lookup_k(7);
+SELECT lookup_k(200);
+SELECT lookup_k(200);
+SELECT lk_reset();
+SELECT lookup_k(200);
+SELECT lk_reset();
+SELECT lookup_k(200);
+SELECT lk_reset();
+SELECT lookup_k(200), lookup_k(7);
+
+CREATE FUNCTION mix_k(n integer, k integer) RETURNS double precision
+LANGUAGE :pj_lang AS $$
+DECLARE seed bigint := 777; x float8 := 0.5; acc float8 := 0; p float8; id integer;
+BEGIN
+  FOR i IN 1..n LOOP
+    seed := (seed * 1103515245 + 12345) % 2147483648;
+    FOR j IN 1..8 LOOP
+      x := x * 3.7::float8 * (1.0::float8 - x);
+      acc := acc + x * x - 0.25::float8 * x;
+    END LOOP;
+    IF k > 0 AND i % k = 0 THEN
+      id := 1 + (seed % 10000)::integer;
+      SELECT i_price::float8 INTO p FROM lk_item WHERE i_id = id;
+      acc := acc + p;
+    END IF;
+  END LOOP;
+  RETURN acc;
+END $$;
+SELECT mix_k(10, 1), mix_k(10, 0);
+SELECT mix_k(10, 1), mix_k(10, 0);
+SELECT mix_k(100, 8), mix_k(100, 64), mix_k(100, 1), mix_k(100, 0);
+SELECT mix_k(100, 8), mix_k(100, 64), mix_k(100, 1), mix_k(100, 0);
+SELECT lk_reset();
+SELECT mix_k(100, 8);
