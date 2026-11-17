@@ -245,7 +245,8 @@ CALL po_proc(3);
 (1 row)
 
 SELECT pj_expect('po_proc(int)', 'declined:signature') \gset
--- an OUT parameter that is a record, or a domain, is out of scope
+-- an OUT parameter that is a record, or a domain, is out of scope, whether
+-- the body assigns it or not
 CREATE TYPE po_t AS (a int, b text);
 CREATE DOMAIN po_dom AS int CHECK (VALUE >= 0);
 CREATE FUNCTION po_orec(n int, OUT p po_t) LANGUAGE :pj_lang AS $$
@@ -254,6 +255,10 @@ CREATE FUNCTION po_orec2(n int, OUT k int, OUT p po_t) LANGUAGE :pj_lang AS $$
 BEGIN k := n; p := ROW(n, 'a'::text); END $$;
 CREATE FUNCTION po_odom(n int, OUT k int, OUT d po_dom) LANGUAGE :pj_lang AS $$
 BEGIN k := n; d := n; END $$;
+CREATE FUNCTION po_orec3(n int, OUT k int, OUT p po_t) LANGUAGE :pj_lang AS $$
+BEGIN k := n; END $$;
+CREATE FUNCTION po_odom2(n int, OUT k int, OUT d po_dom) LANGUAGE :pj_lang AS $$
+BEGIN k := n; END $$;
 SELECT po_orec(1);
  po_orec 
 ---------
@@ -290,9 +295,35 @@ SELECT po_odom(2);
  (2,2)
 (1 row)
 
+SELECT po_orec3(1);
+ po_orec3 
+----------
+ (1,)
+(1 row)
+
+SELECT po_orec3(2);
+ po_orec3 
+----------
+ (2,)
+(1 row)
+
+SELECT po_odom2(1);
+ po_odom2 
+----------
+ (1,)
+(1 row)
+
+SELECT po_odom2(2);
+ po_odom2 
+----------
+ (2,)
+(1 row)
+
 SELECT pj_expect('po_orec(int)', 'declined:datum:record') \gset
 SELECT pj_expect('po_orec2(int)', 'declined:datum:record') \gset
 SELECT pj_expect('po_odom(int)', 'declined:datum:po_dom') \gset
+SELECT pj_expect('po_orec3(int)', 'declined:datum:record') \gset
+SELECT pj_expect('po_odom2(int)', 'declined:datum:po_dom') \gset
 -- a composite result from a row expression
 CREATE FUNCTION po_row(x int) RETURNS po_t LANGUAGE :pj_lang AS $$
 BEGIN RETURN ROW(x, 'a' || x); END $$;
