@@ -86,11 +86,13 @@ FormData_pg_cast
 FormData_pg_class
 FormData_pg_index
 FormData_pg_proc
+FormData_pg_trigger
 Form_pg_attribute
 Form_pg_cast
 Form_pg_class
 Form_pg_index
 Form_pg_proc
+Form_pg_trigger
 FromExpr
 FuncExpr
 FunctionCallInfo
@@ -351,6 +353,7 @@ Size
 Snapshot
 SnapshotType
 SqlFacts
+StrategyNumber
 StringInfo
 StringInfoData
 SubLinkType
@@ -361,6 +364,7 @@ SubXactEvent
 SubscriptingRef
 SupportRequestModifyInPlace
 SysCacheIdentifier
+SysScanDesc
 TBMIterator
 TBMPrivateIterator
 TBMSharedIterator

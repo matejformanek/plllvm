@@ -369,8 +369,9 @@ SELECT psi_diag(5), psi_diag(20), psi_diag(30);
 SELECT psi_diag(5), psi_diag(20), psi_diag(30);
 SELECT pj_expect('psi_diag(integer)', 'declined:statement:GET DIAGNOSTICS') \gset
 
--- statements that write, and a data-modifying CTE, are not compiled: the
--- trigger on the table is PL/pgSQL's to run, and the table is as stock's
+-- a statement that writes to a table with a trigger, and a data-modifying CTE
+-- on one, are not compiled: the trigger is PL/pgSQL's to run, and the table is
+-- as stock's.  On a table with none, the CTE is.
 CREATE TABLE psi_w (a int, b text);
 INSERT INTO psi_w SELECT i, 'x' FROM generate_series(1, 6) i;
 CREATE FUNCTION psi_w_fn() RETURNS trigger LANGUAGE plpgsql AS $$
@@ -381,8 +382,8 @@ BEGIN
   WITH d AS (DELETE FROM psi_w WHERE a = n RETURNING *) SELECT count(*) INTO c FROM d;
   RETURN c;
 END $$;
-CREATE FUNCTION psi_cte_plain(n int) RETURNS int LANGUAGE :pj_lang AS $$
-DECLARE c int;
+CREATE FUNCTION psi_cte_plain(n int) RETURNS bigint LANGUAGE :pj_lang AS $$
+DECLARE c bigint;
 BEGIN
   WITH d AS (DELETE FROM psi_w WHERE a = n RETURNING *) SELECT count(*) INTO c FROM d;
   RETURN c;
@@ -404,9 +405,9 @@ SELECT psi_ins(10), psi_ins(11);
 SELECT psi_ins(10), psi_ins(11);
 SELECT psi_ins(12);
 SELECT * FROM psi_w ORDER BY a, b;
-SELECT pj_expect('psi_cte_trg(integer)', 'declined:statement:SQL statement') \gset
-SELECT pj_expect('psi_cte_plain(integer)', 'declined:statement:SQL statement') \gset
-SELECT pj_expect('psi_ins(integer)', 'declined:statement:SQL statement') \gset
+SELECT pj_expect('psi_cte_trg(integer)', 'declined:relation:trigger') \gset
+SELECT pj_expect('psi_cte_plain(integer)', 'compiled') \gset
+SELECT pj_expect('psi_ins(integer)', 'declined:relation:trigger') \gset
 
 -- what happens to the plan between calls changes no value and leaves no call
 CREATE TABLE psi_b (a int, b text);

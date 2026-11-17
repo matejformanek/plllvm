@@ -62,6 +62,7 @@ SELECT psd_found(12);
 :dt;
 SELECT psd_found(13);
 :dt;
+SELECT pj_expect('psd_found(integer)', 'compiled') \gset
 
 -- a function that is not VOLATILE may not write: SPI's error, the table unchanged
 CREATE FUNCTION psd_stable(n int) RETURNS int LANGUAGE :pj_lang STABLE AS $$
@@ -91,6 +92,7 @@ SELECT psd_serial(3);
 :ds;
 SELECT psd_serial(4);
 :ds;
+SELECT pj_expect('psd_serial(integer)', 'compiled') \gset
 
 -- a foreign key: the check of the row inserted is internal code, and so is the
 -- restriction on the table it points to
@@ -105,9 +107,11 @@ BEGIN
   RETURN i;
 END $$;
 CREATE FUNCTION psd_fk_del(n int) RETURNS bigint LANGUAGE :pj_lang AS $$
+DECLARE c bigint;
 BEGIN
   DELETE FROM psd_p WHERE id = n;
-  RETURN (SELECT count(*) FROM psd_p);
+  SELECT count(*) INTO c FROM psd_p;
+  RETURN c;
 END $$;
 SELECT psd_fk(1);
 :dc;
@@ -122,6 +126,40 @@ SELECT psd_try('SELECT psd_fk_del(3)');
 SELECT psd_try('SELECT psd_fk_del(3)');
 SELECT psd_try('SELECT psd_fk_del(1)');
 SELECT id FROM psd_p ORDER BY id;
+SELECT pj_expect('psd_fk(integer)', 'compiled') \gset
+SELECT pj_expect('psd_fk_del(integer)', 'compiled') \gset
+
+-- RESTRICT is a check too, and so is a deferrable unique constraint
+CREATE TABLE psd_pr (id int PRIMARY KEY);
+INSERT INTO psd_pr SELECT i FROM generate_series(1, 5) i;
+CREATE TABLE psd_cr (id serial PRIMARY KEY,
+                     pid int REFERENCES psd_pr ON DELETE RESTRICT ON UPDATE RESTRICT);
+INSERT INTO psd_cr (pid) VALUES (1);
+CREATE FUNCTION psd_restrict(n int) RETURNS int LANGUAGE :pj_lang AS $$
+BEGIN
+  DELETE FROM psd_pr WHERE id = n;
+  UPDATE psd_pr SET id = id + 100 WHERE id = n + 1;
+  RETURN n;
+END $$;
+SELECT psd_restrict(2);
+SELECT psd_restrict(3);
+SELECT psd_restrict(4);
+SELECT psd_try('SELECT psd_restrict(0)');
+SELECT psd_try('SELECT psd_restrict(1)');
+SELECT id FROM psd_pr ORDER BY id;
+SELECT pj_expect('psd_restrict(integer)', 'compiled') \gset
+CREATE TABLE psd_u (a int, UNIQUE (a) DEFERRABLE INITIALLY IMMEDIATE);
+CREATE FUNCTION psd_uniq(n int) RETURNS int LANGUAGE :pj_lang AS $$
+BEGIN
+  INSERT INTO psd_u VALUES (n);
+  RETURN n;
+END $$;
+SELECT psd_uniq(1);
+SELECT psd_uniq(2);
+SELECT psd_uniq(3);
+SELECT psd_try('SELECT psd_uniq(2)');
+SELECT * FROM psd_u ORDER BY a;
+SELECT pj_expect('psd_uniq(integer)', 'compiled') \gset
 
 -- the table a statement writes decides: a cascade, a trigger, a rule, a
 -- partitioned table, children.  Each is PL/pgSQL's, with its own effects.
@@ -143,6 +181,7 @@ SELECT psd_casc(3);
 :dcc;
 SELECT psd_casc(4);
 :dcc;
+SELECT pj_expect('psd_casc(integer)', 'declined:relation:cascade') \gset
 
 CREATE TABLE psd_tr (a int, b text);
 CREATE FUNCTION psd_tr_fn() RETURNS trigger LANGUAGE plpgsql AS $$
@@ -159,6 +198,7 @@ SELECT psd_trg(2);
 SELECT psd_trg(3);
 SELECT psd_trg(4);
 SELECT * FROM psd_tr ORDER BY a;
+SELECT pj_expect('psd_trg(integer)', 'declined:relation:trigger') \gset
 
 CREATE TABLE psd_ru (a int);
 CREATE TABLE psd_ru_log (a int);
@@ -174,6 +214,7 @@ SELECT psd_rule(3);
 SELECT psd_rule(4);
 SELECT * FROM psd_ru ORDER BY a;
 SELECT * FROM psd_ru_log ORDER BY a;
+SELECT pj_expect('psd_rule(integer)', 'declined:relation:rule') \gset
 
 CREATE TABLE psd_pt (a int, b text) PARTITION BY RANGE (a);
 CREATE TABLE psd_pt1 PARTITION OF psd_pt FOR VALUES FROM (0) TO (100);
@@ -189,6 +230,7 @@ SELECT psd_part(101);
 SELECT psd_part(2);
 SELECT psd_part(102);
 SELECT tableoid::regclass, * FROM psd_pt ORDER BY a;
+SELECT pj_expect('psd_part(integer)', 'declined:relation:partitioned') \gset
 
 CREATE TABLE psd_inh (a int, b text);
 CREATE TABLE psd_inh_c (c int) INHERITS (psd_inh);
@@ -204,6 +246,7 @@ SELECT psd_inhf(2);
 SELECT psd_inhf(1);
 SELECT psd_inhf(2);
 SELECT tableoid::regclass, * FROM psd_inh ORDER BY a;
+SELECT pj_expect('psd_inhf(integer)', 'declined:relation:inheritance') \gset
 -- a child with no children of its own is a table like any other
 CREATE FUNCTION psd_inhc(n int) RETURNS int LANGUAGE :pj_lang AS $$
 BEGIN
@@ -215,6 +258,7 @@ SELECT psd_inhc(2);
 SELECT psd_inhc(1);
 SELECT psd_inhc(2);
 SELECT tableoid::regclass, * FROM psd_inh ORDER BY a;
+SELECT pj_expect('psd_inhc(integer)', 'compiled') \gset
 
 -- a view: its base table is the one written, a trigger on the view is not code
 -- we can see
@@ -231,6 +275,7 @@ SELECT psd_view(2);
 SELECT psd_view(3);
 SELECT psd_view(4);
 SELECT * FROM psd_vb ORDER BY a;
+SELECT pj_expect('psd_view(integer)', 'compiled') \gset
 CREATE VIEW psd_vi AS SELECT a, b FROM psd_vb;
 CREATE FUNCTION psd_vi_fn() RETURNS trigger LANGUAGE plpgsql AS $$
 BEGIN RAISE NOTICE 'instead of %', new.a; INSERT INTO psd_vb VALUES (new.a + 100, new.b); RETURN new; END $$;
@@ -246,6 +291,7 @@ SELECT psd_viewi(2);
 SELECT psd_viewi(3);
 SELECT psd_viewi(4);
 SELECT * FROM psd_vb ORDER BY a;
+SELECT pj_expect('psd_viewi(integer)', 'declined:relation:kind') \gset
 
 -- MERGE stays PL/pgSQL's
 CREATE TABLE psd_mg (a int PRIMARY KEY, b text);
@@ -262,6 +308,7 @@ SELECT psd_merge(1);
 SELECT psd_merge(2);
 SELECT psd_merge(2);
 SELECT * FROM psd_mg ORDER BY a;
+SELECT pj_expect('psd_merge(integer)', 'declined:statement:SQL statement') \gset
 
 -- a data-modifying CTE: the relation rule is for the result relation of each
 -- command in it, the top level or not
@@ -274,14 +321,14 @@ BEGIN RAISE NOTICE 'trigger on %', old.a; RETURN old; END $$;
 CREATE TRIGGER psd_wt_d BEFORE DELETE ON psd_wt
   FOR EACH ROW EXECUTE FUNCTION psd_wt_fn();
 \set dw 'SELECT (SELECT string_agg(a::text, '','' ORDER BY a) FROM psd_w) AS psd_w, (SELECT string_agg(a::text, '','' ORDER BY a) FROM psd_wt) AS psd_wt'
-CREATE FUNCTION psd_cte(n int) RETURNS int LANGUAGE :pj_lang AS $$
-DECLARE c int;
+CREATE FUNCTION psd_cte(n int) RETURNS bigint LANGUAGE :pj_lang AS $$
+DECLARE c bigint;
 BEGIN
   WITH d AS (DELETE FROM psd_w WHERE a = n RETURNING *) SELECT count(*) INTO c FROM d;
   RETURN c;
 END $$;
-CREATE FUNCTION psd_cte_t(n int) RETURNS int LANGUAGE :pj_lang AS $$
-DECLARE c int;
+CREATE FUNCTION psd_cte_t(n int) RETURNS bigint LANGUAGE :pj_lang AS $$
+DECLARE c bigint;
 BEGIN
   WITH d AS (DELETE FROM psd_wt WHERE a = n RETURNING *) SELECT count(*) INTO c FROM d;
   RETURN c;
@@ -307,6 +354,9 @@ SELECT psd_cte_move(5);
 SELECT psd_cte_move(6);
 SELECT psd_cte_move(4);
 :dw;
+SELECT pj_expect('psd_cte(integer)', 'compiled') \gset
+SELECT pj_expect('psd_cte_t(integer)', 'declined:relation:trigger') \gset
+SELECT pj_expect('psd_cte_move(integer)', 'declined:relation:trigger') \gset
 
 -- RETURNING INTO: no row, one row, two rows
 CREATE FUNCTION psd_ret(n int, w int) RETURNS text LANGUAGE :pj_lang AS $$
@@ -336,6 +386,8 @@ SELECT psd_try('SELECT psd_ret(4, 2)');
 SELECT psd_ret_strict(60), psd_ret_strict(61), psd_ret_strict(62);
 SELECT psd_try('SELECT psd_ret_strict(60)');
 :dt;
+SELECT pj_expect('psd_ret(integer,integer)', 'compiled') \gset
+SELECT pj_expect('psd_ret_strict(integer)', 'compiled') \gset
 
 -- RETURNING with no INTO has no destination
 CREATE FUNCTION psd_noret(n int) RETURNS int LANGUAGE :pj_lang AS $$
@@ -376,7 +428,8 @@ SELECT psd_catch(4);
 :ds;
 :dc;
 
--- a call inside a call, both with a statement of their own
+-- a call inside a call, both with a statement of their own: a VOLATILE callee
+-- of an expression is not admitted, so the function is PL/pgSQL's
 CREATE FUNCTION psd_rec(n int) RETURNS int LANGUAGE :pj_lang AS $$
 DECLARE r int;
 BEGIN
@@ -392,25 +445,25 @@ SELECT psd_rec(2);
 SELECT psd_rec(3);
 SELECT psd_rec(3);
 :ds;
+SELECT pj_expect('psd_rec(integer)', 'declined:volatile callee') \gset
 
 -- an expression after a statement sees what the statement wrote
 CREATE FUNCTION psd_cnt() RETURNS bigint LANGUAGE sql STABLE AS
   $$ SELECT count(*) FROM psd_s $$;
-CREATE FUNCTION psd_cnt_v() RETURNS bigint LANGUAGE plpgsql VOLATILE AS
-  $$ BEGIN RETURN (SELECT count(*) FROM psd_s); END $$;
 CREATE FUNCTION psd_see(n int) RETURNS text LANGUAGE :pj_lang AS $$
 DECLARE a bigint; b bigint; c bigint;
 BEGIN
   a := psd_cnt();
   INSERT INTO psd_s (v) VALUES ('see' || n);
   b := psd_cnt();
-  c := psd_cnt_v();
+  SELECT count(*) INTO c FROM psd_s;
   RETURN a || '/' || b || '/' || c;
 END $$;
 SELECT psd_see(1);
 SELECT psd_see(2);
 SELECT psd_see(3);
 SELECT psd_see(4);
+SELECT pj_expect('psd_see(integer)', 'compiled') \gset
 
 -- the table truncated between calls: the plan is stale, and a statement that
 -- writes is looked at again (at most one call by the interpreter)
@@ -428,11 +481,16 @@ SELECT psd_trunc(2);
 SELECT psd_trunc(3);
 SELECT psd_trunc(4);
 :dtt;
+SELECT pj_expect('psd_trunc(integer)', 'compiled') \gset
 TRUNCATE psd_tt;
+SELECT pj_mark() \gset
 SELECT psd_trunc(5);
 SELECT psd_trunc(6);
+-- one call by the interpreter, then the translation, then compiled again
+SELECT pj_delta(1, 1, NULL, 0, 1);
 SELECT psd_trunc(7);
 :dtt;
+SELECT pj_expect('psd_trunc(integer)', 'compiled') \gset
 TRUNCATE psd_tt;
 SELECT psd_trunc(8);
 SELECT psd_trunc(9);
@@ -454,33 +512,46 @@ SELECT psd_dvi(1);
 SELECT psd_dvi(2);
 SELECT psd_dvi(3);
 :ddv;
+SELECT pj_expect('psd_dvi(integer)', 'compiled') \gset
 ALTER TABLE psd_dv ALTER COLUMN b SET DEFAULT psd_vol();
+SELECT pj_mark() \gset
 SELECT psd_dvi(4);
+SELECT pj_delta(0, 1, NULL, 0, 0, NULL, 0, 0, 0) \gset
 SELECT psd_dvi(5);
 SELECT psd_dvi(6);
 :ddv;
+SELECT pj_expect('psd_dvi(integer)', 'declined:volatile callee') \gset
 
 -- a rule that makes the statement nothing: no relation shows in the plan, and
--- a trigger created later is as much code as one that was there
+-- so nothing makes it stale when the rule goes and a trigger comes (PL/pgSQL
+-- goes on doing nothing too); after DISCARD PLANS the statement is looked at
+-- again, as one that writes
 CREATE TABLE psd_nt (a int);
 CREATE RULE psd_nt_r AS ON INSERT TO psd_nt DO INSTEAD NOTHING;
 CREATE FUNCTION psd_nt_fn() RETURNS trigger LANGUAGE plpgsql AS $$
 BEGIN RAISE NOTICE 'trigger on %', new.a; RETURN new; END $$;
-CREATE FUNCTION psd_nothing(n int) RETURNS text LANGUAGE :pj_lang AS $$
+CREATE FUNCTION psd_nothing(n int) RETURNS int LANGUAGE :pj_lang AS $$
 BEGIN
   INSERT INTO psd_nt VALUES (n);
-  RETURN found::text;
+  RETURN n;
 END $$;
 SELECT psd_nothing(1);
 SELECT psd_nothing(2);
 SELECT psd_nothing(3);
+SELECT pj_expect('psd_nothing(integer)', 'compiled') \gset
 DROP RULE psd_nt_r ON psd_nt;
 CREATE TRIGGER psd_nt_t BEFORE INSERT ON psd_nt
   FOR EACH ROW EXECUTE FUNCTION psd_nt_fn();
+-- the plan names no relation, so only this makes it stale
+DISCARD PLANS;
+SELECT pj_mark() \gset
 SELECT psd_nothing(4);
+SELECT pj_delta(0, 1, NULL, 0, 0, NULL, 0, 0, 0) \gset
 SELECT psd_nothing(5);
 SELECT psd_nothing(6);
 SELECT * FROM psd_nt ORDER BY a;
+-- (pg_class still says that the table has rules, until a VACUUM)
+SELECT pj_expect('psd_nothing(integer)', 'declined:relation:rule') \gset
 
 -- a function with the shape of a transaction: a SELECT INTO that needs a cast
 -- makes the function PL/pgSQL's, statements that write and all
@@ -504,6 +575,7 @@ SELECT psd_order(3);
 SELECT psd_order(1);
 SELECT * FROM psd_ol ORDER BY o, amount;
 SELECT id, q FROM psd_o ORDER BY id;
+SELECT pj_expect('psd_order(integer)', 'declined:cast') \gset
 
 -- memory: 10^4 statements that write, read inside the loop
 CREATE TABLE psd_m (a int PRIMARY KEY, b int);
@@ -523,5 +595,8 @@ SELECT psd_loop(3, 1) > 0, psd_loop(3, 2) > 0;
 SELECT psd_loop(3, 1) > 0, psd_loop(3, 2) > 0;
 SELECT psd_loop(3, 1) > 0, psd_loop(3, 2) > 0;
 SELECT psd_loop(1000, 1000) AS m1 \gset
+SELECT pj_mark() \gset
 SELECT psd_loop(10000, 10000) - :m1 < 262144 AS flat;
+SELECT pj_delta(1, 0, NULL, 0, 0, NULL, 10000);
 SELECT sum(b) FROM psd_m;
+SELECT pj_expect('psd_loop(integer,integer)', 'compiled') \gset

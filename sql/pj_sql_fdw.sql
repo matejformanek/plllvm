@@ -39,6 +39,7 @@ SELECT psf_ins(3);
 SELECT * FROM psf_remote ORDER BY a;
 SELECT psf_ins(4);
 SELECT * FROM psf_remote ORDER BY a;
+SELECT pj_expect('psf_ins(integer)', 'declined:relation:foreign table') \gset
 
 DROP FOREIGN TABLE psf_f;
 DROP USER MAPPING FOR CURRENT_USER SERVER psf_srv;

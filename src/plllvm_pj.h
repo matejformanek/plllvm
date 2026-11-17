@@ -162,6 +162,7 @@ typedef struct PjSql
 	Oid		   *funcs;
 	char	   *volatility;		/* ... and their provolatile */
 	bool		has_view;		/* a view is among the relations */
+	bool		writes;			/* a command or a CTE of it writes */
 } PjSql;
 
 /* how to cast one type to another, as PL/pgSQL's cast_expr_hash */

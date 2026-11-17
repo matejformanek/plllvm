@@ -43,14 +43,19 @@
  */
 #include "postgres.h"
 
+#include "access/genam.h"
 #include "access/htup_details.h"
+#include "access/table.h"
+#include "catalog/indexing.h"
 #include "catalog/namespace.h"
 #include "catalog/pg_class.h"
 #include "catalog/pg_proc.h"
+#include "catalog/pg_trigger.h"
 #include "executor/spi.h"
 #include "miscadmin.h"
 #include "nodes/nodeFuncs.h"
 #include "nodes/params.h"
+#include "parser/parsetree.h"
 #include "plpgsql.h"
 #include "utils/fmgroids.h"
 #include "utils/guc.h"
@@ -81,9 +86,13 @@ typedef struct SqlFacts
 	List	   *funcs;			/* the callees, once each ... */
 	List	   *volatility;		/* ... and their provolatile (as int) */
 	bool		has_view;
+	bool		writes;			/* a command or a CTE of it writes */
 } SqlFacts;
 
 static bool sql_scan_walker(Node *node, SqlFacts *facts);
+static const char *sql_write_reason(Query *query);
+static const char *sql_relation_reason(Oid relid);
+static const char *sql_trigger_reason(Oid relid);
 static bool sql_scan_func(Oid funcid, void *context);
 static bool sql_func_pinned(Oid funcid);
 static bool sql_facts_ok(PjSql *sql);
@@ -145,13 +154,14 @@ shadow_build(PLpgSQL_function *func, MemoryContext cxt)
 }
 
 /*
- * What a statement for SPI may be: a query with no writes, and no callee that
- * can change what the plan was made from.  A command that is not a SELECT
- * and a data-modifying CTE under a SELECT are the interpreter's: the triggers,
- * rules and constraints of the table they write are code that no walk of the
- * query shows.  A VOLATILE function may run SQL of its own, or set what a later
- * simple expression of the function was planned with (search_path), so it is
- * not admitted either, but the built-in ones that change no plan input.
+ * What a statement for SPI may be: a query that writes only to a table with
+ * no code of its own (sql_relation_reason()), and no callee that can change
+ * what the plan was made from.  Any other command, and MERGE, are the
+ * interpreter's.  A data-modifying CTE under a SELECT is a query of its own
+ * here, so the rule applies to its result relation as to the top level's.  A
+ * VOLATILE function may run SQL of its own, or set what a later simple
+ * expression of the function was planned with (search_path), so it is not
+ * admitted either, but the built-in ones that change no plan input.
  */
 static bool
 sql_scan_walker(Node *node, SqlFacts *facts)
@@ -162,11 +172,24 @@ sql_scan_walker(Node *node, SqlFacts *facts)
 	{
 		Query	   *query = (Query *) node;
 
-		if (query->commandType != CMD_SELECT || query->hasModifyingCTE)
+		switch (query->commandType)
 		{
-			facts->reason = "statement:SQL statement";
-			return true;
+			case CMD_SELECT:
+				break;
+			case CMD_INSERT:
+			case CMD_UPDATE:
+			case CMD_DELETE:
+				facts->writes = true;
+				facts->reason = sql_write_reason(query);
+				if (facts->reason != NULL)
+					return true;
+				break;
+			default:
+				facts->reason = "statement:SQL statement";
+				return true;
 		}
+		if (query->hasModifyingCTE)
+			facts->writes = true;
 		foreach_node(RangeTblEntry, rte, query->rtable)
 		{
 			/* ApplyRetrieveRule() leaves the relkind of the view */
@@ -178,6 +201,107 @@ sql_scan_walker(Node *node, SqlFacts *facts)
 	if (check_functions_in_node(node, sql_scan_func, facts))
 		return true;
 	return expression_tree_walker(node, sql_scan_walker, facts);
+}
+
+/* the result relation of a command that writes, as the rewriter left it */
+static const char *
+sql_write_reason(Query *query)
+{
+	RangeTblEntry *rte;
+
+	if (query->resultRelation <= 0)
+		return "statement:SQL statement";
+	rte = rt_fetch(query->resultRelation, query->rtable);
+	if (rte->rtekind != RTE_RELATION)
+		return "relation:kind";
+	return sql_relation_reason(rte->relid);
+}
+
+/*
+ * May compiled code write to this table?  What a write does besides storing
+ * the row is code that the plan does not show: triggers, rules, the actions
+ * of foreign keys, the children of an inheritance tree, the partitions, the
+ * wrapper of a foreign table.  Any of them is the interpreter's.  The checks
+ * of a foreign key on the table written, and of a deferred unique constraint,
+ * are not: they change no row and run no code of a user.  Read from the
+ * catalogs with no lock on the table: a change that matters invalidates the
+ * plan, which is looked at again.
+ */
+static const char *
+sql_relation_reason(Oid relid)
+{
+	HeapTuple	tup = SearchSysCache1(RELOID, ObjectIdGetDatum(relid));
+	Form_pg_class rel;
+	const char *reason = NULL;
+
+	if (!HeapTupleIsValid(tup))
+		return "relation:kind";
+	rel = (Form_pg_class) GETSTRUCT(tup);
+
+	if (rel->relkind == RELKIND_PARTITIONED_TABLE)
+		reason = "relation:partitioned";
+	else if (rel->relkind == RELKIND_FOREIGN_TABLE)
+		reason = "relation:foreign table";
+	else if (rel->relkind != RELKIND_RELATION)
+		reason = "relation:kind";
+	else if (rel->relhasrules)
+		reason = "relation:rule";
+	else if (rel->relhassubclass)
+		reason = "relation:inheritance";
+	else if (rel->relhastriggers)
+		reason = sql_trigger_reason(relid);
+	ReleaseSysCache(tup);
+	return reason;
+}
+
+static const char *
+sql_trigger_reason(Oid relid)
+{
+	Relation	tgrel = table_open(TriggerRelationId, AccessShareLock);
+	ScanKeyData key;
+	SysScanDesc scan;
+	HeapTuple	tup;
+	const char *reason = NULL;
+
+	ScanKeyInit(&key, Anum_pg_trigger_tgrelid, BTEqualStrategyNumber,
+				F_OIDEQ, ObjectIdGetDatum(relid));
+	scan = systable_beginscan(tgrel, TriggerRelidNameIndexId, true, NULL, 1,
+							  &key);
+	while (reason == NULL && HeapTupleIsValid(tup = systable_getnext(scan)))
+	{
+		Form_pg_trigger trig = (Form_pg_trigger) GETSTRUCT(tup);
+
+		if (!trig->tgisinternal)
+		{
+			reason = "relation:trigger";
+			continue;
+		}
+		switch (trig->tgfoid)
+		{
+			case F_RI_FKEY_CHECK_INS:
+			case F_RI_FKEY_CHECK_UPD:
+			case F_RI_FKEY_NOACTION_DEL:
+			case F_RI_FKEY_NOACTION_UPD:
+			case F_RI_FKEY_RESTRICT_DEL:
+			case F_RI_FKEY_RESTRICT_UPD:
+			case F_UNIQUE_KEY_RECHECK:
+				break;
+			case F_RI_FKEY_CASCADE_DEL:
+			case F_RI_FKEY_CASCADE_UPD:
+			case F_RI_FKEY_SETNULL_DEL:
+			case F_RI_FKEY_SETNULL_UPD:
+			case F_RI_FKEY_SETDEFAULT_DEL:
+			case F_RI_FKEY_SETDEFAULT_UPD:
+				reason = "relation:cascade";
+				break;
+			default:
+				reason = "relation:trigger";
+				break;
+		}
+	}
+	systable_endscan(scan);
+	table_close(tgrel, AccessShareLock);
+	return reason;
 }
 
 static bool
@@ -358,6 +482,15 @@ plllvm_pj_sql_harvest(PLpgSQL_function *func, PjHarvest *h, PjExpr *pe)
 	sql->plansource = psrc;
 	sql->generation = psrc->generation;
 	sql->has_view = facts.has_view;
+
+	/*
+	 * A command that a rule turned into nothing has no query to show it, and
+	 * writes as much as any: its tag tells
+	 */
+	sql->writes = facts.writes || psrc->commandTag == CMDTAG_INSERT ||
+		psrc->commandTag == CMDTAG_UPDATE ||
+		psrc->commandTag == CMDTAG_DELETE ||
+		psrc->commandTag == CMDTAG_MERGE;
 	sql->nfuncs = list_length(facts.funcs);
 	sql->funcs = palloc_array(Oid, Max(sql->nfuncs, 1));
 	sql->volatility = palloc_array(char, Max(sql->nfuncs, 1));
@@ -448,7 +581,8 @@ sql_result_same(PjSql *sql, CachedPlanSource *psrc)
  * a function whose table is truncated and analysed between calls would
  * otherwise never stay compiled.  It is one only if what the statement was
  * admitted for may have changed: a callee that is not as it was, a view, a
- * policy.  A plan that others have rebuilt since our last look (an interpreted
+ * policy, or the table of a statement that writes, which may have a trigger
+ * now.  A plan that others have rebuilt since our last look (an interpreted
  * call may have) is checked as it stands.
  */
 bool
@@ -472,7 +606,11 @@ plllvm_pj_sql_guard(PjSql *sql)
 
 	if (!psrc->is_valid)
 	{
-		if (sql->has_view)
+		/*
+		 * A statement that writes also depends on what its table has: a
+		 * default, a generated column, a trigger, a rule
+		 */
+		if (sql->has_view || sql->writes)
 			return false;
 		for (int i = 0; i < sql->nfuncs; i++)
 		{
