@@ -241,3 +241,26 @@ SELECT po_build(1, 3);
 SELECT po_build(2, 1);  -- fail
 SELECT po_build(2, 1);  -- fail
 SELECT pj_expect('po_build(int8,int8)', 'declined:signature') \gset
+
+-- the value of a callee that returns a record variable reaches the exit as an
+-- expanded record: of the type of the function, and of another type that has
+-- the same columns
+CREATE TYPE po_t2 AS (a int, b text);
+CREATE FUNCTION po_exp1(x int) RETURNS po_t LANGUAGE plpgsql IMMUTABLE AS $$
+DECLARE r po_t;
+BEGIN r := ROW(x, 'e1'::text); RETURN r; END $$;
+CREATE FUNCTION po_exp2(x int) RETURNS po_t2 LANGUAGE plpgsql IMMUTABLE AS $$
+DECLARE r po_t2;
+BEGIN r := ROW(x, 'e2'::text); RETURN r; END $$;
+CREATE FUNCTION po_exph1(x int) RETURNS po_t LANGUAGE :pj_lang AS $$
+BEGIN RETURN po_exp1(x); END $$;
+CREATE FUNCTION po_exph2(x int) RETURNS po_t LANGUAGE :pj_lang AS $$
+BEGIN RETURN po_exp2(x); END $$;
+CREATE FUNCTION po_exph3(x int) RETURNS po_d LANGUAGE :pj_lang AS $$
+BEGIN RETURN po_exp1(x); END $$;
+SELECT po_exph1(1), po_exph2(1), po_exph3(1);
+SELECT po_exph1(2), po_exph2(2), po_exph3(2);
+SELECT row_to_json(po_exph1(3)), row_to_json(po_exph2(3)), row_to_json(po_exph3(3));
+SELECT pj_expect('po_exph1(int)', 'compiled') \gset
+SELECT pj_expect('po_exph2(int)', 'compiled') \gset
+SELECT pj_expect('po_exph3(int)', 'compiled') \gset

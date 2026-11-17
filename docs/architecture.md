@@ -334,10 +334,12 @@ Only `plllvm_jit.c` and `plllvm_error.cpp` include LLVM headers.
   type that is not the declared one is converted by position (dropped columns,
   RECORD against a named type, the column list of the caller, `get_call_result_type()`
   at every call), and a RECORD descriptor gets its typmod, as
-  `SPI_returntuple()` does (`get_call_result_type()` has assigned one by then,
-  so no input reaches that step: it is kept as the copy of what stock does). It is written again because those functions are
-  `static` and a call that returns a row must not need an SPI connection;
-  `tools/pl-drift` fails when a body it follows changes. What it makes lives in
+  `SPI_returntuple()` does. `get_call_result_type()` has assigned one by then
+  for OUT parameters (`funcapi.c:471`) and for the `expectedDesc` of a caller
+  (`funcapi.c:521-525`, blessed by `nodeFunctionscan.c:386`), so only a caller
+  of a third kind reaches the step; it is kept as the copy of stock's. It is
+  written again because those functions are `static` and a call that returns
+  a row must not need an SPI connection; `tools/pl-drift` fails when a body it follows changes. What it makes lives in
   the datum context of the level, which the handler resets after it has copied
   the result. A conversion that fails is raised at the exit of the function,
   which PL/pgSQL names with the context "while casting return value to

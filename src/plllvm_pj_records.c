@@ -118,7 +118,10 @@ plllvm_pj_ret_tuple(PjCtx *ctx, FunctionCallInfo fcinfo, Datum value,
 
 		default:
 
-			/* a composite domain is out of scope: this is stock's arm */
+			/*
+			 * what is no composite type: a composite domain is out of scope,
+			 * so this is stock's arm for what cannot happen
+			 */
 			elog(ERROR, "return type must be a row type");
 			break;
 	}

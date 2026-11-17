@@ -473,8 +473,8 @@ pl-drift:
 # statements for SPI, NDML of the same with INSERT, UPDATE and DELETE, NROW of
 # OUT parameters and composite results, in the throwaway database pj_fuzz.  A
 # difference is reported by seed, with the program and both outputs in
-# results-fuzz/.  Not part of installcheck or verify.  NCX programs of each of the flat and ref
-# modes also have CASE and SELECT INTO (--cx).
+# results-fuzz/.  Not part of installcheck or verify.  NCX programs of each of
+# the flat and ref modes also have CASE and SELECT INTO (--cx).
 N ?= 2000
 NREC ?= 500
 NREF ?= 500
@@ -523,8 +523,7 @@ fuzz-pj: port-ok
 # have SELECT INTO alone, and 150 programs of statements that write must have
 # run one in 25% of them, and 150 programs of OUT parameters and composite
 # results must have compiled in 60% and deopted.  setup() drops and recreates
-# the fuzz database, so
-# the cluster must be a throwaway
+# the fuzz database, so the cluster must be a throwaway
 check-pj-fuzz: port-ok
 	@case "$(origin PLLLVM_PORT):$(PLLLVM_PORT)" in file:*|*:|*:544[2-5]) \
 	  echo "check-pj-fuzz needs the PLLLVM_PORT of a throwaway cluster" >&2; \

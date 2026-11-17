@@ -233,7 +233,8 @@ of a built-in base type passed by reference (`text`, `varchar`, `numeric`,
 a result of any type that no variable holds, OUT parameters (one or several,
 `INOUT` of a scalar) and a composite result from a row expression, with the
 conversion to the declared type that PL/pgSQL makes (no record variables, no
-composite OUT parameter and no domain over a composite type). An expression is a bare
+composite or domain OUT parameter, also among several, and no domain over a
+composite type). An expression is a bare
 variable or constant, or one of `bool`, `int4`, `int8` and `float8` as in the
 expression JIT; any other expression that PL/pgSQL plans as simple, calls of
 non-volatile functions included, is evaluated by the executor and costs what
