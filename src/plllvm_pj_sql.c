@@ -92,6 +92,7 @@ typedef struct SqlFacts
 	List	   *volatility;		/* ... and their provolatile (as int) */
 	bool		has_view;
 	bool		writes;			/* a command or a CTE of it writes */
+	bool		result;			/* a query has a result relation */
 } SqlFacts;
 
 static bool sql_scan_walker(Node *node, SqlFacts *facts);
@@ -190,6 +191,7 @@ sql_scan_walker(Node *node, SqlFacts *facts)
 			case CMD_UPDATE:
 			case CMD_DELETE:
 				facts->writes = true;
+				facts->result = true;
 				facts->reason = sql_write_reason(query);
 				if (facts->reason != NULL)
 					return true;
@@ -244,6 +246,23 @@ sql_write_reason(Query *query)
 	rte = rt_fetch(query->resultRelation, query->rtable);
 	if (rte->rtekind != RTE_RELATION)
 		return "relation:kind";
+
+	/*
+	 * A view that was written through, or a relation a rule's action was
+	 * copied from, stays among the relations of the query with the lock of a
+	 * write, but is no result relation.  SPI takes that lock inside the call,
+	 * where the facts of the relation are delivered and were not looked at.
+	 */
+	for (int i = 1; i <= list_length(query->rtable); i++)
+	{
+		RangeTblEntry *other = rt_fetch(i, query->rtable);
+
+		/* (the pseudo relation excluded of ON CONFLICT is the target again) */
+		if (i != query->resultRelation && other->rtekind == RTE_RELATION &&
+			other->relid != rte->relid &&
+			other->rellockmode >= RowExclusiveLock)
+			return "relation:view";
+	}
 	return sql_relation_reason(rte->relid);
 }
 
@@ -253,13 +272,12 @@ sql_write_reason(Query *query)
  * of foreign keys, the children of an inheritance tree, the partitions, the
  * wrapper of a foreign table.  Any of them is the interpreter's.  The checks
  * of a foreign key on the table written, and of a deferred unique constraint,
- * are not: they change no row and run no code of a user.  Read from the
- * catalogs with no lock on the table: a change to the table that matters (a
- * trigger, a rule, a default, a check, the children) invalidates the plan,
- * which is looked at again.  A function that only a CHECK or a domain
- * constraint calls is no dependency of the plan, so a change of its
- * volatility is not seen until something else invalidates the plan: a stated
- * gap.
+ * are not: they change no row and run no code of a user.  The table has
+ * been locked for the write by the entry check (plllvm_pj_sql_guard()), so
+ * what is read here, from the catalogs, stays true until the transaction
+ * ends; a function that a CHECK constraint calls is read at every entry.  A
+ * domain constraint that is added without validation locks no table, so it
+ * is a stated gap, as are the children added after the lock.
  */
 static const char *
 sql_relation_reason(Oid relid)
@@ -569,6 +587,15 @@ plllvm_pj_sql_harvest(PLpgSQL_function *func, PjHarvest *h, PjExpr *pe)
 
 	if (sql_scan_walker((Node *) psrc->query_list, &facts))
 		return facts.reason;
+
+	/*
+	 * A command that a rule turned into nothing has no result relation, so no
+	 * table to lock and look at when the rule goes and a trigger comes: it is
+	 * the interpreter's.  (A plan that turns into nothing later does nothing
+	 * under SPI too, as under PL/pgSQL.)
+	 */
+	if (sql_cmd_writes(psrc) && !facts.result)
+		return "relation:none";
 	if (stmt != NULL && stmt->into)
 	{
 		const char *reason = sql_into_admit(func, psrc, stmt);
@@ -605,10 +632,6 @@ plllvm_pj_sql_harvest(PLpgSQL_function *func, PjHarvest *h, PjExpr *pe)
 	sql->plansource = psrc;
 	sql->has_view = facts.has_view;
 
-	/*
-	 * A command that a rule turned into nothing has no query to show it, and
-	 * writes as much as any: its tag tells
-	 */
 	sql->writes = facts.writes || sql_cmd_writes(psrc);
 	sql->nfuncs = list_length(facts.funcs);
 	sql->funcs = palloc_array(Oid, Max(sql->nfuncs, 1));

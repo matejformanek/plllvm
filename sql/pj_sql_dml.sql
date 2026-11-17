@@ -280,7 +280,7 @@ SELECT psd_view(2);
 SELECT psd_view(3);
 SELECT psd_view(4);
 SELECT * FROM psd_vb ORDER BY a;
-SELECT pj_expect('psd_view(integer)', 'compiled') \gset
+SELECT pj_expect('psd_view(integer)', 'declined:relation:view') \gset
 CREATE VIEW psd_vi AS SELECT a, b FROM psd_vb;
 CREATE FUNCTION psd_vi_fn() RETURNS trigger LANGUAGE plpgsql AS $$
 BEGIN RAISE NOTICE 'instead of %', new.a; INSERT INTO psd_vb VALUES (new.a + 100, new.b); RETURN new; END $$;
@@ -313,6 +313,7 @@ SELECT psd_viewr(2);
 SELECT psd_viewr(3);
 SELECT psd_viewr(4);
 SELECT * FROM psd_vrb ORDER BY a;
+SELECT pj_expect('psd_viewr(integer)', 'declined:relation:view') \gset
 
 -- MERGE stays PL/pgSQL's
 CREATE TABLE psd_mg (a int PRIMARY KEY, b text);
@@ -543,10 +544,10 @@ SELECT psd_dvi(6);
 :ddv;
 SELECT pj_expect('psd_dvi(integer)', 'declined:volatile callee') \gset
 
--- a rule that makes the statement nothing: no relation shows in the plan, and
--- so nothing makes it stale when the rule goes and a trigger comes (PL/pgSQL
--- goes on doing nothing too); after DISCARD PLANS the statement is looked at
--- again, as one that writes
+-- a rule that makes the statement nothing: no relation shows in the plan, so
+-- nothing is locked and nothing makes the plan stale when the rule goes and a
+-- trigger comes (PL/pgSQL goes on doing nothing too).  The function is the
+-- interpreter's: there is no table to look at.
 CREATE TABLE psd_nt (a int) WITH (autovacuum_enabled = false);
 CREATE RULE psd_nt_r AS ON INSERT TO psd_nt DO INSTEAD NOTHING;
 CREATE FUNCTION psd_nt_fn() RETURNS trigger LANGUAGE plpgsql AS $$
@@ -559,7 +560,7 @@ END $$;
 SELECT psd_nothing(1);
 SELECT psd_nothing(2);
 SELECT psd_nothing(3);
-SELECT pj_expect('psd_nothing(integer)', 'compiled') \gset
+SELECT pj_expect('psd_nothing(integer)', 'declined:relation:none') \gset
 DROP RULE psd_nt_r ON psd_nt;
 CREATE TRIGGER psd_nt_t BEFORE INSERT ON psd_nt
   FOR EACH ROW EXECUTE FUNCTION psd_nt_fn();
@@ -571,8 +572,8 @@ SELECT pj_delta(0, 1, NULL, 0, 0, NULL, 0, 0, 0) \gset
 SELECT psd_nothing(5);
 SELECT psd_nothing(6);
 SELECT * FROM psd_nt ORDER BY a;
--- (pg_class still says that the table has rules, until a VACUUM)
-SELECT pj_expect('psd_nothing(integer)', 'declined:relation:rule') \gset
+-- (the function stays declined, for the reason it was declined for)
+SELECT pj_expect('psd_nothing(integer)', 'declined:relation:none') \gset
 
 -- a function with the shape of a transaction: a SELECT INTO that needs a cast
 -- makes the function PL/pgSQL's, statements that write and all

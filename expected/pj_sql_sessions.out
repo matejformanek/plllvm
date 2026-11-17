@@ -312,8 +312,10 @@ SELECT psv_w(1), psv_w(2), psv_w(3);
      1 |     2 |     3
 (1 row)
 
+SELECT pj_expect('psv_w(integer)', 'declined:relation:view') \gset
 BEGIN;
 INSERT INTO psv_b VALUES (0);
+SELECT pj_mark() \gset
 SELECT dblink_exec('other', 'CREATE TRIGGER psv_v_t INSTEAD OF INSERT ON psv_v FOR EACH ROW EXECUTE FUNCTION psv_fn()');
   dblink_exec   
 ----------------
@@ -325,6 +327,12 @@ NOTICE:  instead of 4
  psv_w 
 -------
      4
+(1 row)
+
+SELECT pj_delta(0, 1, NULL, 0, 0, NULL, 0);
+ pj_delta 
+----------
+ 
 (1 row)
 
 COMMIT;

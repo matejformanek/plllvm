@@ -147,10 +147,13 @@ BEGIN
   RETURN n;
 END $$;
 SELECT psv_w(1), psv_w(2), psv_w(3);
+SELECT pj_expect('psv_w(integer)', 'declined:relation:view') \gset
 BEGIN;
 INSERT INTO psv_b VALUES (0);
+SELECT pj_mark() \gset
 SELECT dblink_exec('other', 'CREATE TRIGGER psv_v_t INSTEAD OF INSERT ON psv_v FOR EACH ROW EXECUTE FUNCTION psv_fn()');
 SELECT psv_w(4);
+SELECT pj_delta(0, 1, NULL, 0, 0, NULL, 0);
 COMMIT;
 SELECT psv_w(5);
 SELECT * FROM psv_b ORDER BY a;
