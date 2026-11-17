@@ -649,3 +649,22 @@ SELECT pj_mark() \gset
 SELECT lookup_w(10), lookup_w(2000);
 SELECT pj_expect('lookup_w(integer)', 'compiled') \gset
 SELECT pj_delta(2, 0, NULL, 0, 0, NULL, 61);
+
+-- recursion through a statement, with no expression of the function's own, so
+-- that nothing but the call that finds the plans stale at its start can be
+-- translated: the calls inside it are its own
+CREATE FUNCTION lookup_rec(n integer) RETURNS void LANGUAGE :pj_lang STABLE AS $$
+DECLARE q integer;
+BEGIN
+  SELECT s_quantity INTO q FROM lk_stock WHERE s_i_id = n + 1;
+  PERFORM lookup_rec(n - 1) FROM lk_stock WHERE s_i_id = 1 AND n > 0;
+END $$;
+SELECT lk_reset();
+SELECT lookup_rec(3);
+SELECT lk_reset();
+SELECT lookup_rec(3);
+SELECT lk_reset();
+SELECT pj_mark() \gset
+SELECT lookup_rec(3);
+SELECT pj_expect('lookup_rec(integer)', 'compiled') \gset
+SELECT pj_delta(4, 0, NULL, 0, 0);

@@ -255,26 +255,34 @@ fall_back(FunctionCallInfo fcinfo, PjEntry *e, const char *path)
  * plans of its SQL statements stale at every call start, and only the
  * interpreter, which plans them again as it runs, makes them valid.  So such a
  * call is translated after the interpreter has run it, when the plans are
- * valid, instead of at the next start, when they are not.  The function may
- * have been replaced by the call, in which case there is nothing to do.
+ * valid, instead of at the next start, when they are not.  The flag is read
+ * before the call: a nested call of the function sets it again.  The call may
+ * have replaced the function (funccache then reuses the same struct, and
+ * entry_get() resets the entry to NEW), which is then left alone, as is one
+ * the call declined.
  */
 static Datum
 fall_back_retry(FunctionCallInfo fcinfo, PjEntry *e, const char *path)
 {
-	Datum		result = fall_back(fcinfo, e, path);
+	bool		retry = e != NULL && e->retry;
+	Datum		result;
 
-	if (e != NULL && e->retry)
+	if (e != NULL)
+		e->retry = false;
+	result = fall_back(fcinfo, e, path);
+
+	if (retry)
 	{
 		bool		isnull = fcinfo->isnull;
-		PLpgSQL_function *func;
+		PLpgSQL_function *func = compile_p(fcinfo, false);
 
-		e->retry = false;
-		func = compile_p(fcinfo, false);
-		if (entry_get(func) == e)
+		if (entry_get(func) == e &&
+			(e->state == PJ_SEEN || e->state == PJ_COMPILED))
 		{
 			e->state = PJ_SEEN;
 			seen_step(func, e);
 		}
+		e->retry = false;
 		fcinfo->isnull = isnull;
 	}
 
@@ -463,12 +471,12 @@ seen_step(PLpgSQL_function *func, PjEntry *e)
 	}
 
 	plllvm_pj_classify(&scope);
-	e->retry = scope.nstale > 0 && scope.nunplanned == scope.nstale;
 	if (scope.nnotsimple > 0)
 	{
 		decline_idle(e, "not simple");
 		return false;
 	}
+	e->retry = scope.nstale > 0 && scope.nunplanned == scope.nstale;
 
 	/* planned on the interpreter's next run; waiting costs the pre-check */
 	if (scope.nready == 0 && scope.nunplanned > 0)

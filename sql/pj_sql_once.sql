@@ -269,3 +269,37 @@ SELECT pj_expect('pso_xc(integer)', 'compiled') \gset
 SELECT pso_try('SELECT pso_xc(3)');
 SELECT pso_try('SELECT pso_xc(3)');
 RESET plpgsql.extra_errors;
+
+-- A variant for another code generation (pj_codegen) of a function that is
+-- translated has its own wait: the function has a statement in a branch no
+-- call has taken, which the first variant leaves to a deopt, and the variant
+-- that runs expressions in the executor cannot.  With the tables reset before
+-- every call it is translated after the call that takes the branch, which plans
+-- the statement.
+CREATE TABLE pso_rs (a int);
+INSERT INTO pso_rs VALUES (1), (2);
+CREATE FUNCTION pso_rs_reset() RETURNS void LANGUAGE plpgsql AS $$
+BEGIN TRUNCATE pso_rs; INSERT INTO pso_rs VALUES (1), (2); ANALYZE pso_rs; END $$;
+CREATE FUNCTION pso_cg(n int) RETURNS int LANGUAGE plpgsql_jit STABLE AS $$
+DECLARE x int := 0;
+BEGIN
+  IF n > 1000 THEN
+    SELECT a INTO x FROM pso_rs WHERE a = 1;
+  END IF;
+  RETURN x + n;
+END $$;
+SELECT pso_cg(1), pso_cg(2), pso_cg(3);
+SELECT pj_expect('pso_cg(integer)', 'compiled') \gset
+SET plllvm.pj_codegen = boxed;
+SELECT pso_cg(1);
+SELECT pj_expect('pso_cg(integer)', 'waiting') \gset
+SELECT pso_rs_reset();
+SELECT pso_cg(2000);
+SELECT pso_rs_reset();
+SELECT pso_cg(2000);
+SELECT pso_rs_reset();
+SELECT pj_mark() \gset
+SELECT pso_cg(1);
+SELECT pj_expect('pso_cg(integer)', 'compiled') \gset
+SELECT pj_delta(1, 0, NULL, 0, 0);
+RESET plllvm.pj_codegen;

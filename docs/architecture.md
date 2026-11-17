@@ -387,10 +387,16 @@ Only `plllvm_jit.c` and `plllvm_error.cpp` include LLVM headers.
     benchmark's reset) finds the plans of its statements stale at each call
     start, so no translation could see them valid. A call that finds only SQL
     statements stale, or unplanned, is translated after the interpreter has
-    run it, which plans them again as it goes (`fall_back_retry()`); the next
-    call runs compiled, and SPI analyses the stale plans inside the call. A
-    statement in a branch that no call takes between two resets stays unplanned
-    and keeps the function waiting.
+    run it, which plans them again as it goes (`fall_back_retry()`; the flag
+    is read before the call, since a nested call of the function sets it
+    again); the next call runs compiled, and SPI analyses the stale plans
+    inside the call, unless a statement reads a view: the entry check misses
+    on a stale plan over a view, so with a reset before every call such a
+    function alternates these translations with guard misses until it is
+    declined as thrashing (about eight translations). A statement in a branch
+    that no call takes between two resets stays unplanned and keeps the
+    function waiting; each of its calls then pays two walks of the function
+    for the classification plus `plpgsql_compile()`.
   * Admission: every query of the plan, rewritten, is a SELECT with no data-
     modifying CTE, calls no VOLATILE function but the built-in ones that
     change no input of a plan (`nextval`, `random`, the clocks, `pg_sleep`;
