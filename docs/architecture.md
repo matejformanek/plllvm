@@ -383,6 +383,14 @@ Only `plllvm_jit.c` and `plllvm_error.cpp` include LLVM headers.
     appear after admission (a table has none, and a result column of those
     types has no variable of its type to be admitted for), so this is stated
     and not pinned.
+  * A function whose tables are truncated and analysed before every call (a
+    benchmark's reset) finds the plans of its statements stale at each call
+    start, so no translation could see them valid. A call that finds only SQL
+    statements stale, or unplanned, is translated after the interpreter has
+    run it, which plans them again as it goes (`fall_back_retry()`); the next
+    call runs compiled, and SPI analyses the stale plans inside the call. A
+    statement in a branch that no call takes between two resets stays unplanned
+    and keeps the function waiting.
   * Admission: every query of the plan, rewritten, is a SELECT with no data-
     modifying CTE, calls no VOLATILE function but the built-in ones that
     change no input of a plan (`nextval`, `random`, the clocks, `pg_sleep`;

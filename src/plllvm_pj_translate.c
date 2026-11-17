@@ -754,6 +754,7 @@ signature_polymorphic(PLpgSQL_function *func)
 void
 plllvm_pj_classify(PjScope *scope)
 {
+	scope->nstale = 0;
 	foreach_ptr(PjExpr, pe, scope->exprs)
 	{
 		PLpgSQL_expr *expr = pe->expr;
@@ -784,10 +785,14 @@ plllvm_pj_classify(PjScope *scope)
 			 * SPI analyses again by itself, but the trees of a plan that is
 			 * stale are not ours to read
 			 */
-			if (expr->plan == NULL ||
-				!((CachedPlanSource *)
-				  linitial(SPI_plan_get_plan_sources(expr->plan)))->is_valid)
+			if (expr->plan == NULL)
 				pe->h1 = PJ_H1_UNPLANNED;
+			else if (!((CachedPlanSource *)
+					   linitial(SPI_plan_get_plan_sources(expr->plan)))->is_valid)
+			{
+				pe->h1 = PJ_H1_UNPLANNED;
+				scope->nstale++;
+			}
 			else
 				pe->h1 = PJ_H1_SQL;
 		}

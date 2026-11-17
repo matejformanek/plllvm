@@ -101,6 +101,8 @@ typedef struct PjEntry
 	PjHarvest  *harvest;
 	int			frames;			/* compiled calls running */
 	bool		waiting;		/* see translate_guarded() */
+	bool		retry;			/* translate again after this call, whose
+								 * statements the interpreter plans */
 	int			misses;			/* guard misses since the last reset */
 	int64		since_translation;	/* compiled calls since the last
 									 * translation */
@@ -141,6 +143,8 @@ static void load_plpgsql(void);
 static PjEntry *entry_get(PLpgSQL_function *func);
 static void entry_reset_callback(void *arg);
 static Datum fall_back(FunctionCallInfo fcinfo, PjEntry *e, const char *path);
+static Datum fall_back_retry(FunctionCallInfo fcinfo, PjEntry *e,
+							 const char *path);
 static PjMay may_translate(PLpgSQL_function *func, PjEntry *e,
 						   bool replacing);
 static bool seen_step(PLpgSQL_function *func, PjEntry *e);
@@ -220,7 +224,7 @@ plllvm_pj_call_handler(PG_FUNCTION_ARGS)
 			return fall_back(fcinfo, e, e->declined_path);
 		case PJ_SEEN:
 			if (!seen_step(func, e))
-				return fall_back(fcinfo, e, e->last_path);
+				return fall_back_retry(fcinfo, e, e->last_path);
 			break;
 		case PJ_COMPILED:
 			break;
@@ -244,6 +248,37 @@ fall_back(FunctionCallInfo fcinfo, PjEntry *e, const char *path)
 	}
 
 	return interp(fcinfo, e);
+}
+
+/*
+ * A function whose tables are truncated and analysed before each call finds the
+ * plans of its SQL statements stale at every call start, and only the
+ * interpreter, which plans them again as it runs, makes them valid.  So such a
+ * call is translated after the interpreter has run it, when the plans are
+ * valid, instead of at the next start, when they are not.  The function may
+ * have been replaced by the call, in which case there is nothing to do.
+ */
+static Datum
+fall_back_retry(FunctionCallInfo fcinfo, PjEntry *e, const char *path)
+{
+	Datum		result = fall_back(fcinfo, e, path);
+
+	if (e != NULL && e->retry)
+	{
+		bool		isnull = fcinfo->isnull;
+		PLpgSQL_function *func;
+
+		e->retry = false;
+		func = compile_p(fcinfo, false);
+		if (entry_get(func) == e)
+		{
+			e->state = PJ_SEEN;
+			seen_step(func, e);
+		}
+		fcinfo->isnull = isnull;
+	}
+
+	return result;
 }
 
 static void
@@ -407,6 +442,7 @@ seen_step(PLpgSQL_function *func, PjEntry *e)
 {
 	PjScope		scope;
 
+	e->retry = false;
 	switch (may_translate(func, e, true))
 	{
 		case PJ_MAY_NOT:
@@ -427,6 +463,7 @@ seen_step(PLpgSQL_function *func, PjEntry *e)
 	}
 
 	plllvm_pj_classify(&scope);
+	e->retry = scope.nstale > 0 && scope.nunplanned == scope.nstale;
 	if (scope.nnotsimple > 0)
 	{
 		decline_idle(e, "not simple");
@@ -771,7 +808,8 @@ wait_step(PLpgSQL_function *func, FunctionCallInfo fcinfo, PjEntry *e)
 		return fall_back(fcinfo, e, "interpreted:replan");
 	}
 
-	return fall_back(fcinfo, e, "waiting");
+	e->retry = scope.nunplanned == scope.nstale;
+	return fall_back_retry(fcinfo, e, "waiting");
 }
 
 /*

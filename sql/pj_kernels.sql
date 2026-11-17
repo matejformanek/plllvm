@@ -579,3 +579,73 @@ SELECT mix_k(100, 8), mix_k(100, 64), mix_k(100, 1), mix_k(100, 0);
 SELECT pj_expect('mix_k(integer,integer)', 'compiled') \gset
 SELECT lk_reset();
 SELECT mix_k(100, 8);
+
+-- The tables are reset before every call, the first ones too, so that the plans
+-- of the statements are stale at each call start and only the interpreter plans
+-- them again: the function is translated after its second call, when they are
+-- valid, and runs compiled from the third.
+CREATE FUNCTION lookup_r(n integer) RETURNS text LANGUAGE :pj_lang STABLE AS $$
+DECLARE
+  seed bigint := 777;
+  v_i_id integer; v_price numeric(5,2); v_name varchar(24); v_qty integer;
+  acc numeric(16,2) := 0;
+BEGIN
+  FOR k IN 1..n LOOP
+    seed := (seed * 1103515245 + 12345) % 2147483648;
+    v_i_id := 1 + (seed % 10000)::integer;
+    SELECT i_price, i_name INTO v_price, v_name FROM lk_item WHERE i_id = v_i_id;
+    SELECT s_quantity INTO v_qty FROM lk_stock WHERE s_w_id = 1 AND s_i_id = v_i_id;
+    acc := acc + v_price * v_qty;
+  END LOOP;
+  RETURN acc::text;
+END $$;
+SELECT lk_reset();
+SELECT lookup_r(100);
+SELECT lk_reset();
+SELECT lookup_r(100);
+SELECT lk_reset();
+SELECT pj_mark() \gset
+SELECT lookup_r(100);
+SELECT pj_expect('lookup_r(integer)', 'compiled') \gset
+SELECT pj_delta(1, 0, NULL, 0, 0, NULL, 200);
+SELECT lk_reset();
+SELECT pj_mark() \gset
+SELECT lookup_r(100);
+SELECT pj_delta(1, 0, NULL, 0, 0, NULL, 200);
+
+-- the same with a statement in a branch no call has taken: the function waits
+-- for it
+CREATE FUNCTION lookup_w(n integer) RETURNS text LANGUAGE :pj_lang STABLE AS $$
+DECLARE v_price numeric(5,2); v_qty integer; acc numeric(16,2) := 0;
+BEGIN
+  FOR k IN 1..least(n, 50) LOOP
+    SELECT i_price INTO v_price FROM lk_item WHERE i_id = k;
+    acc := acc + v_price;
+  END LOOP;
+  IF n > 1000 THEN
+    SELECT s_quantity INTO v_qty FROM lk_stock WHERE s_i_id = 1;
+    acc := acc + v_qty;
+  END IF;
+  RETURN acc::text;
+END $$;
+SELECT lk_reset();
+SELECT lookup_w(10);
+SELECT lk_reset();
+SELECT lookup_w(10);
+SELECT pj_expect('lookup_w(integer)', 'waiting') \gset
+SELECT lk_reset();
+SELECT lookup_w(2000);
+SELECT lk_reset();
+SELECT lookup_w(10);
+-- a call that takes the branch right after a reset plans every statement, and
+-- is translated after; a branch that no call takes between two resets keeps
+-- the function waiting
+SELECT lk_reset();
+SELECT lookup_w(10);
+SELECT lk_reset();
+SELECT lookup_w(2000);
+SELECT lk_reset();
+SELECT pj_mark() \gset
+SELECT lookup_w(10), lookup_w(2000);
+SELECT pj_expect('lookup_w(integer)', 'compiled') \gset
+SELECT pj_delta(2, 0, NULL, 0, 0, NULL, 61);
