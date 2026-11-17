@@ -145,7 +145,7 @@ All are superuser only and show the current backend.
 | `plllvm_call_sites()` | call sites, their state and how often each was prepared, checked and re-entered |
 | `plllvm_function_status(regprocedure)` | `not_compiled`, `live`, `stale` or `dropped`, with resident and retired compiles |
 | `plllvm_expr_stats()` | expression JIT in PL/pgSQL (below): `state`; expressions `fired`, `installed` (given code), `compiled`, `declined`, failed (`failures`) and left interpreted at the cap (`capped`); `programs` kept; `compiled_evals`, evaluations of code compiled under `plllvm.expr_eager` |
-| `plllvm_pj_stats()` | `LANGUAGE plpgsql_jit` (below): handler entries `calls` = `compiled_calls` + `deopts` + `interpreted_calls`, and among the interpreted `declines`, `guard_misses`, `null_args`, `plugin_fallbacks`, `capped`; `translations`, `attempts`, `failures`, `boxed_evals`, `resident`, `peak_tuple_bytes`, `elem_slow` (reads and stores of an array element that the inline code gave to a function), `sql_execs` (SQL statements run through SPI by compiled code), `sql_rewalks` (times such a statement's plan was looked at again because one was built for it since the last look), `sql_stale` (statements found no longer what they were admitted as) |
+| `plllvm_pj_stats()` | `LANGUAGE plpgsql_jit` (below): handler entries `calls` = `compiled_calls` + `deopts` + `interpreted_calls`, and among the interpreted `declines`, `guard_misses`, `null_args`, `plugin_fallbacks`, `capped`; `translations`, `attempts`, `failures`, `boxed_evals`, `resident`, `peak_tuple_bytes`, `elem_slow` (reads and stores of an array element that the inline code gave to a function), `sql_execs` (SQL statements run through SPI by compiled code), `sql_rewalks` (SQL statements whose plan was walked at the entry of a compiled call), `sql_stale` (walks that found a statement no longer what it was admitted as) |
 | `plllvm_pj_status(regprocedure)` | one row per signature and input collation of a `plpgsql_jit` function: `state` (`new`, `seen`, `compiled`, `declined`), `reason`, call counts, `last_path`, and for the translation `exprs`, `unplanned`, `variants`, `native`, `boxed`, `restartable`, `translate_ms`, `symbol` (the name of the code in `plllvm_code_cache()` and in a profile) |
 | `plllvm_pj_ir(regprocedure)` | the IR of that variant, for inspection |
 | `plllvm_jit_test(ir, opt_level, codegen)` | compiles a body without calling it: `ok`, SQLSTATE, message, detail, line and column of a parse error, instruction and helper counts, checks added; `codegen => false` only checks the IR |
@@ -317,10 +317,18 @@ collation does. The prefix `plllvm.` is reserved.
   cursors, `MERGE`, other commands or dynamic SQL. "Plain SELECT" is checked
   at the top level only, so a VOLATILE function may run `FOR UPDATE` in a
   subquery (a STABLE one is refused by SPI's read-only check).
-* A write to a table whose CHECK or domain constraint calls a function that
-  is altered to VOLATILE later is not noticed until something else makes the
-  plan stale: the function is not a dependency of the plan. The same holds
-  for a domain constraint that runs inside an input function.
+* A compiled call locks the tables its `INSERT`, `UPDATE` and `DELETE`
+  statements write at its entry, reached or not, and holds the lock to the end
+  of the transaction (stock locks at the statement): another session's DDL on
+  such a table waits for the caller, and a new deadlock edge is possible. The
+  call never waits for the lock: a table that another session holds sends the
+  call to PL/pgSQL.
+* A function, type or schema changed by another session in the middle of a
+  call can make SPI analyse a statement inside the call; what it shows runs
+  once before the next call's entry checks it. So does a stale plan of a read.
+  A child added to a written table after the entry lock is the same. A domain
+  constraint that runs inside an input function (`record_in`, `array_in`,
+  `jsonb_populate_record`) is not looked at.
 * Arrays: one dimension, no NULL elements, `int4`, `int8` and `float8` only.
 * Status and counters are per backend.
 

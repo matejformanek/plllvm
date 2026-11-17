@@ -108,10 +108,9 @@ REVOKE ALL ON FUNCTION plllvm_jit_test(text, int4, bool) FROM PUBLIC;
 -- gave to a function: an array that is NULL, has no Datums of its elements yet,
 -- or is not one-dimensional, and for a store also a NULL value or a subscript
 -- out of range.  sql_execs counts the SQL statements compiled code ran
--- through SPI; sql_rewalks the times such a statement's plan was looked at
--- again, because a plan was built for it since the last look; sql_stale the
--- statements that were found no longer what they were admitted as, after
--- which the function translates again
+-- through SPI; sql_rewalks the statements whose plan was walked at the entry
+-- of a compiled call; sql_stale the walks that found a statement no longer
+-- what it was admitted as, after which the function translates again
 CREATE FUNCTION plllvm_pj_stats(OUT calls int8, OUT compiled_calls int8,
                                 OUT deopts int8, OUT interpreted_calls int8,
                                 OUT declines int8, OUT guard_misses int8,

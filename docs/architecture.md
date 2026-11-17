@@ -389,24 +389,22 @@ Only `plllvm_jit.c` and `plllvm_error.cpp` include LLVM headers.
     statements stale, or unplanned, is translated after the interpreter has
     run it, which plans them again as it goes (`fall_back_retry()`; the flag
     is read before the call, since a nested call of the function overwrites
-    it); the next call runs compiled, and SPI analyses the stale plans inside
-    the call, unless a statement reads a view or writes: the entry check
-    misses on a stale plan of either. A view with a reset before every call
-    alternates these translations with guard misses until the function is
-    declined as thrashing (about eight translations). A statement that writes
-    is not translated again for a stale plan: that call goes to the
-    interpreter (`interpreted:stale plan`, no translation, not counted towards
-    thrashing), which plans it, and the next call that finds a valid plan
-    checks the facts on it (a plan that a failed planning left valid with the
-    old `generation` is walked too, `PjSql.rewalk`). A write in a branch that
-    no call takes keeps a stale plan, so every call goes to the interpreter
-    for the price of the guard. A table that is truncated or analysed between
+    it); the next call runs compiled. A stale plan of a read is run: SPI
+    analyses it again inside the call, unless the statement reads a view, when
+    the entry check misses, and a function with a reset before every call then
+    alternates translations with guard misses until it is declined as
+    thrashing (about eight translations). A stale plan of a write is never
+    run: that call goes to the interpreter (`interpreted:stale plan`, no
+    translation, not counted towards thrashing), which plans it, and the next
+    entry walks the new plan. A table that is truncated or analysed between
     rounds of calls (autovacuum included) therefore costs the interpreter one
     call per round and no LLVM work; a reset before every call, with none
-    between, never runs compiled and is not declined (`psd_reset1`). A
-    statement in a branch that no call takes between two resets stays
-    unplanned and keeps the function waiting; each of its calls then pays two
-    walks of the function for the classification plus `plpgsql_compile()`.
+    between, never runs compiled and is not declined (`psd_reset1`). A write
+    in a branch that no call takes keeps a stale plan, so every call goes to
+    the interpreter for the price of the guard. A statement in a branch that
+    no call takes between two resets stays unplanned and keeps the function
+    waiting; each of its calls then pays two walks of the function for the
+    classification plus `plpgsql_compile()`.
   * Admission: every query of the plan, rewritten, is a SELECT, INSERT, UPDATE
     or DELETE (a data-modifying CTE is a query of its own, so the rule below
     applies to its result relation too; MERGE and every other command are
@@ -432,47 +430,74 @@ Only `plllvm_jit.c` and `plllvm_error.cpp` include LLVM headers.
     are internal code that changes no row, so they pass. A view is written
     through its rewrite, so its base table is the one tested (an INSTEAD OF
     trigger is a trigger of the view, which has none in the plan: that case is
-    declined as `relation:kind`). The catalogs are read without a lock on the
-    table: a trigger, rule, default, check or child of the table invalidates
-    the plan. A function that only a CHECK or domain constraint calls is no
-    dependency of the plan, so a change of its volatility (`ALTER FUNCTION ...
-    VOLATILE`) is not seen until something else makes the plan stale; this is
-    a stated gap. The walk is made again whenever a plan was built since the
-    last look, so a table with foreign-key triggers pays a scan of
-    `pg_trigger` for each custom plan the statement builds; the cost is small
-    beside the planning it follows. A command with INTO has a row limit of
+    declined as `relation:kind`). The walk reads the catalogs under the lock of
+    the entry check (below). It is made at every entry, so a table with
+    foreign-key triggers pays a scan of `pg_trigger` per call; the cost is
+    small beside the planning of the statement it precedes (unmeasured). A command with INTO has a row limit of
     two, as in PL/pgSQL, whose error for a second row is P0003.
-  * A statement that writes with an invalid plan is a guard miss, not a plan
-    SPI analyses again: a default, a generated column, a trigger or a rule is
-    new then and no walk of the old query shows it. The function goes to
-    PL/pgSQL for that call, which analyses the plan; the next call re-walks
-    the new plan, and runs compiled if the facts hold and is translated (and
-    declined) if they do not. Nothing the code embeds depends on the plan but
-    these facts: the plan source, the targets, the result columns and the row
-    limit are the function's own or are checked by the walk. A statement that
-    a rule turned into nothing has no query, and the command tag says that it
-    writes.
-  * A plan that is invalid is run, since SPI analyses it again by itself: it
-    is how a function whose table is truncated and analysed between calls
-    stays compiled. The entry check refuses (a guard miss) a changed
-    `search_path`, a role or `row_security` that the rewrite depends on,
-    other `paramnos`, and, when the plan is invalid, a callee whose
-    `provolatile` changed or a view among the relations. When it is valid it
-    compares `generation` of the plan source with the one last seen, which
-    moves with every plan built (an interpreted call may have rebuilt it):
-    then the admission walk is made again over the current query list. After
-    each execution the same comparison finds an analysis done inside the
-    call; the address of the new query list is no sign, since the old one is
-    deleted first and the new one can take its place. A new query list is
-    followed by a plan, and so by a new `generation`, unless that plan fails
-    to build (a custom plan that raises): the next call then runs the list once
-    unchecked, and the check after that execution finds it. A statement found no
-    longer admitted ends the call as it was and makes the next call
-    translate (`sql_stale`).
-  * `sql_stale` is exact for a statement found changed after an execution;
-    for a function replaced by code a statement ran it is counted only when
-    a function or privilege changed during the statement (`exec_epoch`), not
-    after every statement.
+  * Entry check of a statement that writes: lock, then look. The check runs at
+    the entry of the call because a statement has no deopt point, so only
+    there can a miss still send the call to the interpreter. For each
+    statement that writes, in this order: (1) a stale plan is a miss,
+    `interpreted:stale plan`; (2) the result tables of the plan's queries,
+    CTEs included, are locked without waiting (`ConditionalLockRelationOid`,
+    the mode the execution takes), and a table that another session holds is a
+    miss, `interpreted:lock` (the call never waits; the interpreter waits, if
+    it reaches the statement, as stock does); (3) the plan is looked at again,
+    since the lock delivered what other sessions committed, and a plan made
+    stale by it is a miss, `interpreted:stale plan`; (4) `search_path`, role
+    and `row_security` that the rewrite depends on, and `paramnos`, are
+    compared; (5) the plan is walked. This is the order in which plancache
+    itself locks and then looks. Triggers, FK actions, defaults, generated
+    columns, CHECK and NOT NULL, rules, policies and the constraints of
+    domains on the columns of a table are changed by DDL whose lock conflicts
+    with the RowExclusiveLock taken in (2), so what the walk reads stays true
+    until the transaction ends, and what another session has not committed
+    waits for it. Inheritance children are the exception: CREATE TABLE ...
+    INHERITS takes only ShareUpdateExclusiveLock on the parent.
+  * Entry check of a statement that only reads: `search_path`, role,
+    `row_security` and `paramnos` are compared, and a valid plan is walked; no
+    lock is taken. A stale plan is run, since SPI analyses it again by itself:
+    it is how a function whose table is truncated and analysed between calls
+    stays compiled. It is a miss only if what the statement was admitted for
+    may have changed: a callee whose `provolatile` changed or that is gone, or
+    a view among the relations.
+  * Every valid plan is walked at every entry (`sql_rewalks` counts the
+    statements walked, `sql_stale` the walks that failed). No signal decides
+    it, so it does not matter who made the query list: the interpreter, a
+    nested call, SPI in an earlier call, or a planning that failed after the
+    analysis and left the new list valid with the old `generation` of the plan
+    source. A statement that is no longer admitted is an ordinary guard miss:
+    the function translates again and is declined, with the reason. A function
+    that only a CHECK or domain constraint calls is no dependency of the plan,
+    but its volatility is read by the walk at each entry. Nothing is checked
+    inside or after a statement.
+  * Stated differences. (L5) A compiled call takes RowExclusiveLock at its
+    entry on every table that the function's INSERT, UPDATE and DELETE
+    statements write, reached or not, and holds it to the end of the
+    transaction; stock takes it at the statement. CREATE INDEX, CREATE
+    TRIGGER, ALTER TABLE, TRUNCATE and VACUUM FULL of such a table by another
+    session wait for the caller's transaction, and a new deadlock edge is
+    possible. The call itself never waits at its entry. It also accepts
+    invalidations there, where stock accepts them at its first lock, so it
+    sees a concurrent change earlier, never later. (Unlocked objects)
+    PostgreSQL does not lock functions, types or schemas: a change to one,
+    committed by another session and delivered in the middle of a call, can
+    make SPI analyse a statement inside the call, and what that shows (a new
+    callee, a new volatility, a table of the same name earlier in the
+    search_path) runs once unchecked; the next entry walks it. The same holds
+    for a stale plan of a read that SPI analyses again inside the call.
+    (Children) A child added to a written table after the entry lock can be
+    planned into an UPDATE or DELETE inside the call, and its triggers then
+    fire; the next entry declines `relation:inheritance`. (Own session) A
+    callee that does DDL in the caller's own backend is not blocked by the
+    caller's locks. (Parallel) A PARALLEL SAFE function with a write in a
+    branch that no call takes ran without error in the workers of a parallel
+    query (`psd_pw`); the lock in a worker is not observed apart from that.
+  * `sql_stale` also counts a failed simple-expression guard after a
+    statement, but only when `exec_epoch` moved during the statement (a
+    function or privilege changed), not after every statement: a scan of the
+    expressions after each SQL execution would be O(exprs) per statement.
   * Compiled SQL never runs under `debug_discard_caches`: every plan is stale
     there, so the code translates nothing. The shadow estate under that setting
     was tried by the spike only; `pj_sql_replan` is what the tests use.
