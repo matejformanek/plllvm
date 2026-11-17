@@ -157,11 +157,11 @@ typedef struct PjSql
 	int32	   *coltypmods;
 	Bitmapset  *paramnos;		/* the datums its parameter list holds */
 	CachedPlanSource *plansource;
-	int			generation;		/* of the plansource when we last looked */
 	int			nfuncs;			/* the callees it was admitted with ... */
 	Oid		   *funcs;
 	char	   *volatility;		/* ... and their provolatile */
 	bool		has_view;		/* a view is among the relations */
+	bool		writes;			/* a command or a CTE of it writes */
 } PjSql;
 
 /* how to cast one type to another, as PL/pgSQL's cast_expr_hash */
@@ -334,9 +334,9 @@ typedef struct PjHarvest
 	int			npos;
 	int			nbase;			/* then one per expression */
 	bool		has_notice;		/* as in PjScope */
-	bool		sql_stale;		/* a statement changed what it was admitted
-								 * for during a call: the next one translates
-								 * again */
+	const char *soft_miss;		/* path of the last guard miss that is no
+								 * reason to translate again: a plan to be
+								 * made again, a table that is locked */
 	struct PjShadow *shadow;	/* the estate the parser hooks read */
 	List	   *fori;
 	int			ndatums;
@@ -365,7 +365,7 @@ extern bool plllvm_pj_guards_ok(PjHarvest *h, bool sql);
 /* plllvm_pj_sql.c */
 extern const char *plllvm_pj_sql_harvest(struct PLpgSQL_function *func,
 										 PjHarvest *h, PjExpr *pe);
-extern bool plllvm_pj_sql_guard(PjSql *sql);
+extern bool plllvm_pj_sql_guard(PjSql *sql, const char **soft);
 extern void plllvm_pj_sql_finish(PjCtx *ctx);
 extern Datum plllvm_pj_convert(PjCtx *ctx, Datum value, bool *isnull,
 							   Oid srctype, int32 srctypmod,

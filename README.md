@@ -145,7 +145,7 @@ All are superuser only and show the current backend.
 | `plllvm_call_sites()` | call sites, their state and how often each was prepared, checked and re-entered |
 | `plllvm_function_status(regprocedure)` | `not_compiled`, `live`, `stale` or `dropped`, with resident and retired compiles |
 | `plllvm_expr_stats()` | expression JIT in PL/pgSQL (below): `state`; expressions `fired`, `installed` (given code), `compiled`, `declined`, failed (`failures`) and left interpreted at the cap (`capped`); `programs` kept; `compiled_evals`, evaluations of code compiled under `plllvm.expr_eager` |
-| `plllvm_pj_stats()` | `LANGUAGE plpgsql_jit` (below): handler entries `calls` = `compiled_calls` + `deopts` + `interpreted_calls`, and among the interpreted `declines`, `guard_misses`, `null_args`, `plugin_fallbacks`, `capped`; `translations`, `attempts`, `failures`, `boxed_evals`, `resident`, `peak_tuple_bytes`, `elem_slow` (reads and stores of an array element that the inline code gave to a function), `sql_execs` (SQL statements run through SPI by compiled code), `sql_rewalks` (times such a statement's plan was looked at again because one was built for it since the last look), `sql_stale` (statements found no longer what they were admitted as) |
+| `plllvm_pj_stats()` | `LANGUAGE plpgsql_jit` (below): handler entries `calls` = `compiled_calls` + `deopts` + `interpreted_calls`, and among the interpreted `declines`, `guard_misses`, `null_args`, `plugin_fallbacks`, `capped`; `translations`, `attempts`, `failures`, `boxed_evals`, `resident`, `peak_tuple_bytes`, `elem_slow` (reads and stores of an array element that the inline code gave to a function), `sql_execs` (SQL statements run through SPI by compiled code), `sql_rewalks` (SQL statements whose plan was walked at the entry of a compiled call), `sql_stale` (walks that found a statement no longer what it was admitted as) |
 | `plllvm_pj_status(regprocedure)` | one row per signature and input collation of a `plpgsql_jit` function: `state` (`new`, `seen`, `compiled`, `declined`), `reason`, call counts, `last_path`, and for the translation `exprs`, `unplanned`, `variants`, `native`, `boxed`, `restartable`, `translate_ms`, `symbol` (the name of the code in `plllvm_code_cache()` and in a profile) |
 | `plllvm_pj_ir(regprocedure)` | the IR of that variant, for inspection |
 | `plllvm_jit_test(ir, opt_level, codegen)` | compiles a body without calling it: `ok`, SQLSTATE, message, detail, line and column of a parse error, instruction and helper counts, checks added; `codegen => false` only checks the IR |
@@ -220,9 +220,13 @@ with labels, `RETURN`, `RAISE` without `USING`, and `SELECT` *expression*
 `INTO` one variable, the form PL/pgSQL evaluates without SPI, `PERFORM`, a
 statement with no `INTO` and `SELECT INTO` of scalar variables (one or several,
 `STRICT` or not, the columns of the type of the variables; a record target is
-declined), run by SPI on PL/pgSQL's own plan (a query with no writes,
-no VOLATILE function but the built-in ones that change no plan input, and
-not under `#variable_conflict use_column` or `#print_strict_params on`),
+declined), and `INSERT`, `UPDATE` and `DELETE`, with `RETURNING INTO` of scalar
+variables, run by SPI on PL/pgSQL's own plan (no VOLATILE function but the
+built-in ones that change no plan input, not under `#variable_conflict
+use_column` or `#print_strict_params on`, and a table that is written has no
+trigger, rule, cascading foreign-key action, VOLATILE check constraint that
+the query shows,
+children, partitions or foreign wrapper; `MERGE` is declined),
 with arguments and variables of a type passed by value that is no domain, or
 of a built-in base type passed by reference (`text`, `varchar`, `numeric`,
 `name`, `uuid`, `interval`, `bytea`, `jsonb`, ...), or an array of one, and
@@ -309,10 +313,35 @@ collation does. The prefix `plllvm.` is reserved.
   execute hook runs once per user and invalidation, not per query, and an
   fmgr hook's decision (`FmgrHookIsNeeded`, e.g. after `SECURITY LABEL`) is
   taken only when a site is rebuilt.
-* SQL: only `SELECT INTO` of one row; no cursors, other commands or dynamic
-  SQL. "Plain SELECT" is checked at the top level only, so a VOLATILE
-  function may run `FOR UPDATE` in a subquery (a STABLE one is refused by
-  SPI's read-only check).
+* SQL: `PERFORM`, `SELECT INTO`, `INSERT`, `UPDATE` and `DELETE`; no
+  cursors, `MERGE`, other commands or dynamic SQL. "Plain SELECT" is checked
+  at the top level only, so a VOLATILE function may run `FOR UPDATE` in a
+  subquery (a STABLE one is refused by SPI's read-only check).
+* A compiled call locks the tables its `INSERT`, `UPDATE` and `DELETE`
+  statements write at its entry, reached or not, and holds the lock to the end
+  of the transaction (stock locks at the statement): another session's DDL on
+  such a table waits for the caller, and a new deadlock edge is possible. The
+  call never waits for the lock: a table that another session holds sends the
+  call to PL/pgSQL.
+* A function, type or schema changed by another session in the middle of a
+  call can make SPI analyse a statement inside the call; what it shows runs
+  once before the next call's entry checks it. So does a stale plan of a read,
+  and so does a change of a role (membership, BYPASSRLS, the owner of the
+  database) that decides which policies apply to a table that is read.
+  A child added to a written table after the entry lock is the same, and so
+  is a domain CHECK added with NOT VALID, and DDL on a table that the write
+  only reads. Relations that the executor opens after planning (the indexes of
+  a written table, the tables of its triggers and foreign-key checks) are not
+  locked at the entry; a change to them cannot re-analyse the statement. A domain constraint that runs inside an input function
+  (`record_in`, `array_in`, `jsonb_populate_record`) is not looked at.
+* A statement is declined if any query of its plan, at any level, has a view
+  or a relation with the lock of a write that is not that query's own result
+  relation (`relation:view`, `relation:rule`): a write through a view, a
+  rule's action, a table that a rule made a SELECT. So is a statement that a
+  rule turned into nothing (`relation:none`), and a write to a table with row
+  level security (`relation:rls`: which policies apply depends on the role,
+  which no relation lock protects). The entry locks every relation that the
+  statement writes (its result relations), without waiting.
 * Arrays: one dimension, no NULL elements, `int4`, `int8` and `float8` only.
 * Status and counters are per backend.
 
@@ -360,7 +389,8 @@ executor. An element of a one-dimensional `int4[]`, `int8[]` or `float8[]`
 variable is read and stored in the compiled code; a slice, a constructor and
 the other array types are the executor's. `PERFORM`, statements with no
 `INTO` and `SELECT INTO` of scalar variables run through SPI on PL/pgSQL's
-plan; DML and exceptions follow.
+plan, and so do `INSERT`, `UPDATE` and `DELETE` of a table with no code of its
+own; exceptions follow.
 
 ## Building and testing
 
@@ -391,9 +421,10 @@ make stage cluster-start installcheck doctor cluster-stop
 | `installcheck-plpgsql PLLLVM_PORT=<port>` | PostgreSQL's PL/pgSQL tests without plllvm, then with it loaded and `plllvm.expr_jit` off, on, and on with `plllvm.expr_eager`; every output must match the first. `PG_SRC` and `PG_BUILD` are the server's source and build tree (the workspace's `code/` and `code/build-jit`) |
 | `installcheck-pj` | the `pj_` tests, written for stock PL/pgSQL's output and run with `LANGUAGE plpgsql_jit` (`PJ_LANG`): the handler off and on, with `plllvm.expr_jit` and `plllvm.expr_eager`, and `pj_guards`, `pj_array` and `pj_stats` under cache flushes |
 | `installcheck-pj-once`, `installcheck-pj-opt` | the `pj_` tests whose output comes from plllvm, in one variant, and at the highest opt level |
+| `installcheck-pj-fdw` | `pj_sql_fdw`, a foreign table of `postgres_fdw` written by a `plpgsql_jit` function, in the variants of `installcheck-pj`; skipped, with the reason, where contrib is not installed |
 | `check-pj-cmodule PLLLVM_PORT=<port>` | `tools/pj_cmodule_pins.sh`: pins that load a C module built on the spot, against `plpgsql` and `plpgsql_jit` (an output function with an effect in a `RAISE`; an object access hook that denies a function at the entry check, a stated difference). Skipped with a printed reason where no module can be built (only macOS and Linux have a recipe) |
 | `installcheck-plpgsql-pj PLLLVM_PORT=<port>` | the tests of `installcheck-plpgsql` without plllvm, then with `LANGUAGE plpgsql` changed to `plpgsql_jit` and the handler off and on; the results must match the first, but for the hunks of `tools/plpgsql_pj_allowed.diff` |
-| `fuzz-pj PLLLVM_PORT=<port> N=<n> NREC=<m> NELEM=<e> NSQL=<q> SEED=<s>` | `tools/pj_fuzz.py`: `N` generated functions, `NREC` recursive ones, `NELEM` of element reads and stores of arrays and `NSQL` of `PERFORM`, `SELECT INTO` and statements for SPI, with DDL between the calls, run as `plpgsql` and as `plpgsql_jit` at opt level 0 and 2, values, SQLSTATEs, messages and CONTEXT compared, with role switches and `REVOKE` inside transactions; the classes of a difference are in the script's docstring; reported by seed with its program in `results-fuzz/`; not part of `verify` |
+| `fuzz-pj PLLLVM_PORT=<port> N=<n> NREC=<m> NELEM=<e> NSQL=<q> SEED=<s>` | `tools/pj_fuzz.py`: `N` generated functions, `NREC` recursive ones, `NELEM` of element reads and stores of arrays and `NSQL` of `PERFORM`, `SELECT INTO` and statements for SPI, `NDML` of statements that write, with DDL between the calls, run as `plpgsql` and as `plpgsql_jit` at opt level 0 and 2, values, SQLSTATEs, messages and CONTEXT compared, with role switches and `REVOKE` inside transactions; the classes of a difference are in the script's docstring; reported by seed with its program in `results-fuzz/`; not part of `verify` |
 | `check-pj-fuzz` | the classes of the fuzzer on two programs of known shape (seed 22:745 stale-privilege, 21:597 frame-mix), a check that a wrong value is not a mix, and 150 programs of element reads and stores at opt level 0 and 2, which must compile without the executor, and deopt; in `verify` |
 | `check-pj-ir PLLLVM_PORT=<port>` | `tools/pj_ircheck.py`: the optimized IR of `loop`, `is_prime`, `fib`, `mandelbrot`, `nbody` and `spectralnorm` against the hand-written kernels: no local slot, and in the innermost loop no call but the poll (and, in the array kernels, the slow functions of an element, which are as cold as the poll); in `verify` |
 | `verify PLLLVM_PORT=<port>` | every suite of a PR in order, with the commit and the exit code of each in `results-verify.log` |

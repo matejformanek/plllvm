@@ -49,7 +49,7 @@ SELECT pso_try('SELECT pso_shadow(1, ''x'')');
  22012 division by zero
 (1 row)
 
-SELECT pj_delta(4, 0, NULL, 0, 0, NULL, 4, 0, 3);
+SELECT pj_delta(4, 0, NULL, 0, 0, NULL, 4, 0, 4);
  pj_delta 
 ----------
  
@@ -117,9 +117,9 @@ SELECT pso_g8(2, 1), pso_g8(2, NULL), pso_g8(3, 1);
 (1 row)
 
 SELECT pj_expect('pso_g8(integer,integer)', 'compiled') \gset
--- P-REWALK: a statement analysed again at each of 200 executions of one call
--- is checked 200 times, not 199 or 0.  The address of the new query list may
--- be the old one's.
+-- A statement analysed again at each of 200 executions of one call is walked
+-- once, at the entry of the call: what SPI makes of it inside the call is
+-- walked at the next entry
 CREATE FUNCTION pso_rewalk(n int) RETURNS int LANGUAGE plpgsql_jit AS $$
 BEGIN
   FOR i IN 1..n LOOP
@@ -142,7 +142,7 @@ SELECT pso_rewalk(200);
         200
 (1 row)
 
-SELECT pj_delta(1, 0, NULL, 0, 0, NULL, 200, 0, 200);
+SELECT pj_delta(1, 0, NULL, 0, 0, NULL, 200, 0, 1);
  pj_delta 
 ----------
  
@@ -180,7 +180,7 @@ SELECT pso_ib(5, 1);
       5
 (1 row)
 
-SELECT pj_delta(0, 1, NULL, 0, 0, NULL, NULL, 0, NULL);
+SELECT pj_delta(0, 1, NULL, 0, 0, NULL, NULL, 1, NULL);
  pj_delta 
 ----------
  
@@ -200,6 +200,58 @@ SELECT pso_ib(7, 1);
       7
 (1 row)
 
+-- an interpreted call whose planning fails, between two compiled ones: the
+-- statement was analysed again after the callee became VOLATILE, the plan
+-- that failed to build leaves the new query list valid, and the entry walks it
+CREATE FUNCTION pso_cal2(n int) RETURNS int LANGUAGE plpgsql STABLE AS $$
+BEGIN RETURN n; END $$;
+CREATE FUNCTION pso_ibr(n int, h int) RETURNS int LANGUAGE plpgsql_jit AS $$
+BEGIN
+  PERFORM pso_cal2(100 / n) FROM pso_one;
+  RETURN n;
+END $$;
+SET plan_cache_mode = force_custom_plan;
+SELECT pso_ibr(1, 1), pso_ibr(2, 1), pso_ibr(3, 1);
+ pso_ibr | pso_ibr | pso_ibr 
+---------+---------+---------
+       1 |       2 |       3
+(1 row)
+
+SELECT pj_expect('pso_ibr(integer,integer)', 'compiled') \gset
+ALTER FUNCTION pso_cal2(int) VOLATILE;
+SELECT pso_try('SELECT pso_ibr(0, NULL)');
+        pso_try         
+------------------------
+ 22012 division by zero
+(1 row)
+
+SELECT pj_mark() \gset
+SELECT pso_ibr(1, 1);
+ pso_ibr 
+---------
+       1
+(1 row)
+
+SELECT pj_delta(0, 1, NULL, 0, 0, NULL, 0);
+ pj_delta 
+----------
+ 
+(1 row)
+
+SELECT pso_ibr(2, 1);
+ pso_ibr 
+---------
+       2
+(1 row)
+
+SELECT pso_ibr(3, 1);
+ pso_ibr 
+---------
+       3
+(1 row)
+
+SELECT pj_expect('pso_ibr(integer,integer)', 'declined:volatile callee') \gset
+RESET plan_cache_mode;
 -- N-SQL: a function replaced inside the statement stales the plan of a later
 -- expression of the call; the call goes on with the tree it has, and the next
 -- one translates again.  PL/pgSQL plans the expression again at its next
@@ -407,7 +459,7 @@ SELECT pso_l4(1);
      10
 (1 row)
 
-SELECT pj_delta(1, 0, NULL, 0, 0, NULL, 1, 1, 1);
+SELECT pj_delta(1, 0, NULL, 0, 0, NULL, 1, 0, 0);
  pj_delta 
 ----------
  
@@ -434,7 +486,7 @@ SELECT pso_l4b(2);
      200
 (1 row)
 
-SELECT pj_delta(1, 0, NULL, 0, 0, NULL, 1, 1, 1);
+SELECT pj_delta(1, 0, NULL, 0, 0, NULL, 1, 0, 0);
  pj_delta 
 ----------
  

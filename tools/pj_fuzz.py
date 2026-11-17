@@ -89,6 +89,13 @@ of the programs ran a statement through SPI in compiled code
 (plllvm_pj_stats() sql_execs), and if fewer than --floor-into of the programs
 whose statements are all SELECT INTO did.  Of the 1500 programs of seeds 21 to
 23 about 61% and 43% did.
+--mode dml writes the same programs of INSERT, UPDATE, DELETE and a
+RETURNING INTO over the table sq_w, which also has its default, a trigger and a
+rule that the script creates and drops between the calls (so a function goes
+from compiled to PL/pgSQL's and back), and a table that is truncated and
+refilled.  The table is printed after every call, so a write that differs is
+a difference.  The run fails if fewer than --floor-dml of the programs ran a
+statement that writes through SPI in compiled code.
 --cx adds CASE statements, searched and simple (a selector of any type of the
 mode, a list of values in a WHEN, with and without ELSE), and SELECT
 expression INTO a variable to a flat or ref program.  The choices of these
@@ -106,8 +113,9 @@ schema name is normalised.  Every statement of a script is a step.
 
 Usage: pj_fuzz.py --psql <psql> --host <dir> --port <port> [--n N] [--start I]
                   [--seed S] [--opt-level 0|2|3] [--out dir] [--floor 0.5]
-                  [--mode flat|rec|ref|elem|sql] [--cx] [--floor-cx 0.15]
+                  [--mode flat|rec|ref|elem|sql|dml] [--cx] [--floor-cx 0.15]
                   [--floor-elem 0.9] [--floor-sql 0.4] [--floor-into 0.3]
+                  [--floor-dml 0.25]
 """
 import argparse
 import os
@@ -2069,9 +2077,10 @@ class SqlGen:
     targets of an INTO are tx, ty (text), ix, iy (integer), big (bigint) and
     nn (integer NOT NULL), which a statement's collect() appends to r."""
 
-    def __init__(self, rng, into=False):
+    def __init__(self, rng, into=False, writes=False):
         self.r = rng
         self.into = into
+        self.writes = writes
 
     def collect(self):
         return " r := r || found::text || coalesce(tx, '-') || coalesce(ix::text, '-') || coalesce(big::text, '-');"
@@ -2118,6 +2127,51 @@ class SqlGen:
             return "SELECT false, 1 INTO found, ix FROM sq_t WHERE a = %s;" % v
         return "SELECT %s + 1 INTO ix FROM sq_t WHERE a = %s;" % (v, v)
 
+    def dml(self, loop, raising=False):
+        """A statement that writes to sq_w (a int primary key, b text, c int
+        default).  The keys 21 and up are the statements' own, and the rows 1
+        and 2 are never deleted, so that a STRICT one finds its row in every
+        call and does not leave the statements after it unplanned.  A RAISING
+        one stands where only an edge call goes."""
+        r = self.r
+        v = "i" if loop else "n"
+        k = "1 + abs(%s) %% 5" % v      # a key that has a row, at first
+        s = "1 + abs(%s) %% 2" % v      # a key that always has
+        if raising:
+            return r.choice([
+                "INSERT INTO sq_w VALUES (%s, 'dup', 1);" % k,
+                "UPDATE sq_w SET c = 1 / (a - %d) WHERE a = %s;" % (SQL_BAD, SQL_BAD),
+                "INSERT INTO sq_w VALUES (%s, 'x', 1) RETURNING a INTO STRICT ix;" % k,
+                "UPDATE sq_w SET c = c + 1 WHERE a > %s RETURNING a INTO ix;" % v,
+                "UPDATE sq_w SET c = c + 1 WHERE a = %s + 40 RETURNING a INTO STRICT ix;" % v])
+        x = r.random()
+        if x < 0.12:
+            return "INSERT INTO sq_w VALUES (%s + 20, 'i' || %s, DEFAULT) ON CONFLICT DO NOTHING;" % (v, v)
+        if x < 0.20:
+            return "INSERT INTO sq_w VALUES (%s + 20, t, DEFAULT) ON CONFLICT (a) DO UPDATE SET b = sq_w.b || t;" % v
+        if x < 0.30:
+            return "UPDATE sq_w SET b = b || 'u' WHERE a = %s;" % v
+        if x < 0.38:
+            return "UPDATE sq_w SET c = c + 1 WHERE a > %s AND b <> t;" % v
+        if x < 0.46:
+            return "DELETE FROM sq_w WHERE a = %s + 20;" % v
+        if x < 0.52:
+            return "DELETE FROM sq_w WHERE a = 3 + abs(%s) %% 5;" % v
+        if x < 0.62:
+            return "UPDATE sq_w SET c = c + 1 WHERE a = %s RETURNING a, b INTO ix, tx;" % v
+        if x < 0.68:
+            return "DELETE FROM sq_w WHERE a = %s + 20 RETURNING b INTO tx;" % v
+        if x < 0.75:
+            return ("INSERT INTO sq_w VALUES (%s + 30, 'r', 2) ON CONFLICT DO NOTHING "
+                    "RETURNING a, b, c INTO ix, tx, iy;" % v)
+        if x < 0.81:
+            return "UPDATE sq_w SET c = c + 1 WHERE a = %s RETURNING a INTO STRICT ix;" % s
+        if x < 0.87:
+            return "UPDATE sq_w SET b = b WHERE false RETURNING a INTO ix;"
+        if x < 0.93:
+            return "WITH d AS (DELETE FROM sq_w WHERE a = %s + 20 RETURNING a) SELECT count(*) INTO big FROM d;" % v
+        return "UPDATE sq_w SET c = c + 1 WHERE a = %s RETURNING c INTO nn;" % s
+
     def cond(self):
         r = self.r
         return r.choice(["n > 2", "n % 2 = 0", "t = 'row3'", "n < %d" % SQL_BAD,
@@ -2149,6 +2203,8 @@ class SqlGen:
         r = self.r
         x = r.random()
         if x < 0.55 or d <= 0:
+            if self.writes:
+                return self.dml(loop) + self.collect()
             if self.into or r.random() < 0.35:
                 return self.select_into(loop) + self.collect()
             return self.perform(loop) + " r := r || found::text;"
@@ -2163,23 +2219,32 @@ class SqlGen:
 
 
 class SqlProgram:
-    def __init__(self, seed, cat=None, cx=False):
+    def __init__(self, seed, cat=None, cx=False, dml=False):
         r = random.Random(seed)
         self.rng = r
         self.seed = seed
+        self.dml = dml
         # a part of the programs has no PERFORM at all, to count them
         self.into = r.random() < 0.4
-        g = SqlGen(r, self.into)
-        self.body = [g.stmt(2, False) for _ in range(r.randint(2, 5))]
+        g = SqlGen(r, self.into, dml)
+        # (a loop in a branch that a call does not take leaves its statements
+        # unplanned and the function waiting, so the programs of writes are shallow)
+        self.body = [g.stmt(1 if dml else 2, False) for _ in range(r.randint(2, 5))]
         # a statement no warm call reaches: planned by the call that takes it
-        rare = g.select_into(False) + g.collect() if self.into else \
-            g.perform(False) + " r := r || found::text;"
+        if dml:
+            rare = g.dml(False) + g.collect()
+        else:
+            rare = g.select_into(False) + g.collect() if self.into else \
+                g.perform(False) + " r := r || found::text;"
         self.body.insert(r.randint(0, len(self.body)),
                          "IF n = %d THEN %s END IF;" % (SQL_RARE, rare))
         if r.random() < 0.15:
             # SELECT with no INTO, which raises
             self.body.append("IF n = %d THEN SELECT n; END IF;" % (SQL_RARE + 1))
-        if self.into and r.random() < 0.5:
+        if dml and r.random() < 0.5:
+            self.body.append("IF n = %d THEN %s END IF;"
+                             % (SQL_RARE + 1, g.dml(False, True) + g.collect()))
+        elif self.into and not dml and r.random() < 0.5:
             # an INTO that raises, which only an edge call reaches
             self.body.append("IF n = %d THEN %s END IF;"
                              % (SQL_RARE + 1, g.select_into(False, True) + g.collect()))
@@ -2207,11 +2272,21 @@ class SqlProgram:
                 "EXCEPTION WHEN OTHERS THEN RETURN SQLSTATE || ' ' || SQLERRM;\nEND $w$;\n")
 
     def setup(self):
-        return ("CREATE TABLE sq_t (a int PRIMARY KEY, b text);\n"
-                "INSERT INTO sq_t SELECT i, 'row' || i FROM generate_series(1, 8) i;\n"
-                "ANALYZE sq_t;\n"
-                "CREATE FUNCTION sq_noisy(n int) RETURNS int LANGUAGE plpgsql STABLE AS "
-                "$q$ BEGIN RAISE NOTICE 'noisy %', n; RETURN n; END $q$;\n")
+        o = ("CREATE TABLE sq_t (a int PRIMARY KEY, b text);\n"
+             "INSERT INTO sq_t SELECT i, 'row' || i FROM generate_series(1, 8) i;\n"
+             "ANALYZE sq_t;\n"
+             "CREATE FUNCTION sq_noisy(n int) RETURNS int LANGUAGE plpgsql STABLE AS "
+             "$q$ BEGIN RAISE NOTICE 'noisy %', n; RETURN n; END $q$;\n")
+        if self.dml:
+            o += ("CREATE TABLE sq_w (a int PRIMARY KEY, b text, c int DEFAULT 7);\n"
+                  "INSERT INTO sq_w SELECT i, 'row' || i, i FROM generate_series(1, 8) i;\n"
+                  "ANALYZE sq_w;\n"
+                  "CREATE TABLE sq_w_log (a int);\n"
+                  "CREATE FUNCTION sq_w_fn() RETURNS trigger LANGUAGE plpgsql AS "
+                  "$q$ BEGIN RAISE NOTICE 'sq_w %', tg_op; RETURN coalesce(new, old); END $q$;\n"
+                  "CREATE FUNCTION sq_vol() RETURNS int LANGUAGE plpgsql VOLATILE AS "
+                  "$q$ BEGIN RAISE NOTICE 'sq_vol'; RETURN 3; END $q$;\n")
+        return o
 
     def call(self, kind, fn="f"):
         r = self.rng
@@ -2222,6 +2297,21 @@ class SqlProgram:
         return "SELECT %s(%d, %s, %s);" % (fn, n, h, t)
 
     def between(self):
+        if self.dml and self.rng.random() < 0.6:
+            return self.rng.choice([
+                "TRUNCATE sq_w; INSERT INTO sq_w SELECT i, 'row' || i, i FROM generate_series(1, 8) i; ANALYZE sq_w;",
+                "ANALYZE sq_w;",
+                "CREATE OR REPLACE TRIGGER sq_w_t BEFORE INSERT OR UPDATE OR DELETE ON sq_w "
+                "FOR EACH ROW EXECUTE FUNCTION sq_w_fn();",
+                "DROP TRIGGER IF EXISTS sq_w_t ON sq_w;",
+                "ALTER TABLE sq_w ALTER COLUMN c SET DEFAULT sq_vol();",
+                "ALTER TABLE sq_w ALTER COLUMN c SET DEFAULT 7;",
+                # an INSERT or UPDATE rule would make ON CONFLICT an error at planning
+                "CREATE OR REPLACE RULE sq_w_r AS ON DELETE TO sq_w DO ALSO INSERT INTO sq_w_log VALUES (old.a);",
+                "DROP RULE IF EXISTS sq_w_r ON sq_w;",
+                "DELETE FROM sq_w WHERE a > 2;",
+                "DISCARD PLANS;",
+            ])
         return self.rng.choice([
             "TRUNCATE sq_t; INSERT INTO sq_t SELECT i, 'row' || i FROM generate_series(1, 8) i; ANALYZE sq_t;",
             "ANALYZE sq_t;",
@@ -2270,6 +2360,10 @@ class SqlProgram:
         st.append(self.call("rare", "w"))
         st.append(self.call("harmless"))
         st.append(self.call("harmless"))
+        if self.dml:
+            # what each call wrote
+            dump = ("SELECT coalesce(string_agg(x::text, ' ' ORDER BY x.a), '-') FROM sq_w x;")
+            st = [t for s in st for t in ([s, dump] if s.startswith("SELECT ") else [s])]
         return st
 
 
@@ -2279,7 +2373,7 @@ def main_sql(args):
     failed = False
     for i in range(args.start, args.start + args.n):
         seed = "%d:%d" % (args.seed, i)
-        prog = SqlProgram(seed)
+        prog = SqlProgram(seed, dml=args.mode == "dml")
         a, b = run_pair(args, prog)
         verdict, step = compare(args, prog, a, b, tally)
         tally[verdict] += 1
@@ -2311,20 +2405,21 @@ def main_sql(args):
                          % (verdict, step, seed, args.opt_level, script(prog, "plpgsql"),
                             script(prog, "plpgsql_jit", True), a, b))
             print("  program and outputs: %s" % f)
-    print("pj_fuzz sql: seed=%d programs=%d opt_level=%s equal=%d permissive=%d mismatch=%d "
+    print("pj_fuzz %s: seed=%d programs=%d opt_level=%s equal=%d permissive=%d mismatch=%d "
           "compiled=%d (%.1f%%) ran SQL compiled=%d (%.1f%%), %d statements, deopts=%d, "
           "SELECT INTO programs=%d ran SQL compiled=%d"
-          % (args.seed, args.n, args.opt_level, tally["equal"], tally["PERMISSIVE"],
+          % (args.mode, args.seed, args.n, args.opt_level, tally["equal"], tally["PERMISSIVE"],
              tally["MISMATCH"], tally["compiled"], 100.0 * tally["compiled"] / max(args.n, 1),
              tally["ran-sql"], 100.0 * tally["ran-sql"] / max(args.n, 1), tally["sql-execs"],
              tally["deopts"], tally["into-programs"], tally["into-ran-sql"]))
     for k, v in reasons.most_common(8):
         print("  no SQL compiled: %5d  %s" % (v, k))
-    if tally["ran-sql"] < args.floor_sql * args.n:
+    floor = args.floor_dml if args.mode == "dml" else args.floor_sql
+    if tally["ran-sql"] < floor * args.n:
         print("pj_fuzz: programs that ran SQL compiled below the floor of %.0f%%"
-              % (100 * args.floor_sql))
+              % (100 * floor))
         failed = True
-    if tally["into-ran-sql"] < args.floor_into * tally["into-programs"]:
+    if args.mode == "sql" and tally["into-ran-sql"] < args.floor_into * tally["into-programs"]:
         print("pj_fuzz: programs of SELECT INTO that ran SQL compiled below the floor of %.0f%%"
               % (100 * args.floor_into))
         failed = True
@@ -2422,6 +2517,9 @@ def split(out, schema):
             steps[cur] = []
         elif cur is not None and not LOC.match(line):
             line = CTXPFX.sub("", PSQLPFX.sub("", line)).replace(schema + ".", "")
+            # the schema of a constraint or table in an error of the verbose kind
+            if line.startswith("SCHEMA NAME:"):
+                line = "SCHEMA NAME:  fzX"
             steps[cur].append(line)
     return steps
 
@@ -2512,12 +2610,13 @@ def main():
     ap.add_argument("--opt-level", type=int, default=None)
     ap.add_argument("--out", default="results-fuzz")
     ap.add_argument("--floor", type=float, default=0.5)
-    ap.add_argument("--mode", choices=["flat", "rec", "ref", "elem", "sql"], default="flat")
+    ap.add_argument("--mode", choices=["flat", "rec", "ref", "elem", "sql", "dml"], default="flat")
     ap.add_argument("--cx", action="store_true", help="CASE and SELECT INTO (flat, ref)")
     ap.add_argument("--floor-cx", type=float, default=0.15, dest="floor_cx")
     ap.add_argument("--floor-elem", type=float, default=0.9, dest="floor_elem")
     ap.add_argument("--floor-sql", type=float, default=0.4, dest="floor_sql")
     ap.add_argument("--floor-into", type=float, default=0.3, dest="floor_into")
+    ap.add_argument("--floor-dml", type=float, default=0.25, dest="floor_dml")
     ap.add_argument("-v", action="store_true")
     ap.add_argument("--selftest", action="store_true", help="check frame_mix, no cluster")
     args = ap.parse_args()
@@ -2536,7 +2635,7 @@ def main():
         if args.cx:
             ap.error("--cx is for flat and ref programs")
         sys.exit(main_elem(args))
-    if args.mode == "sql":
+    if args.mode in ("sql", "dml"):
         if args.cx:
             ap.error("--cx is for flat and ref programs")
         sys.exit(main_sql(args))

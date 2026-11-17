@@ -256,19 +256,18 @@ fall_back(FunctionCallInfo fcinfo, PjEntry *e, const char *path)
  * interpreter, which plans them again as it runs, makes them valid.  So such a
  * call is translated after the interpreter has run it, when the plans are
  * valid, instead of at the next start, when they are not.  The flag is read
- * before the call: a nested call of the function sets it again.  The call may
- * have replaced the function (funccache then reuses the same struct, and
- * entry_get() resets the entry to NEW), which is then left alone, as is one
- * the call declined.
+ * before the call: a nested call of the function overwrites it (seen_step()
+ * clears it for an entry that is busy).  The call may have replaced the
+ * function (funccache then reuses the same struct, and entry_get() resets the
+ * entry to NEW), which is then left alone, as is one the call declined.
  */
 static Datum
 fall_back_retry(FunctionCallInfo fcinfo, PjEntry *e, const char *path)
 {
-	bool		retry = e != NULL && e->retry;
+	bool		retry = e->retry;
 	Datum		result;
 
-	if (e != NULL)
-		e->retry = false;
+	e->retry = false;
 	result = fall_back(fcinfo, e, path);
 
 	if (retry)
@@ -282,7 +281,6 @@ fall_back_retry(FunctionCallInfo fcinfo, PjEntry *e, const char *path)
 			e->state = PJ_SEEN;
 			seen_step(func, e);
 		}
-		e->retry = false;
 		fcinfo->isnull = isnull;
 	}
 
@@ -752,6 +750,15 @@ run_compiled(PLpgSQL_function *func, FunctionCallInfo fcinfo, PjEntry *e)
 	{
 		plllvm_pj_count.guard_misses++;
 		e->guard_misses++;
+
+		/*
+		 * The plan of a statement that writes is stale, or its table is held
+		 * by another session: the interpreter runs this call.  Nothing is
+		 * translated, so it is not a miss that adds up to a decline.
+		 */
+		if (h->soft_miss != NULL)
+			return fall_back(fcinfo, e, h->soft_miss);
+
 		if (e->since_translation >= PJ_MISS_FORGET)
 			e->misses = 0;
 		if (++e->misses >= PJ_MAX_MISSES)
@@ -996,17 +1003,24 @@ exec_error_callback(void *arg)
 bool
 plllvm_pj_guards_ok(PjHarvest *h, bool sql)
 {
-	if (sql && h->sql_stale)
-		return false;
+	h->soft_miss = NULL;
+
+	/*
+	 * The statements come first: the lock on the table of a write delivers
+	 * the invalidations that the plans of the expressions below must see
+	 */
+	if (sql)
+	{
+		foreach_ptr(PjExpr, pe, h->exprs)
+		{
+			if (pe->h1 == PJ_H1_SQL &&
+				!plllvm_pj_sql_guard(pe->sql, &h->soft_miss))
+				return false;
+		}
+	}
 
 	foreach_ptr(PjExpr, pe, h->exprs)
 	{
-		if (pe->h1 == PJ_H1_SQL)
-		{
-			if (sql && !plllvm_pj_sql_guard(pe->sql))
-				return false;
-			continue;
-		}
 		if (pe->h1 != PJ_H1_READY)
 			continue;
 		if (pe->expr != NULL &&

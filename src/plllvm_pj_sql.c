@@ -43,15 +43,25 @@
  */
 #include "postgres.h"
 
+#include "access/genam.h"
 #include "access/htup_details.h"
+#include "access/table.h"
+#include "catalog/indexing.h"
 #include "catalog/namespace.h"
 #include "catalog/pg_class.h"
+#include "catalog/pg_constraint.h"
 #include "catalog/pg_proc.h"
+#include "catalog/pg_trigger.h"
+#include "catalog/pg_type.h"
 #include "executor/spi.h"
 #include "miscadmin.h"
 #include "nodes/nodeFuncs.h"
 #include "nodes/params.h"
+#include "optimizer/optimizer.h"
+#include "parser/parsetree.h"
 #include "plpgsql.h"
+#include "storage/lmgr.h"
+#include "utils/builtins.h"
 #include "utils/fmgroids.h"
 #include "utils/guc.h"
 #include "utils/lsyscache.h"
@@ -80,14 +90,26 @@ typedef struct SqlFacts
 	const char *reason;			/* why the statement is not admitted */
 	List	   *funcs;			/* the callees, once each ... */
 	List	   *volatility;		/* ... and their provolatile (as int) */
-	bool		has_view;
+	bool		has_view;		/* true, when a view is among the relations */
+	bool		writes;			/* true, when a command or a CTE of it writes */
+	bool		result;			/* true, when a query has a result relation */
 } SqlFacts;
 
 static bool sql_scan_walker(Node *node, SqlFacts *facts);
+static bool sql_cmd_writes(CachedPlanSource *psrc);
+static const char *sql_write_reason(Query *query);
+static bool sql_rte_write_locked(RangeTblEntry *rte);
+static const char *sql_extra_writes_reason(Query *query);
+static const char *sql_relation_reason(Oid relid);
+static const char *sql_trigger_reason(Oid relid);
+static bool sql_check_volatile(Oid conrelid, Oid typid);
+static bool sql_domain_volatile(Oid typid);
+static bool sql_expr_volatile(Node *expr);
+static bool sql_expr_volatile_walker(Node *node, void *context);
 static bool sql_scan_func(Oid funcid, void *context);
 static bool sql_func_pinned(Oid funcid);
 static bool sql_facts_ok(PjSql *sql);
-static void sql_recheck(PjHarvest *h, PjSql *sql);
+static bool sql_lock_writes(Node *node, void *context);
 static const char *sql_into_admit(PLpgSQL_function *func,
 								  CachedPlanSource *psrc,
 								  PLpgSQL_stmt_execsql *stmt);
@@ -145,13 +167,14 @@ shadow_build(PLpgSQL_function *func, MemoryContext cxt)
 }
 
 /*
- * What a statement for SPI may be: a query with no writes, and no callee that
- * can change what the plan was made from.  A command that is not a SELECT
- * and a data-modifying CTE under a SELECT are the interpreter's: the triggers,
- * rules and constraints of the table they write are code that no walk of the
- * query shows.  A VOLATILE function may run SQL of its own, or set what a later
- * simple expression of the function was planned with (search_path), so it is
- * not admitted either, but the built-in ones that change no plan input.
+ * What a statement for SPI may be: a query that writes only to a table with
+ * no code of its own (sql_relation_reason()), and no callee that can change
+ * what the plan was made from.  Any other command, and MERGE, are the
+ * interpreter's.  A data-modifying CTE under a SELECT is a query of its own
+ * here, so the rule applies to its result relation as to the top level's.  A
+ * VOLATILE function may run SQL of its own, or set what a later simple
+ * expression of the function was planned with (search_path), so it is not
+ * admitted either, but the built-in ones that change no plan input.
  */
 static bool
 sql_scan_walker(Node *node, SqlFacts *facts)
@@ -162,11 +185,30 @@ sql_scan_walker(Node *node, SqlFacts *facts)
 	{
 		Query	   *query = (Query *) node;
 
-		if (query->commandType != CMD_SELECT || query->hasModifyingCTE)
+		switch (query->commandType)
 		{
-			facts->reason = "statement:SQL statement";
-			return true;
+			case CMD_SELECT:
+				break;
+			case CMD_INSERT:
+			case CMD_UPDATE:
+			case CMD_DELETE:
+				facts->writes = true;
+				facts->result = true;
+				facts->reason = sql_write_reason(query);
+				if (facts->reason != NULL)
+					return true;
+				break;
+			default:
+				facts->reason = "statement:SQL statement";
+				return true;
 		}
+		if (query->hasModifyingCTE)
+			facts->writes = true;
+
+		/* of every query at every level, a SELECT too */
+		facts->reason = sql_extra_writes_reason(query);
+		if (facts->reason != NULL)
+			return true;
 		foreach_node(RangeTblEntry, rte, query->rtable)
 		{
 			/* ApplyRetrieveRule() leaves the relkind of the view */
@@ -175,9 +217,266 @@ sql_scan_walker(Node *node, SqlFacts *facts)
 		}
 		return query_tree_walker(query, sql_scan_walker, facts, 0);
 	}
+	if (IsA(node, CoerceToDomain) &&
+		sql_domain_volatile(((CoerceToDomain *) node)->resulttype))
+	{
+		facts->reason = "relation:check";
+		return true;
+	}
 	if (check_functions_in_node(node, sql_scan_func, facts))
 		return true;
 	return expression_tree_walker(node, sql_scan_walker, facts);
+}
+
+/*
+ * Is the statement INSERT, UPDATE, DELETE or MERGE?  The command tag says, as
+ * for exec_stmt_execsql(): not the rewritten query, which a rule may have made
+ * into something else, or into nothing.
+ */
+static bool
+sql_cmd_writes(CachedPlanSource *psrc)
+{
+	return psrc->commandTag == CMDTAG_INSERT ||
+		psrc->commandTag == CMDTAG_UPDATE ||
+		psrc->commandTag == CMDTAG_DELETE ||
+		psrc->commandTag == CMDTAG_MERGE;
+}
+
+/* the result relation of a command that writes, as the rewriter left it */
+static const char *
+sql_write_reason(Query *query)
+{
+	RangeTblEntry *rte;
+
+	if (query->resultRelation <= 0)
+		return "statement:SQL statement";
+	rte = rt_fetch(query->resultRelation, query->rtable);
+	if (rte->rtekind != RTE_RELATION)
+		return "relation:kind";
+	return sql_relation_reason(rte->relid);
+}
+
+/*
+ * Is the entry one that SPI locks, ScanQueryForLocks() as it scans a plan,
+ * with the lock of a write?  A relation, or a view in a subquery.
+ */
+static bool
+sql_rte_write_locked(RangeTblEntry *rte)
+{
+	return (rte->rtekind == RTE_RELATION ||
+			(rte->rtekind == RTE_SUBQUERY && OidIsValid(rte->relid))) &&
+		rte->rellockmode >= RowExclusiveLock;
+}
+
+/*
+ * A view that was written through, and a relation that a rule's action was
+ * copied from, stay among the relations of the query with the lock of a
+ * write, in the query or in a subquery of it, and so does the table of a
+ * command that a rule made a SELECT.  None is the result relation of its
+ * query, so none is looked at, and SPI takes the lock inside the call, where
+ * what other sessions committed is delivered.  So no query at any level may
+ * have such an entry but its own result relation (and the pseudo relation
+ * excluded of ON CONFLICT, which is that relation again).
+ */
+static const char *
+sql_extra_writes_reason(Query *query)
+{
+	Oid			target = InvalidOid;
+
+	if (query->resultRelation > 0)
+		target = rt_fetch(query->resultRelation, query->rtable)->relid;
+
+	for (int i = 1; i <= list_length(query->rtable); i++)
+	{
+		RangeTblEntry *rte = rt_fetch(i, query->rtable);
+
+		if (sql_rte_write_locked(rte) && i != query->resultRelation &&
+			rte->relid != target)
+			return rte->relkind == RELKIND_VIEW ? "relation:view" :
+				"relation:rule";
+	}
+	return NULL;
+}
+
+/*
+ * May compiled code write to this table?  What a write does besides storing
+ * the row is code that the plan does not show: triggers, rules, the actions
+ * of foreign keys, the children of an inheritance tree, the partitions, the
+ * wrapper of a foreign table.  Any of them is the interpreter's.  The checks
+ * of a foreign key on the table written, and of a deferred unique constraint,
+ * are not: they change no row and run no code of a user.  The table has
+ * been locked for the write by the entry check (plllvm_pj_sql_guard()), so
+ * what is read here, from the catalogs, stays true until the transaction
+ * ends; a function that a CHECK constraint calls is read at every entry.  A
+ * domain constraint that is added without validation locks no table, so it
+ * is a stated gap, as are the children added after the lock.
+ */
+static const char *
+sql_relation_reason(Oid relid)
+{
+	HeapTuple	tup = SearchSysCache1(RELOID, ObjectIdGetDatum(relid));
+	Form_pg_class rel;
+	const char *reason = NULL;
+
+	if (!HeapTupleIsValid(tup))
+		return "relation:kind";
+	rel = (Form_pg_class) GETSTRUCT(tup);
+
+	if (rel->relkind == RELKIND_PARTITIONED_TABLE)
+		reason = "relation:partitioned";
+	else if (rel->relkind == RELKIND_FOREIGN_TABLE)
+		reason = "relation:foreign table";
+	else if (rel->relkind != RELKIND_RELATION)
+		reason = "relation:kind";
+	else if (rel->relhasrules)
+		reason = "relation:rule";
+	else if (rel->relhassubclass)
+		reason = "relation:inheritance";
+	else if (rel->relhastriggers)
+		reason = sql_trigger_reason(relid);
+	if (reason == NULL && rel->relchecks > 0 &&
+		sql_check_volatile(relid, InvalidOid))
+		reason = "relation:check";
+	ReleaseSysCache(tup);
+	return reason;
+}
+
+/*
+ * Does a CHECK constraint of the table, or of the domain, call a VOLATILE
+ * function?  The executor runs the constraints, so they are no part of the
+ * plan: the walk over the query does not show them.
+ */
+static bool
+sql_check_volatile(Oid conrelid, Oid typid)
+{
+	Relation	conrel = table_open(ConstraintRelationId, AccessShareLock);
+	ScanKeyData key[2];
+	SysScanDesc scan;
+	HeapTuple	tup;
+	bool		found = false;
+
+	ScanKeyInit(&key[0], Anum_pg_constraint_conrelid, BTEqualStrategyNumber,
+				F_OIDEQ, ObjectIdGetDatum(conrelid));
+	ScanKeyInit(&key[1], Anum_pg_constraint_contypid, BTEqualStrategyNumber,
+				F_OIDEQ, ObjectIdGetDatum(typid));
+	scan = systable_beginscan(conrel, ConstraintRelidTypidNameIndexId, true,
+							  NULL, 2, key);
+	while (!found && HeapTupleIsValid(tup = systable_getnext(scan)))
+	{
+		Form_pg_constraint con = (Form_pg_constraint) GETSTRUCT(tup);
+		Datum		bin;
+		bool		isnull;
+
+		if (con->contype != CONSTRAINT_CHECK)
+			continue;
+		bin = heap_getattr(tup, Anum_pg_constraint_conbin,
+						   RelationGetDescr(conrel), &isnull);
+		if (isnull)
+			continue;
+		found = sql_expr_volatile(stringToNode(TextDatumGetCString(bin)));
+	}
+	systable_endscan(scan);
+	table_close(conrel, AccessShareLock);
+	return found;
+}
+
+/*
+ * contain_volatile_functions() takes a coercion to a domain for immutable,
+ * though the constraints of the domain run: look at them too
+ */
+static bool
+sql_expr_volatile(Node *expr)
+{
+	return contain_volatile_functions(expr) ||
+		sql_expr_volatile_walker(expr, NULL);
+}
+
+static bool
+sql_expr_volatile_walker(Node *node, void *context)
+{
+	if (node == NULL)
+		return false;
+	if (IsA(node, CoerceToDomain) &&
+		sql_domain_volatile(((CoerceToDomain *) node)->resulttype))
+		return true;
+	return expression_tree_walker(node, sql_expr_volatile_walker, context);
+}
+
+/* the same for a domain and the domains it is made on */
+static bool
+sql_domain_volatile(Oid typid)
+{
+	while (OidIsValid(typid))
+	{
+		HeapTuple	tup = SearchSysCache1(TYPEOID, ObjectIdGetDatum(typid));
+		Form_pg_type typ;
+		Oid			base;
+
+		if (!HeapTupleIsValid(tup))
+			return false;
+		typ = (Form_pg_type) GETSTRUCT(tup);
+		if (typ->typtype != TYPTYPE_DOMAIN)
+		{
+			ReleaseSysCache(tup);
+			return false;
+		}
+		base = typ->typbasetype;
+		ReleaseSysCache(tup);
+		if (sql_check_volatile(InvalidOid, typid))
+			return true;
+		typid = base;
+	}
+	return false;
+}
+
+static const char *
+sql_trigger_reason(Oid relid)
+{
+	Relation	tgrel = table_open(TriggerRelationId, AccessShareLock);
+	ScanKeyData key;
+	SysScanDesc scan;
+	HeapTuple	tup;
+	const char *reason = NULL;
+
+	ScanKeyInit(&key, Anum_pg_trigger_tgrelid, BTEqualStrategyNumber,
+				F_OIDEQ, ObjectIdGetDatum(relid));
+	scan = systable_beginscan(tgrel, TriggerRelidNameIndexId, true, NULL, 1,
+							  &key);
+	while (reason == NULL && HeapTupleIsValid(tup = systable_getnext(scan)))
+	{
+		Form_pg_trigger trig = (Form_pg_trigger) GETSTRUCT(tup);
+
+		if (!trig->tgisinternal)
+		{
+			reason = "relation:trigger";
+			continue;
+		}
+		switch (trig->tgfoid)
+		{
+			case F_RI_FKEY_CHECK_INS:
+			case F_RI_FKEY_CHECK_UPD:
+			case F_RI_FKEY_NOACTION_DEL:
+			case F_RI_FKEY_NOACTION_UPD:
+			case F_RI_FKEY_RESTRICT_DEL:
+			case F_RI_FKEY_RESTRICT_UPD:
+			case F_UNIQUE_KEY_RECHECK:
+				break;
+			case F_RI_FKEY_CASCADE_DEL:
+			case F_RI_FKEY_CASCADE_UPD:
+			case F_RI_FKEY_SETNULL_DEL:
+			case F_RI_FKEY_SETNULL_UPD:
+			case F_RI_FKEY_SETDEFAULT_DEL:
+			case F_RI_FKEY_SETDEFAULT_UPD:
+				reason = "relation:cascade";
+				break;
+			default:
+				reason = "relation:trigger";
+				break;
+		}
+	}
+	systable_endscan(scan);
+	table_close(tgrel, AccessShareLock);
+	return reason;
 }
 
 static bool
@@ -263,7 +562,9 @@ sql_facts_ok(PjSql *sql)
 	/* the lists are in the caller's context, which lasts as long as the call */
 	if (bms_equal(sql->expr->paramnos, sql->paramnos) &&
 		(!sql->into || sql_result_same(sql, psrc)) &&
+		(!sql->writes || !psrc->dependsOnRLS) &&
 		!sql_scan_walker((Node *) psrc->query_list, &facts) &&
+		(!sql_cmd_writes(psrc) || facts.result) &&
 		facts.has_view == sql->has_view &&
 		list_length(facts.funcs) == sql->nfuncs)
 	{
@@ -320,6 +621,24 @@ plllvm_pj_sql_harvest(PLpgSQL_function *func, PjHarvest *h, PjExpr *pe)
 
 	if (sql_scan_walker((Node *) psrc->query_list, &facts))
 		return facts.reason;
+
+	/*
+	 * A command that a rule turned into nothing has no result relation, so no
+	 * table to lock and look at when the rule goes and a trigger comes: it is
+	 * the interpreter's.  (A plan that turns into nothing later does nothing
+	 * under SPI too, as under PL/pgSQL.)
+	 */
+	if (sql_cmd_writes(psrc) && !facts.result)
+		return "relation:none";
+
+	/*
+	 * Which policies apply to a table depends on the role (membership,
+	 * BYPASSRLS, the owner of the database), and a change of that reaches the
+	 * plan through no lock on a relation: a write to such a table is the
+	 * interpreter's.
+	 */
+	if ((facts.writes || sql_cmd_writes(psrc)) && psrc->dependsOnRLS)
+		return "relation:rls";
 	if (stmt != NULL && stmt->into)
 	{
 		const char *reason = sql_into_admit(func, psrc, stmt);
@@ -337,11 +656,9 @@ plllvm_pj_sql_harvest(PLpgSQL_function *func, PjHarvest *h, PjExpr *pe)
 		PLpgSQL_row *row = (PLpgSQL_row *) stmt->target;
 		TupleDesc	desc = psrc->resultDesc;
 
-		/* set before any plan exists for a harvest to see */
-		Assert(stmt->mod_stmt_set);
 		sql->into = true;
 		sql->strict = stmt->strict;
-		sql->mod = stmt->mod_stmt;
+		sql->mod = sql_cmd_writes(psrc);
 		sql->ntargets = row->nfields;
 		sql->targets = palloc_array(int, row->nfields);
 		memcpy(sql->targets, row->varnos, sizeof(int) * row->nfields);
@@ -356,8 +673,9 @@ plllvm_pj_sql_harvest(PLpgSQL_function *func, PjHarvest *h, PjExpr *pe)
 	}
 	sql->paramnos = bms_copy(expr->paramnos);
 	sql->plansource = psrc;
-	sql->generation = psrc->generation;
 	sql->has_view = facts.has_view;
+
+	sql->writes = facts.writes || sql_cmd_writes(psrc);
 	sql->nfuncs = list_length(facts.funcs);
 	sql->funcs = palloc_array(Oid, Max(sql->nfuncs, 1));
 	sql->volatility = palloc_array(char, Max(sql->nfuncs, 1));
@@ -439,22 +757,81 @@ sql_result_same(PjSql *sql, CachedPlanSource *psrc)
 }
 
 /*
- * May the next call run the statement on the plan it has?  The checks SPI
- * itself would make are the ones that can change what the code assumed, so
- * they are made before anything runs: a miss sends the call to the
- * interpreter, which translates again.
+ * Every relation of the plan that SPI will lock with the lock of a write,
+ * locked the same, but without waiting: ScanQueryForLocks() locks the entries
+ * of the rtable of every query, of its subqueries, CTEs and sublinks, in the
+ * mode of the entry, and so does this walk, for the entries of a write.  True
+ * if one is held by another session.
+ */
+static bool
+sql_lock_writes(Node *node, void *context)
+{
+	if (node == NULL)
+		return false;
+	if (IsA(node, Query))
+	{
+		Query	   *query = (Query *) node;
+
+		foreach_node(RangeTblEntry, rte, query->rtable)
+		{
+			if (sql_rte_write_locked(rte) &&
+				!ConditionalLockRelationOid(rte->relid, rte->rellockmode))
+				return true;
+		}
+		return query_tree_walker(query, sql_lock_writes, context, 0);
+	}
+	return expression_tree_walker(node, sql_lock_writes, context);
+}
+
+/*
+ * May this call run the statement on the plan it has?  Checked at the entry,
+ * where a miss can still send the call to the interpreter: a statement has no
+ * deopt point.
  *
- * An invalid plan is not a miss: SPI analyses it again inside the call, and
- * a function whose table is truncated and analysed between calls would
- * otherwise never stay compiled.  It is one only if what the statement was
- * admitted for may have changed: a callee that is not as it was, a view, a
- * policy.  A plan that others have rebuilt since our last look (an interpreted
- * call may have) is checked as it stands.
+ * The facts about the tables a statement writes (triggers, rules, defaults,
+ * constraints, policies) change under locks that conflict with the one a
+ * write takes.  So the tables are locked first, as plancache does before it
+ * looks at a plan, and the plan is looked at after: a change that another
+ * session committed is delivered by the lock and has made the plan invalid, a
+ * change that it has not committed waits for our transaction.  Nothing is
+ * waited for here: a table that is held makes the interpreter run the call.
+ * What the lock gives is for the rest of the transaction.
+ *
+ * Every valid plan is walked at every entry (sql_facts_ok()): whoever made
+ * the query list, the interpreter, a nested call, SPI in an earlier call or a
+ * planning that failed after it, it is the one that is walked.  An invalid
+ * plan of a write is the interpreter's to make again, as SPI would make it
+ * inside the call, where what it shows would run before anybody looked.  An
+ * invalid plan of a read is run, since SPI analyses it again by itself: it is
+ * how a function whose table is truncated and analysed between calls stays
+ * compiled.  It is a miss only if what the statement was admitted for may
+ * have changed: a callee that is not as it was, a view, a policy.
  */
 bool
-plllvm_pj_sql_guard(PjSql *sql)
+plllvm_pj_sql_guard(PjSql *sql, const char **soft)
 {
 	CachedPlanSource *psrc = sql->plansource;
+
+	if (sql->writes)
+	{
+		if (!psrc->is_valid)
+		{
+			*soft = "interpreted:stale plan";
+			return false;
+		}
+		if (sql_lock_writes((Node *) psrc->query_list, NULL))
+		{
+			*soft = "interpreted:lock";
+			return false;
+		}
+
+		/* the lock has delivered what others committed */
+		if (!psrc->is_valid)
+		{
+			*soft = "interpreted:stale plan";
+			return false;
+		}
+	}
 
 	/* the names would resolve in another schema */
 	if (psrc->search_path == NULL ||
@@ -491,44 +868,13 @@ plllvm_pj_sql_guard(PjSql *sql)
 		return true;
 	}
 
-	if (psrc->generation != sql->generation)
-	{
-		plllvm_pj_count.sql_rewalks++;
-		if (!sql_facts_ok(sql))
-			return false;
-		sql->generation = psrc->generation;
-	}
-	return true;
-}
-
-/*
- * After an execution: if a plan was built since we looked, SPI may have
- * analysed the statement again, and the query list has changed under us.  The
- * list's address would not tell (the new one can take the place of the old),
- * the counter of plans does: it moves with every plan built, and a new query
- * list is followed by one, unless the plan that follows the analysis fails
- * to build (a custom plan that raises): then the next call runs that list
- * once unchecked, and this check, after it, finds it.  The statement goes on
- * with the trees it has, as PL/pgSQL does until its next evaluation, and the
- * next call translates again if the plan is no longer the one it was
- * admitted as.
- */
-static void
-sql_recheck(PjHarvest *h, PjSql *sql)
-{
-	CachedPlanSource *psrc = sql->plansource;
-
-	if (psrc->generation == sql->generation || !psrc->is_valid)
-		return;
-
 	plllvm_pj_count.sql_rewalks++;
-	if (sql_facts_ok(sql))
-		sql->generation = psrc->generation;
-	else
+	if (!sql_facts_ok(sql))
 	{
 		plllvm_pj_count.sql_stale++;
-		h->sql_stale = true;
+		return false;
 	}
+	return true;
 }
 
 /*
@@ -673,8 +1019,6 @@ plllvm_pj_sql(PjCtx *ctx, int32 idx)
 	}
 	PG_END_TRY();
 	MemoryContextSwitchTo(oldcxt);
-
-	sql_recheck(h, sql);
 
 	if (sql->kind == PJ_SQL_PERFORM)
 	{

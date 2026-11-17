@@ -392,8 +392,8 @@ SELECT psq_seq(3);
 SELECT last_value FROM psq_s;
 SELECT pj_expect('psq_seq(integer)', 'compiled') \gset
 
--- statements that write are not compiled, and are as PL/pgSQL runs them: a
--- plain command, and a data-modifying CTE on a table with a trigger
+-- statements that write to a table with a trigger are not compiled, and are as
+-- PL/pgSQL runs them: a plain command, and a data-modifying CTE
 CREATE TABLE psq_trg (a int, b text);
 INSERT INTO psq_trg SELECT i, 'x' FROM generate_series(1, 5) i;
 CREATE FUNCTION psq_trg_fn() RETURNS trigger LANGUAGE plpgsql AS $$
@@ -409,7 +409,7 @@ SELECT psq_try('SELECT psq_cte(1)');
 SELECT psq_try('SELECT psq_cte(2)');
 SELECT psq_try('SELECT psq_cte(3)');
 SELECT count(*) FROM psq_trg;
-SELECT pj_expect('psq_cte(integer)', 'declined:statement:SQL statement') \gset
+SELECT pj_expect('psq_cte(integer)', 'declined:relation:trigger') \gset
 CREATE FUNCTION psq_dml(n int) RETURNS int LANGUAGE :pj_lang AS $$
 BEGIN
   UPDATE psq_trg SET b = 'y' WHERE a = n;
@@ -418,7 +418,7 @@ END $$;
 SELECT psq_dml(4), psq_dml(5);
 SELECT psq_dml(4), psq_dml(5);
 SELECT psq_dml(4), psq_dml(5);
-SELECT pj_expect('psq_dml(integer)', 'declined:statement:SQL statement') \gset
+SELECT pj_expect('psq_dml(integer)', 'declined:relation:trigger') \gset
 SELECT * FROM psq_trg ORDER BY a;
 
 -- privileges are the executor's: a table, and a callee, taken away
