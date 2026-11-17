@@ -92,6 +92,9 @@ typedef struct PjCtx
 								 * site needs none, its variant has no deopt
 								 * point */
 	bool		spi;			/* SPI is connected, for the SQL statements */
+	bool		xchecks;		/* the extra checks below are read */
+	int			xrows;			/* too_many_rows: 0, WARNING or ERROR */
+	int			xcols;			/* strict_multi_assignment, as above */
 	bool		isnull;			/* of the last boxed evaluation */
 	uint64		serial;			/* of the call; tells a level's next call */
 	Oid			user;			/* the user and the state of the catalogs the */
@@ -144,6 +147,14 @@ typedef struct PjSql
 {
 	struct PLpgSQL_expr *expr;
 	PjSqlKind	kind;
+	bool		into;			/* the statement has an INTO ... */
+	bool		strict;			/* ... STRICT */
+	bool		mod;			/* a command that writes: as STRICT */
+	int			ntargets;		/* the variables of the INTO, by datum */
+	int		   *targets;
+	int			ncols;			/* the columns of the result when admitted */
+	Oid		   *coltypes;
+	int32	   *coltypmods;
 	Bitmapset  *paramnos;		/* the datums its parameter list holds */
 	CachedPlanSource *plansource;
 	int			generation;		/* of the plansource when we last looked */
@@ -190,6 +201,7 @@ typedef struct PjExpr
 	bool		into_sql;		/* true, when the expression is the query of a
 								 * SELECT INTO */
 	PjSqlKind	sql_kind;		/* not PJ_SQL_NONE: a statement for SPI */
+	struct PLpgSQL_stmt_execsql *stmt;	/* its statement, if it has an INTO */
 	PjSql	   *sql;			/* PJ_H1_SQL only, in the harvest context */
 	/* READY only, copies in the harvest context */
 	Expr	   *tree;
@@ -274,6 +286,8 @@ typedef struct PjSlot
 	Oid			user;			/* the state was checked for ... */
 	uint64		epoch;			/* ... at this state of the catalogs */
 	ParamListInfo sql_params;	/* of an SQL statement: its members only */
+	struct PjSqlOut *sql_out;	/* the values for its INTO targets */
+	bool		sql_converted;	/* a value was converted: per-tuple memory */
 } PjSlot;
 
 /*
@@ -350,6 +364,9 @@ extern const char *plllvm_pj_sql_harvest(struct PLpgSQL_function *func,
 										 PjHarvest *h, PjExpr *pe);
 extern bool plllvm_pj_sql_guard(PjSql *sql);
 extern void plllvm_pj_sql_finish(PjCtx *ctx);
+extern Datum plllvm_pj_convert(PjCtx *ctx, Datum value, bool *isnull,
+							   Oid srctype, int32 srctypmod,
+							   Oid dsttype, int32 dsttypmod);
 
 /* plllvm_pj_boxed.c */
 extern PjLevel *plllvm_pj_level(PjCtx *ctx);
@@ -374,6 +391,9 @@ typedef enum PjEmitResult
 extern PjEmitResult plllvm_pj_emit(struct PLpgSQL_function *func, PjHarvest *h,
 								   PjVariant *v);
 extern const char *plllvm_pj_stmt_typename(void *stmt);
+extern struct PjCast *plllvm_pj_cast_get(Oid srctype, int32 srctypmod,
+										 Oid dsttype, int32 dsttypmod,
+										 Expr **tree);
 extern int	plllvm_pj_err_condition(const char *condname);
 extern struct PLpgSQL_type *plllvm_pj_build_datatype(Oid typid, int32 typmod,
 													 Oid collation);

@@ -535,12 +535,24 @@ SELECT lookup_k(0), lookup_k(1), lookup_k(7);
 SELECT lookup_k(0), lookup_k(1), lookup_k(7);
 SELECT lookup_k(200);
 SELECT lookup_k(200);
+SELECT pj_expect('lookup_k(integer)', 'compiled') \gset
 SELECT lk_reset();
 SELECT lookup_k(200);
 SELECT lk_reset();
 SELECT lookup_k(200);
 SELECT lk_reset();
 SELECT lookup_k(200), lookup_k(7);
+SELECT pj_expect('lookup_k(integer)', 'compiled') \gset
+-- after the reset: compiled, with both statements of each of the 200 rounds
+-- run by SPI, and no translation
+SELECT lk_reset();
+SELECT pj_mark() \gset
+SELECT lookup_k(200);
+SELECT pj_delta(1, 0, NULL, 0, 0, NULL, 400);
+SELECT lk_reset();
+SELECT pj_mark() \gset
+SELECT lookup_k(200);
+SELECT pj_delta(1, 0, NULL, 0, 0, NULL, 400);
 
 CREATE FUNCTION mix_k(n integer, k integer) RETURNS double precision
 LANGUAGE :pj_lang AS $$
@@ -564,5 +576,6 @@ SELECT mix_k(10, 1), mix_k(10, 0);
 SELECT mix_k(10, 1), mix_k(10, 0);
 SELECT mix_k(100, 8), mix_k(100, 64), mix_k(100, 1), mix_k(100, 0);
 SELECT mix_k(100, 8), mix_k(100, 64), mix_k(100, 1), mix_k(100, 0);
+SELECT pj_expect('mix_k(integer,integer)', 'compiled') \gset
 SELECT lk_reset();
 SELECT mix_k(100, 8);

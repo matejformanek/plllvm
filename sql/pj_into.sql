@@ -2,7 +2,8 @@
 -- pj_into: SELECT expression INTO a variable
 --
 -- PL/pgSQL evaluates such a query as an expression, without SPI, when it is
--- one.  Whatever else is SELECT INTO goes to SPI and is not compiled.
+-- one.  Whatever else is SELECT INTO goes to SPI, which compiled code calls on
+-- the plan of PL/pgSQL (pj_sql_into).
 --
 \getenv pj_lang PJ_LANG
 \if :{?pj_lang}
@@ -217,7 +218,7 @@ SELECT pj_expect('pi_priv(integer)', 'interpreted:execute') \gset
 SELECT pi_priv(8);
 SELECT pj_expect('pi_priv(integer)', 'compiled') \gset
 
--- not an expression: a FROM, two targets, a record, no INTO; these stay SPI's
+-- not an expression: a FROM, two targets, a record, no INTO; these are SPI's
 CREATE TABLE pi_t(a int);
 INSERT INTO pi_t VALUES (1), (2);
 CREATE FUNCTION pi_from(n int) RETURNS int LANGUAGE :pj_lang AS $$
@@ -247,14 +248,15 @@ SELECT pi_from(1), pi_two(1), pi_rec(1);
 SELECT pi_from(1), pi_two(1), pi_rec(1);
 SELECT pi_sql(1);  -- fail
 SELECT pi_sql(1);  -- fail
-SELECT pj_expect('pi_from(integer)', 'declined:not simple') \gset
-SELECT pj_expect('pi_two(integer)', 'declined:statement:SQL statement') \gset
+SELECT pj_expect('pi_from(integer)', 'compiled') \gset
+SELECT pj_expect('pi_two(integer)', 'compiled') \gset
 SELECT pj_expect('pi_rec(integer)', 'declined:datum:record') \gset
 -- no INTO: the statement runs through SPI, and fails there as PL/pgSQL's does
 SELECT pj_expect('pi_sql(integer)', 'compiled') \gset
 
 -- a query with a FROM in an arm that has not run is not planned yet: the
--- function is translated, runs, and is declined once the arm has run
+-- function is translated, runs, and is translated again, with the statement
+-- for SPI, once the arm has run
 CREATE FUNCTION pi_late(n int) RETURNS int LANGUAGE :pj_lang AS $$
 DECLARE a int := 0;
 BEGIN
@@ -269,7 +271,7 @@ SELECT pj_expect('pi_late(integer)', 'compiled') \gset
 SELECT pi_late(1000);
 SELECT pj_expect('pi_late(integer)', 'deopt') \gset
 SELECT pi_late(1), pi_late(1000);
-SELECT pj_expect('pi_late(integer)', 'declined:not simple') \gset
+SELECT pj_expect('pi_late(integer)', 'compiled') \gset
 
 -- with a call that has an effect, it waits for the arm instead
 CREATE FUNCTION pi_wait(n int) RETURNS int LANGUAGE :pj_lang AS $$
@@ -285,7 +287,7 @@ SELECT pi_wait(1), pi_wait(2);
 SELECT pj_expect('pi_wait(integer)', 'waiting') \gset
 
 -- a query that was not simple when it was planned stays so: PL/pgSQL runs it
--- through SPI at every call, the replaced callee included
+-- through SPI at every call, the replaced callee included, and so do we
 CREATE FUNCTION pi_callee2() RETURNS int LANGUAGE sql IMMUTABLE AS $$ SELECT 1 / 0 $$;
 CREATE FUNCTION pi_simplecaller() RETURNS int LANGUAGE :pj_lang AS $$
 DECLARE a int;
@@ -298,7 +300,7 @@ CREATE OR REPLACE FUNCTION pi_callee2() RETURNS int LANGUAGE sql IMMUTABLE AS $$
 SELECT pi_simplecaller();
 SELECT pi_simplecaller();
 SELECT pi_simplecaller();
-SELECT pj_expect('pi_simplecaller()', 'declined:not simple') \gset
+SELECT pj_expect('pi_simplecaller()', 'compiled') \gset
 
 -- the memory of a text target is flat inside one call, measured inside it.
 -- The copy of a target is freed by the next assignment, so a leak of the

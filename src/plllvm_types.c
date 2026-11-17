@@ -819,6 +819,7 @@ void	   *referenced_functions[] =
 	plllvm_pj_site_done,
 	plllvm_pj_sql_params,
 	plllvm_pj_sql,
+	plllvm_pj_sql_out,
 	plllvm_pj_sql_end,
 	plllvm_keep,
 	plllvm_scratch_reset,

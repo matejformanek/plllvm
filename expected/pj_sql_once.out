@@ -353,3 +353,183 @@ SELECT nextval('pso_s1') AS next_value;
           2
 (1 row)
 
+-- SELECT INTO: a column whose type changes between calls is converted to the
+-- variable's type by the cast PL/pgSQL would use.  The call that sees the new
+-- type converts at run time and finds the statement no longer what it was
+-- admitted as (sql_stale 1); the next call goes to PL/pgSQL, the one after is
+-- translated again and declined, the cast being none no more.
+CREATE TABLE pso_alt (a int, b int, c int);
+INSERT INTO pso_alt VALUES (1, 10, 100), (2, 20, 200);
+CREATE FUNCTION pso_l4(n int) RETURNS int LANGUAGE plpgsql_jit AS $$
+DECLARE x int;
+BEGIN
+  SELECT b INTO x FROM pso_alt WHERE a = n;
+  RETURN x;
+END $$;
+CREATE FUNCTION pso_l4b(n int) RETURNS int LANGUAGE plpgsql_jit AS $$
+DECLARE x int;
+BEGIN
+  SELECT c INTO x FROM pso_alt WHERE a = n;
+  RETURN x;
+END $$;
+SELECT pso_l4(1), pso_l4(2), pso_l4(3);
+ pso_l4 | pso_l4 | pso_l4 
+--------+--------+--------
+     10 |     20 |       
+(1 row)
+
+SELECT pso_l4(1), pso_l4(2), pso_l4(3);
+ pso_l4 | pso_l4 | pso_l4 
+--------+--------+--------
+     10 |     20 |       
+(1 row)
+
+SELECT pso_l4b(1), pso_l4b(2), pso_l4b(3);
+ pso_l4b | pso_l4b | pso_l4b 
+---------+---------+---------
+     100 |     200 |        
+(1 row)
+
+SELECT pso_l4b(1), pso_l4b(2), pso_l4b(3);
+ pso_l4b | pso_l4b | pso_l4b 
+---------+---------+---------
+     100 |     200 |        
+(1 row)
+
+SELECT pj_expect('pso_l4(integer)', 'compiled') \gset
+SELECT pj_expect('pso_l4b(integer)', 'compiled') \gset
+ALTER TABLE pso_alt ALTER COLUMN b TYPE text USING b::text;
+ALTER TABLE pso_alt ALTER COLUMN c TYPE bigint;
+SELECT pj_mark() \gset
+SELECT pso_l4(1);
+ pso_l4 
+--------
+     10
+(1 row)
+
+SELECT pj_delta(1, 0, NULL, 0, 0, NULL, 1, 1, 1);
+ pj_delta 
+----------
+ 
+(1 row)
+
+SELECT pso_l4(2);
+ pso_l4 
+--------
+     20
+(1 row)
+
+SELECT pj_expect('pso_l4(integer)', 'interpreted:guard miss') \gset
+SELECT pso_l4(2), pso_l4(3);
+ pso_l4 | pso_l4 
+--------+--------
+     20 |       
+(1 row)
+
+SELECT pj_expect('pso_l4(integer)', 'declined:cast') \gset
+SELECT pj_mark() \gset
+SELECT pso_l4b(2);
+ pso_l4b 
+---------
+     200
+(1 row)
+
+SELECT pj_delta(1, 0, NULL, 0, 0, NULL, 1, 1, 1);
+ pj_delta 
+----------
+ 
+(1 row)
+
+SELECT pso_l4b(1), pso_l4b(2), pso_l4b(3);
+ pso_l4b | pso_l4b | pso_l4b 
+---------+---------+---------
+     100 |     200 |        
+(1 row)
+
+SELECT pj_expect('pso_l4b(integer)', 'declined:cast') \gset
+-- a conversion that fails, in the call that converts: PL/pgSQL's error
+CREATE TABLE pso_alt2 (a int, b int);
+INSERT INTO pso_alt2 VALUES (1, 10);
+CREATE FUNCTION pso_l4c(n int) RETURNS int LANGUAGE plpgsql_jit AS $$
+DECLARE x int;
+BEGIN
+  SELECT b INTO x FROM pso_alt2 WHERE a = n;
+  RETURN x;
+END $$;
+SELECT pso_l4c(1), pso_l4c(1), pso_l4c(1);
+ pso_l4c | pso_l4c | pso_l4c 
+---------+---------+---------
+      10 |      10 |      10
+(1 row)
+
+SELECT pj_expect('pso_l4c(integer)', 'compiled') \gset
+ALTER TABLE pso_alt2 ALTER COLUMN b TYPE text USING b::text;
+INSERT INTO pso_alt2 VALUES (2, 'x');
+SELECT pso_try('SELECT pso_l4c(2)');
+                     pso_try                      
+--------------------------------------------------
+ 22P02 invalid input syntax for type integer: "x"
+(1 row)
+
+SELECT pso_l4c(1);
+ pso_l4c 
+---------
+      10
+(1 row)
+
+SELECT pso_l4c(1);
+ pso_l4c 
+---------
+      10
+(1 row)
+
+-- the extra checks are read at the first INTO of a call: a function that the
+-- statement calls and that sets them is not seen by the INTO after it.
+-- PL/pgSQL reads them at each statement, and raises P0003 at the second one;
+-- the compiled call answers, and the next call, which reads them at its first
+-- INTO, raises there.
+CREATE FUNCTION pso_cfg(v text) RETURNS int LANGUAGE plpgsql STABLE AS $$
+BEGIN PERFORM set_config('plpgsql.extra_errors', v, false); RETURN 1; END $$;
+CREATE FUNCTION pso_xc(n int) RETURNS int LANGUAGE plpgsql_jit AS $$
+DECLARE x int; y int; c int;
+BEGIN
+  SELECT a INTO x FROM pso_t WHERE a > n;
+  SELECT pso_cfg('too_many_rows') INTO c FROM pso_one;
+  SELECT a INTO y FROM pso_t WHERE a > n;
+  RETURN x + y;
+END $$;
+SELECT pso_try('SELECT pso_xc(19)');
+ pso_try 
+---------
+ ok
+(1 row)
+
+RESET plpgsql.extra_errors;
+SELECT pso_try('SELECT pso_xc(19)');
+ pso_try 
+---------
+ ok
+(1 row)
+
+RESET plpgsql.extra_errors;
+SELECT pso_try('SELECT pso_xc(19)');
+ pso_try 
+---------
+ ok
+(1 row)
+
+RESET plpgsql.extra_errors;
+SELECT pj_expect('pso_xc(integer)', 'compiled') \gset
+SELECT pso_try('SELECT pso_xc(3)');
+ pso_try 
+---------
+ ok
+(1 row)
+
+SELECT pso_try('SELECT pso_xc(3)');
+                pso_try                 
+----------------------------------------
+ P0003 query returned more than one row
+(1 row)
+
+RESET plpgsql.extra_errors;

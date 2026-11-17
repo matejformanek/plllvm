@@ -669,6 +669,7 @@ SELECT lookup_k(200);
  531839.02/29/22
 (1 row)
 
+SELECT pj_expect('lookup_k(integer)', 'compiled') \gset
 SELECT lk_reset();
  lk_reset 
 ----------
@@ -703,6 +704,47 @@ SELECT lookup_k(200), lookup_k(7);
     lookup_k     |   lookup_k   
 -----------------+--------------
  531839.02/29/22 | 17318.69/3/2
+(1 row)
+
+SELECT pj_expect('lookup_k(integer)', 'compiled') \gset
+-- after the reset: compiled, with both statements of each of the 200 rounds
+-- run by SPI, and no translation
+SELECT lk_reset();
+ lk_reset 
+----------
+ 
+(1 row)
+
+SELECT pj_mark() \gset
+SELECT lookup_k(200);
+    lookup_k     
+-----------------
+ 531839.02/29/22
+(1 row)
+
+SELECT pj_delta(1, 0, NULL, 0, 0, NULL, 400);
+ pj_delta 
+----------
+ 
+(1 row)
+
+SELECT lk_reset();
+ lk_reset 
+----------
+ 
+(1 row)
+
+SELECT pj_mark() \gset
+SELECT lookup_k(200);
+    lookup_k     
+-----------------
+ 531839.02/29/22
+(1 row)
+
+SELECT pj_delta(1, 0, NULL, 0, 0, NULL, 400);
+ pj_delta 
+----------
+ 
 (1 row)
 
 CREATE FUNCTION mix_k(n integer, k integer) RETURNS double precision
@@ -747,6 +789,7 @@ SELECT mix_k(100, 8), mix_k(100, 64), mix_k(100, 1), mix_k(100, 0);
  730.9327445896662 | 273.8027445896678 | 5514.57274458967 | 256.4427445896674
 (1 row)
 
+SELECT pj_expect('mix_k(integer,integer)', 'compiled') \gset
 SELECT lk_reset();
  lk_reset 
 ----------

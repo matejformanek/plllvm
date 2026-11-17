@@ -50,6 +50,7 @@ END $$;
 SELECT psi_one_t(3), psi_one_t(21), psi_one_t(99);
 SELECT psi_one_t(3), psi_one_t(21), psi_one_t(99);
 SELECT psi_one_t(3), psi_one_t(21), psi_one_t(99);
+SELECT pj_expect('psi_one_t(integer)', 'compiled') \gset
 
 CREATE FUNCTION psi_three(n int) RETURNS text LANGUAGE :pj_lang AS $$
 DECLARE v_c numeric(7,2); v_d varchar(12); v_a int; v_e int[]; v_f float8;
@@ -63,6 +64,7 @@ END $$;
 SELECT psi_three(4), psi_three(21), psi_three(99);
 SELECT psi_three(4), psi_three(21), psi_three(99);
 SELECT psi_three(4), psi_three(21), psi_three(99);
+SELECT pj_expect('psi_three(integer)', 'compiled') \gset
 
 -- an argument is a target, by value and by reference
 CREATE FUNCTION psi_arg(n int, t text, arr int[]) RETURNS text
@@ -76,6 +78,7 @@ END $$;
 SELECT psi_arg(2, 'x', ARRAY[0]), psi_arg(20, 'x', ARRAY[0]), psi_arg(30, 'x', ARRAY[0]);
 SELECT psi_arg(2, 'x', ARRAY[0]), psi_arg(20, 'x', ARRAY[0]), psi_arg(30, 'x', ARRAY[0]);
 SELECT psi_arg(2, 'x', ARRAY[0]), psi_arg(20, 'x', ARRAY[0]), psi_arg(30, 'x', ARRAY[0]);
+SELECT pj_expect('psi_arg(integer,text,integer[])', 'compiled') \gset
 
 -- a target that the statement reads, and two targets that are one variable
 CREATE FUNCTION psi_self(n int) RETURNS text LANGUAGE :pj_lang AS $$
@@ -88,6 +91,7 @@ END $$;
 SELECT psi_self(3), psi_self(20), psi_self(21);
 SELECT psi_self(3), psi_self(20), psi_self(21);
 SELECT psi_self(3), psi_self(20), psi_self(21);
+SELECT pj_expect('psi_self(integer)', 'compiled') \gset
 
 -- more or fewer rows than one, without STRICT: the first row, by the order
 CREATE FUNCTION psi_many(n int) RETURNS text LANGUAGE :pj_lang AS $$
@@ -101,6 +105,7 @@ END $$;
 SELECT psi_many(5), psi_many(19), psi_many(100);
 SELECT psi_many(5), psi_many(19), psi_many(100);
 SELECT psi_many(5), psi_many(19), psi_many(100);
+SELECT pj_expect('psi_many(integer)', 'compiled') \gset
 
 -- NOT NULL targets: no row and a NULL value are the same error
 CREATE FUNCTION psi_nn(n int) RETURNS int LANGUAGE :pj_lang AS $$
@@ -118,6 +123,7 @@ SELECT psi_try('SELECT psi_nn(99)');
 SELECT psi_try('SELECT psi_nn(21)');
 SELECT psi_try('SELECT psi_nn(21)');
 SELECT psi_nn(3);
+SELECT pj_expect('psi_nn(integer)', 'compiled') \gset
 
 -- STRICT: exactly one row, and the hint
 CREATE FUNCTION psi_strict(n int) RETURNS text LANGUAGE :pj_lang AS $$
@@ -144,6 +150,8 @@ SELECT psi_try('SELECT psi_strict2(5)');
 SELECT psi_try('SELECT psi_strict2(5)');
 SELECT psi_try('SELECT psi_strict2(50)');
 SELECT psi_strict2(20);
+SELECT pj_expect('psi_strict(integer)', 'compiled') \gset
+SELECT pj_expect('psi_strict2(integer)', 'compiled') \gset
 
 -- FOUND is set before the targets: a target that is FOUND wins
 CREATE FUNCTION psi_found(n int) RETURNS text LANGUAGE :pj_lang AS $$
@@ -161,6 +169,7 @@ END $$;
 SELECT psi_found(1), psi_found(2);
 SELECT psi_found(1), psi_found(2);
 SELECT psi_found(1), psi_found(2);
+SELECT pj_expect('psi_found(integer)', 'compiled') \gset
 
 -- the extra checks are read at each call: set between calls they are honoured
 CREATE FUNCTION psi_xc(n int) RETURNS text LANGUAGE :pj_lang AS $$
@@ -174,6 +183,7 @@ END $$;
 SELECT psi_xc(10), psi_xc(11);
 SELECT psi_xc(10), psi_xc(11);
 SELECT psi_xc(10), psi_xc(11);
+SELECT pj_expect('psi_xc(integer)', 'compiled') \gset
 SET plpgsql.extra_warnings = 'too_many_rows';
 SELECT psi_xc(10), psi_xc(11);
 SET plpgsql.extra_warnings = 'strict_multi_assignment';
@@ -195,6 +205,7 @@ SELECT psi_xc(10), psi_xc(11);
 RESET plpgsql.extra_warnings;
 RESET plpgsql.extra_errors;
 SELECT psi_xc(10), psi_xc(11);
+SELECT pj_expect('psi_xc(integer)', 'compiled') \gset
 -- STRICT is strict with or without the check, and a warning keeps the row
 CREATE FUNCTION psi_xc2(n int) RETURNS int LANGUAGE :pj_lang AS $$
 DECLARE x int;
@@ -210,6 +221,7 @@ SELECT psi_try('SELECT psi_xc2(3)');
 SELECT psi_xc2(20);
 RESET plpgsql.extra_errors;
 RESET plpgsql.extra_warnings;
+SELECT pj_expect('psi_xc2(integer)', 'compiled') \gset
 
 -- the conversion of the value: no cast is what compiles, and a cast of the
 -- statement is PL/pgSQL's
@@ -225,6 +237,7 @@ END $$;
 SELECT psi_cast_ok(5), psi_cast_ok(21), psi_cast_ok(0);
 SELECT psi_cast_ok(5), psi_cast_ok(21), psi_cast_ok(0);
 SELECT psi_cast_ok(5), psi_cast_ok(21), psi_cast_ok(0);
+SELECT pj_expect('psi_cast_ok(integer)', 'compiled') \gset
 CREATE FUNCTION psi_cast_int(n int) RETURNS int LANGUAGE :pj_lang AS $$
 DECLARE c int;
 BEGIN
@@ -260,6 +273,10 @@ SELECT psi_cast_num(3), psi_cast_num(1);
 SELECT psi_cast_num(3), psi_cast_num(1);
 SELECT psi_try('SELECT psi_cast_num(20)');
 SELECT psi_try('SELECT psi_cast_num(20)');
+SELECT pj_expect('psi_cast_int(integer)', 'declined:cast') \gset
+SELECT pj_expect('psi_cast_text(integer)', 'declined:cast') \gset
+SELECT pj_expect('psi_cast_short(integer)', 'declined:cast') \gset
+SELECT pj_expect('psi_cast_num(integer)', 'declined:cast') \gset
 
 -- INTO of a command that has no result, and a record or a domain, are not
 -- compiled; their errors and values are PL/pgSQL's
@@ -282,6 +299,35 @@ SELECT psi_try('SELECT psi_domain(20)');
 SELECT psi_try('SELECT psi_domain(20)');
 SELECT psi_rec(2), psi_rec(3);
 SELECT psi_rec(2), psi_rec(3);
+SELECT pj_expect('psi_domain(integer)', 'declined:datum:psi_dom') \gset
+SELECT pj_expect('psi_rec(integer)', 'declined:datum:record') \gset
+
+-- #print_strict_params adds a DETAIL we do not make: the function is declined
+CREATE FUNCTION psi_psp(n int, t text) RETURNS int LANGUAGE :pj_lang AS $$
+#print_strict_params on
+DECLARE x int;
+BEGIN
+  SELECT a INTO STRICT x FROM psi_t WHERE a > n AND b <> t;
+  RETURN x;
+END $$;
+SELECT psi_psp(19, 'x'), psi_psp(19, 'x');
+SELECT psi_try('SELECT psi_psp(5, ''x'')');
+SELECT psi_try('SELECT psi_psp(5, ''x'')');
+SELECT psi_try('SELECT psi_psp(50, ''x'')');
+SELECT pj_expect('psi_psp(integer,text)', 'declined:print_strict_params') \gset
+
+-- under use_column a new analysis may bind a name to a variable: declined,
+-- for a query that is no expression as for PERFORM
+CREATE FUNCTION psi_col(n int) RETURNS int LANGUAGE :pj_lang AS $$
+#variable_conflict use_column
+DECLARE x int;
+BEGIN
+  SELECT a INTO x FROM psi_t WHERE a = n;
+  RETURN x;
+END $$;
+SELECT psi_col(3), psi_col(4);
+SELECT psi_col(3), psi_col(4);
+SELECT pj_expect('psi_col(integer)', 'declined:variable_conflict') \gset
 
 -- GET DIAGNOSTICS stays PL/pgSQL's; the row count it reads is the statement's
 CREATE FUNCTION psi_diag(n int) RETURNS text LANGUAGE :pj_lang AS $$
@@ -293,6 +339,7 @@ BEGIN
 END $$;
 SELECT psi_diag(5), psi_diag(20), psi_diag(30);
 SELECT psi_diag(5), psi_diag(20), psi_diag(30);
+SELECT pj_expect('psi_diag(integer)', 'declined:statement:GET DIAGNOSTICS') \gset
 
 -- statements that write, and a data-modifying CTE, are not compiled: the
 -- trigger on the table is PL/pgSQL's to run, and the table is as stock's
@@ -329,20 +376,27 @@ SELECT psi_ins(10), psi_ins(11);
 SELECT psi_ins(10), psi_ins(11);
 SELECT psi_ins(12);
 SELECT * FROM psi_w ORDER BY a, b;
+SELECT pj_expect('psi_cte_trg(integer)', 'declined:statement:SQL statement') \gset
+SELECT pj_expect('psi_cte_plain(integer)', 'declined:statement:SQL statement') \gset
+SELECT pj_expect('psi_ins(integer)', 'declined:statement:SQL statement') \gset
 
 -- what happens to the plan between calls changes no value and leaves no call
 CREATE TABLE psi_b (a int, b text);
 INSERT INTO psi_b SELECT i, 'v' || i FROM generate_series(1, 50) i;
 ANALYZE psi_b;
+-- (it returns a variable: an expression of its own would be stale after
+-- DISCARD PLANS, and the call would be PL/pgSQL's)
 CREATE FUNCTION psi_b(n int) RETURNS text LANGUAGE :pj_lang AS $$
 DECLARE t text; x int;
 BEGIN
   SELECT b, a INTO t, x FROM psi_b WHERE a = n;
-  RETURN coalesce(t, '-') || coalesce(x::text, '-');
+  RETURN t;
 END $$;
 SELECT psi_b(1), psi_b(2), psi_b(99);
 SELECT psi_b(1), psi_b(2), psi_b(99);
 SELECT psi_b(1), psi_b(2), psi_b(99);
+SELECT pj_expect('psi_b(integer)', 'compiled') \gset
+SELECT pj_mark() \gset
 TRUNCATE psi_b;
 SELECT psi_b(1), psi_b(2);
 INSERT INTO psi_b SELECT i, 'v' || i FROM generate_series(1, 50) i;
@@ -354,11 +408,14 @@ DISCARD PLANS;
 SELECT psi_b(3), psi_b(99);
 DROP INDEX psi_b_a;
 SELECT psi_b(3), psi_b(99);
+SELECT pj_expect('psi_b(integer)', 'compiled') \gset
+SELECT pj_delta(10, 0, NULL, 0, 0);
 -- a column added, one dropped that the statement does not name
 ALTER TABLE psi_b ADD COLUMN c int DEFAULT 7;
 SELECT psi_b(3), psi_b(99);
 ALTER TABLE psi_b DROP COLUMN c;
 SELECT psi_b(3), psi_b(99);
+SELECT pj_expect('psi_b(integer)', 'compiled') \gset
 -- a column of the statement is renamed: PL/pgSQL's error, then as before
 ALTER TABLE psi_b RENAME COLUMN b TO bb;
 SELECT psi_try('SELECT psi_b(3)');
@@ -380,6 +437,7 @@ END $$;
 SELECT psi_alt(1), psi_alt(2), psi_alt(3);
 SELECT psi_alt(1), psi_alt(2), psi_alt(3);
 SELECT psi_alt(1), psi_alt(2), psi_alt(3);
+SELECT pj_expect('psi_alt(integer)', 'compiled') \gset
 ALTER TABLE psi_alt ALTER COLUMN b TYPE bigint;
 SELECT psi_alt(1), psi_alt(2), psi_alt(3);
 SELECT psi_alt(1), psi_alt(2), psi_alt(3);
@@ -435,6 +493,7 @@ END $$;
 SELECT psi_recur(3), psi_recur(4);
 SELECT psi_recur(20), psi_recur(3);
 SELECT psi_recur(20), psi_recur(3);
+SELECT pj_expect('psi_recur(integer)', 'compiled') \gset
 
 -- a callee that says when it runs: the statement is its caller's, once
 CREATE FUNCTION psi_noisy(n int) RETURNS int LANGUAGE plpgsql STABLE AS $$
@@ -449,6 +508,7 @@ END $$;
 SELECT psi_callee(1);
 SELECT psi_callee(2);
 SELECT psi_callee(3);
+SELECT pj_expect('psi_callee(integer)', 'compiled') \gset
 
 -- privileges are the executor's: a table, and a column, taken away
 CREATE ROLE regress_psi_u;
@@ -467,6 +527,7 @@ SELECT psi_priv(1), psi_priv(3);
 SELECT psi_priv(1), psi_priv(3);
 SELECT psi_priv(1), psi_priv(3);
 RESET ROLE;
+SELECT pj_expect('psi_priv(integer)', 'compiled') \gset
 REVOKE SELECT ON psi_priv FROM regress_psi_u;
 GRANT SELECT (a) ON psi_priv TO regress_psi_u;
 SET ROLE regress_psi_u;
@@ -495,10 +556,14 @@ END $$;
 SELECT psi_wait(3);
 SELECT psi_wait(3);
 SELECT psi_wait(3);
+SELECT pj_expect('psi_wait(integer)', 'waiting') \gset
+SELECT pj_mark() \gset
 SELECT psi_wait(200);
 SELECT psi_wait(200);
 SELECT psi_wait(3);
 SELECT psi_wait(200);
+SELECT pj_expect('psi_wait(integer)', 'compiled') \gset
+SELECT pj_delta(NULL, NULL, NULL, 0, NULL);
 
 -- a loop of statements: the values, and the memory read inside the loop, which
 -- the tuple tables must not grow
@@ -528,7 +593,13 @@ SELECT psi_loop(3, 1) > 0, psi_loop(3, 2) > 0;
 SELECT psi_loop(3, 1) > 0, psi_loop(3, 2) > 0;
 SELECT psi_loop(1000, 1000) AS m1 \gset
 SELECT psi_loop(20000, 20000) - :m1 < 262144 AS flat;
+SELECT pj_expect('psi_loop(integer,integer)', 'compiled') \gset
 SELECT psi_loop_sum(10), psi_loop_sum(10), psi_loop_sum(5000);
+SELECT pj_expect('psi_loop_sum(integer)', 'compiled') \gset
+-- the statements ran in compiled code, in one call
+SELECT pj_mark() \gset
+SELECT psi_loop_sum(3000);
+SELECT pj_delta(1, 0, NULL, 0, 0, NULL, 3000);
 -- custom plans, which move the generation of the plan at every execution
 SET plan_cache_mode = force_custom_plan;
 SELECT psi_loop(1000, 1000) AS m1 \gset
@@ -559,6 +630,8 @@ SELECT psi_g3b(1, 1);
 SELECT psi_g3b(1, 1);
 SELECT psi_g3b(1, 1);
 SELECT psi_g3b(0, 1);
+SELECT pj_expect('psi_g3(integer,integer)', 'compiled') \gset
+SELECT pj_expect('psi_g3b(integer,integer)', 'compiled') \gset
 
 -- a query under a parallel setting: INTO asks for one or two rows, so no
 -- worker is started; the values are the same
@@ -583,6 +656,7 @@ RESET min_parallel_table_scan_size;
 RESET parallel_tuple_cost;
 RESET parallel_setup_cost;
 RESET debug_parallel_query;
+SELECT pj_expect('psi_par(integer,text)', 'compiled') \gset
 
 DROP OWNED BY regress_psi_u;
 DROP ROLE regress_psi_u;

@@ -177,8 +177,6 @@ static void call_emit(plllvm_expr_env *base, plllvm_ir *ir, const Node *node,
 					  const plllvm_value *args, int nargs, plllvm_value *out);
 static const char *bare_emit(plllvm_expr_env *base, plllvm_ir *ir, Oid funcid,
 							 const char *const *args, int nargs);
-static PjCast *cast_get(Oid srctype, int32 srctypmod, Oid dsttype,
-						int32 dsttypmod, Expr **tree);
 static bool cast_pinned(Oid srctype, Oid dsttype);
 static Const *cast_fold(Expr *cast_tree, const Const *src, Oid dsttype);
 static bool cast_has_io(Node *node, void *context);
@@ -216,7 +214,8 @@ static void emit_assign(PjEmit *em, PLpgSQL_stmt_assign *stmt);
 static void emit_assign_expr(PjEmit *em, PLpgSQL_var *var, int dno,
 							 const void *owner);
 static void emit_execsql(PjEmit *em, PLpgSQL_stmt_execsql *stmt);
-static void emit_sql(PjEmit *em, PLpgSQL_expr *expr);
+static void emit_sql(PjEmit *em, PLpgSQL_expr *expr,
+					 PLpgSQL_stmt_execsql *stmt);
 static void emit_deopt(PjEmit *em, int index);
 static void emit_case(PjEmit *em, PLpgSQL_stmt_case *stmt);
 static void case_discard(PjEmit *em, PLpgSQL_var *var);
@@ -505,26 +504,40 @@ walk_stmt(PjScopeWalk *w, PLpgSQL_stmt *stmt)
 				if (!sql->into)
 					return scope_sql(w, sql->sqlstmt, PJ_SQL_EXECSQL);
 
-				/*
-				 * Else only what PL/pgSQL runs without SPI: a query into one
-				 * variable.  Whether the query is a simple expression is for
-				 * its plan to say.
-				 */
+				/* the variables of an INTO are scalars we keep in a slot */
 				if (sql->target == NULL ||
-					sql->target->dtype != PLPGSQL_DTYPE_ROW ||
-					((PLpgSQL_row *) sql->target)->nfields != 1)
-					return psprintf("statement:%s",
-									plllvm_pj_stmt_typename(stmt));
+					sql->target->dtype != PLPGSQL_DTYPE_ROW)
+					return "datum:record";
 				row = (PLpgSQL_row *) sql->target;
-				reason = var_reason(func, row->varnos[0]);
-				if (reason != NULL)
-					return reason;
-				if (bms_is_member(row->varnos[0], w->case_vars))
-					return "datum:case variable";
-				var = (PLpgSQL_var *) func->datums[row->varnos[0]];
-				scope_expr(w, sql->sqlstmt, sql->sqlstmt,
-						   var->datatype->typoid, var->datatype->atttypmod);
-				((PjExpr *) llast(w->scope->exprs))->into_sql = true;
+				for (int i = 0; i < row->nfields; i++)
+				{
+					reason = var_reason(func, row->varnos[i]);
+					if (reason != NULL)
+						return reason;
+					if (bms_is_member(row->varnos[i], w->case_vars))
+						return "datum:case variable";
+				}
+
+				/*
+				 * A query into one variable that PL/pgSQL evaluates as an
+				 * expression, if its plan says it is one, runs without SPI;
+				 * which it is, is for classify() to say.  The others are
+				 * SPI's.
+				 */
+				if (row->nfields == 1)
+				{
+					var = (PLpgSQL_var *) func->datums[row->varnos[0]];
+					scope_expr(w, sql->sqlstmt, sql->sqlstmt,
+							   var->datatype->typoid, var->datatype->atttypmod);
+					((PjExpr *) llast(w->scope->exprs))->into_sql = true;
+				}
+				else
+				{
+					reason = scope_sql(w, sql->sqlstmt, PJ_SQL_EXECSQL);
+					if (reason != NULL)
+						return reason;
+				}
+				((PjExpr *) llast(w->scope->exprs))->stmt = sql;
 				return NULL;
 			}
 
@@ -749,6 +762,17 @@ plllvm_pj_classify(PjScope *scope)
 		{
 			pe->h1 = PJ_H1_READY;
 			continue;
+		}
+
+		/*
+		 * A query into one variable is an expression if its plan says so, and
+		 * the interpreter's own SPI statement if not.  Once planned it stays
+		 * what it is (exec_simple_check_plan() runs at the prepare only).
+		 */
+		if (pe->into_sql && expr->plan != NULL && expr->expr_simple_expr == NULL)
+		{
+			pe->into_sql = false;
+			pe->sql_kind = PJ_SQL_EXECSQL;
 		}
 
 		if (pe->sql_kind != PJ_SQL_NONE)
@@ -992,6 +1016,10 @@ harvest_sql(PLpgSQL_function *func, PjHarvest *h, PjExpr *pe)
 {
 	int			dno = -1;
 
+	/* a query into one variable gets here without scope_sql() */
+	if (func->resolve_option == PLPGSQL_RESOLVE_COLUMN)
+		return "variable_conflict";
+
 	while ((dno = bms_next_member(pe->expr->paramnos, dno)) >= 0)
 	{
 		PLpgSQL_datum *datum = func->datums[dno];
@@ -1093,8 +1121,8 @@ harvest_expr(PLpgSQL_function *func, PjHarvest *h, PjEnv *env, PjExpr *pe,
 	if (fold_array_ok(pe))
 	{
 		/* the conversion is the I/O one, and a cast made later replaces it */
-		pe->cast = cast_get(pe->type, pe->typmod, pe->dsttype, pe->dsttypmod,
-							&cast_tree);
+		pe->cast = plllvm_pj_cast_get(pe->type, pe->typmod, pe->dsttype, pe->dsttypmod,
+									  &cast_tree);
 		pe->cast_gen = pe->cast->gen;
 		if (cast_tree != NULL && IsA(cast_tree, CoerceViaIO))
 		{
@@ -1114,8 +1142,8 @@ harvest_expr(PLpgSQL_function *func, PjHarvest *h, PjEnv *env, PjExpr *pe,
 		(!pinned && !null_const))
 		return "cast";
 
-	pe->cast = cast_get(pe->type, pe->typmod, pe->dsttype, pe->dsttypmod,
-						&cast_tree);
+	pe->cast = plllvm_pj_cast_get(pe->type, pe->typmod, pe->dsttype, pe->dsttypmod,
+								  &cast_tree);
 	pe->cast_gen = pe->cast->gen;
 
 	/* a mere relabeling needs no code: the value is the same Datum */
@@ -1811,9 +1839,9 @@ cast_pinned(Oid srctype, Oid dsttype)
  * *tree is NULL for a relabeling.  May raise an ERROR, as the interpreter
  * would at the cast.
  */
-static PjCast *
-cast_get(Oid srctype, int32 srctypmod, Oid dsttype, int32 dsttypmod,
-		 Expr **tree)
+PjCast *
+plllvm_pj_cast_get(Oid srctype, int32 srctypmod, Oid dsttype, int32 dsttypmod,
+				   Expr **tree)
 {
 	PjCastKey	key = {srctype, srctypmod, dsttype, dsttypmod};
 	PjCastEntry *entry;
@@ -2206,13 +2234,16 @@ emit_stmt(PjEmit *em, PLpgSQL_stmt *stmt)
 			emit_case(em, (PLpgSQL_stmt_case *) stmt);
 			break;
 		case PLPGSQL_STMT_EXECSQL:
-			if (((PLpgSQL_stmt_execsql *) stmt)->into)
+			if (((PLpgSQL_stmt_execsql *) stmt)->into &&
+				((PjExpr *) list_nth(em->h->exprs, em->next_expr))->sql_kind ==
+				PJ_SQL_NONE)
 				emit_execsql(em, (PLpgSQL_stmt_execsql *) stmt);
 			else
-				emit_sql(em, ((PLpgSQL_stmt_execsql *) stmt)->sqlstmt);
+				emit_sql(em, ((PLpgSQL_stmt_execsql *) stmt)->sqlstmt,
+						 (PLpgSQL_stmt_execsql *) stmt);
 			break;
 		case PLPGSQL_STMT_PERFORM:
-			emit_sql(em, ((PLpgSQL_stmt_perform *) stmt)->expr);
+			emit_sql(em, ((PLpgSQL_stmt_perform *) stmt)->expr, NULL);
 			break;
 		case PLPGSQL_STMT_LOOP:
 		case PLPGSQL_STMT_WHILE:
@@ -2348,12 +2379,14 @@ emit_execsql(PjEmit *em, PLpgSQL_stmt_execsql *stmt)
 }
 
 /*
- * A statement that SPI runs, PERFORM or one with no INTO: the variables it
- * names go to its parameter list, and the helper runs it and says what FOUND
- * becomes.  A statement not planned yet leaves the call to the interpreter.
+ * A statement that SPI runs, PERFORM or one with or without an INTO: the
+ * variables it names go to its parameter list, and the helper runs it and
+ * says what FOUND becomes.  The targets of an INTO are stored from the values
+ * the helper has left, after FOUND as in exec_stmt_execsql().  A statement not
+ * planned yet leaves the call to the interpreter.
  */
 static void
-emit_sql(PjEmit *em, PLpgSQL_expr *expr)
+emit_sql(PjEmit *em, PLpgSQL_expr *expr, PLpgSQL_stmt_execsql *stmt)
 {
 	plllvm_ir  *ir = em->ir;
 	int			index = em->next_expr++;
@@ -2395,6 +2428,38 @@ emit_sql(PjEmit *em, PLpgSQL_expr *expr)
 	plllvm_ir_emit(ir, "%s = load i64, ptr %%v%d", cur, found);
 	plllvm_ir_emit(ir, "%s = select i1 %s, i64 %s, i64 %s", next, set, wide, cur);
 	store_var(em, found, next, "false");
+
+	/*
+	 * then the targets of the INTO, which the helper has checked and
+	 * converted
+	 */
+	if (stmt != NULL && stmt->into)
+	{
+		PLpgSQL_row *row = (PLpgSQL_row *) stmt->target;
+		const char *out = plllvm_ir_tmp(ir);
+
+		plllvm_ir_declare(ir, "declare ptr @plllvm_pj_sql_out(ptr, i32)");
+		plllvm_ir_emit(ir, "%s = call ptr @plllvm_pj_sql_out(ptr %%ctx, i32 %d)",
+					   out, index);
+		for (int i = 0; i < row->nfields; i++)
+		{
+			PLpgSQL_var *var = (PLpgSQL_var *) em->func->datums[row->varnos[i]];
+			const char *value = plllvm_ir_tmp(ir);
+			const char *flag = plllvm_ir_tmp(ir);
+			const char *isnull = plllvm_ir_tmp(ir);
+			size_t		at = i * sizeof(PjSqlOut);
+
+			plllvm_ir_emit(ir, "%s = load i64, ptr %s", value,
+						   field_ptr(ir, out, at + offsetof(PjSqlOut, value)));
+			plllvm_ir_emit(ir, "%s = load i8, ptr %s", flag,
+						   field_ptr(ir, out, at + offsetof(PjSqlOut, isnull)));
+			plllvm_ir_emit(ir, "%s = trunc i8 %s to i1", isnull, flag);
+			if (var->datatype->typbyval)
+				store_var(em, var->dno, value, isnull);
+			else
+				assign_var(em, var, value, isnull, false);
+		}
+	}
 
 	plllvm_ir_emit(ir, "call void @plllvm_pj_sql_end(ptr %%ctx, i32 %d)", index);
 

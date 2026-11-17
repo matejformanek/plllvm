@@ -32,11 +32,18 @@
  *    "no such parameter" in every other slot, as plpgsql_param_fetch() answers.
  *    It has no hooks, so it can be serialized for a parallel worker.
  *
+ * 4) SELECT INTO is exec_stmt_execsql() after the call: the number of rows,
+ *    STRICT, the extra checks, FOUND, and the move of the first row into the
+ *    variables, as exec_move_row() does it.  The values are left for the
+ *    compiled code to store, since it keeps the variables in its own slots; it
+ *    has them until plllvm_pj_sql_end().
+ *
  * The rest is in docs/architecture.md.
  *
  */
 #include "postgres.h"
 
+#include "access/htup_details.h"
 #include "catalog/namespace.h"
 #include "catalog/pg_class.h"
 #include "catalog/pg_proc.h"
@@ -46,9 +53,12 @@
 #include "nodes/params.h"
 #include "plpgsql.h"
 #include "utils/fmgroids.h"
+#include "utils/guc.h"
+#include "utils/lsyscache.h"
 #include "utils/plancache.h"
 #include "utils/rls.h"
 #include "utils/syscache.h"
+#include "utils/varlena.h"
 
 #include "plllvm.h"
 #include "plllvm_pj.h"
@@ -78,6 +88,12 @@ static bool sql_scan_func(Oid funcid, void *context);
 static bool sql_func_pinned(Oid funcid);
 static bool sql_facts_ok(PjSql *sql);
 static void sql_recheck(PjHarvest *h, PjSql *sql);
+static const char *sql_into_admit(PLpgSQL_function *func,
+								  CachedPlanSource *psrc,
+								  PLpgSQL_stmt_execsql *stmt);
+static bool sql_result_same(PjSql *sql, CachedPlanSource *psrc);
+static void sql_xchecks(PjCtx *ctx);
+static void sql_move(PjCtx *ctx, PjSql *sql, PjSlot *slot);
 
 /*
  * The datums of a function as copy_plpgsql_datums() makes them for a call:
@@ -246,6 +262,7 @@ sql_facts_ok(PjSql *sql)
 
 	/* the lists are in the caller's context, which lasts as long as the call */
 	if (bms_equal(sql->expr->paramnos, sql->paramnos) &&
+		(!sql->into || sql_result_same(sql, psrc)) &&
 		!sql_scan_walker((Node *) psrc->query_list, &facts) &&
 		facts.has_view == sql->has_view &&
 		list_length(facts.funcs) == sql->nfuncs)
@@ -280,6 +297,7 @@ plllvm_pj_sql_harvest(PLpgSQL_function *func, PjHarvest *h, PjExpr *pe)
 	PLpgSQL_expr *expr = pe->expr;
 	CachedPlanSource *psrc;
 	PjSql	   *sql;
+	PLpgSQL_stmt_execsql *stmt = pe->stmt;
 	SqlFacts	facts = {0};
 	MemoryContext oldcxt;
 
@@ -302,11 +320,40 @@ plllvm_pj_sql_harvest(PLpgSQL_function *func, PjHarvest *h, PjExpr *pe)
 
 	if (sql_scan_walker((Node *) psrc->query_list, &facts))
 		return facts.reason;
+	if (stmt != NULL && stmt->into)
+	{
+		const char *reason = sql_into_admit(func, psrc, stmt);
+
+		if (reason != NULL)
+			return reason;
+	}
 
 	oldcxt = MemoryContextSwitchTo(h->cxt);
 	sql = palloc0_object(PjSql);
 	sql->expr = expr;
 	sql->kind = pe->sql_kind;
+	if (stmt != NULL && stmt->into)
+	{
+		PLpgSQL_row *row = (PLpgSQL_row *) stmt->target;
+		TupleDesc	desc = psrc->resultDesc;
+
+		/* set before any plan exists for a harvest to see */
+		Assert(stmt->mod_stmt_set);
+		sql->into = true;
+		sql->strict = stmt->strict;
+		sql->mod = stmt->mod_stmt;
+		sql->ntargets = row->nfields;
+		sql->targets = palloc_array(int, row->nfields);
+		memcpy(sql->targets, row->varnos, sizeof(int) * row->nfields);
+		sql->ncols = desc->natts;
+		sql->coltypes = palloc_array(Oid, desc->natts);
+		sql->coltypmods = palloc_array(int32, desc->natts);
+		for (int i = 0; i < desc->natts; i++)
+		{
+			sql->coltypes[i] = TupleDescAttr(desc, i)->atttypid;
+			sql->coltypmods[i] = TupleDescAttr(desc, i)->atttypmod;
+		}
+	}
 	sql->paramnos = bms_copy(expr->paramnos);
 	sql->plansource = psrc;
 	sql->generation = psrc->generation;
@@ -325,6 +372,70 @@ plllvm_pj_sql_harvest(PLpgSQL_function *func, PjHarvest *h, PjExpr *pe)
 	MemoryContextSwitchTo(oldcxt);
 
 	return NULL;
+}
+
+/*
+ * What an INTO may be, as the code stores it: the columns that the variables
+ * take come in their type, so that no value needs a cast, and the variables
+ * take a NULL without one.  A cast that the interpreter makes is its own:
+ * the function is declined.  A zero-row result and a column that is missing
+ * give a NULL of unknown type, which exec_cast_value() turns into the NULL of
+ * the type by its input function; that is no work only if the function is
+ * strict.  print_strict_params adds a DETAIL that is not ported.
+ */
+static const char *
+sql_into_admit(PLpgSQL_function *func, CachedPlanSource *psrc,
+			   PLpgSQL_stmt_execsql *stmt)
+{
+	PLpgSQL_row *row = (PLpgSQL_row *) stmt->target;
+	TupleDesc	desc = psrc->resultDesc;
+	int			anum = 0;
+
+	if (func->print_strict_params)
+		return "print_strict_params";
+	if (desc == NULL)
+		return "statement:SQL statement";
+
+	for (int i = 0; i < row->nfields; i++)
+	{
+		PLpgSQL_var *var = (PLpgSQL_var *) func->datums[row->varnos[i]];
+		Oid			input;
+		Oid			ioparam;
+
+		getTypeInputInfo(var->datatype->typoid, &input, &ioparam);
+		if (!func_strict(input))
+			return "cast";
+
+		while (anum < desc->natts && TupleDescAttr(desc, anum)->attisdropped)
+			anum++;
+		if (anum < desc->natts)
+		{
+			Form_pg_attribute att = TupleDescAttr(desc, anum++);
+
+			if (att->atttypid != var->datatype->typoid ||
+				(att->atttypmod != var->datatype->atttypmod &&
+				 var->datatype->atttypmod != -1))
+				return "cast";
+		}
+	}
+	return NULL;
+}
+
+/* does the statement still give the columns it was admitted with? */
+static bool
+sql_result_same(PjSql *sql, CachedPlanSource *psrc)
+{
+	TupleDesc	desc = psrc->resultDesc;
+
+	if (desc == NULL || desc->natts != sql->ncols)
+		return false;
+	for (int i = 0; i < sql->ncols; i++)
+	{
+		if (TupleDescAttr(desc, i)->atttypid != sql->coltypes[i] ||
+			TupleDescAttr(desc, i)->atttypmod != sql->coltypmods[i])
+			return false;
+	}
+	return true;
 }
 
 /*
@@ -519,6 +630,17 @@ plllvm_pj_sql(PjCtx *ctx, int32 idx)
 	ctx->evaluated = true;
 	plllvm_pj_count.sql_execs++;
 
+	/*
+	 * With an INTO one row is enough, but two are asked for to see that there
+	 * is not more, when STRICT or the check says so; a command that writes is
+	 * always strict.  Without, the statement runs to the end.
+	 */
+	if (sql->into)
+	{
+		sql_xchecks(ctx);
+		tcount = (sql->strict || sql->mod || ctx->xrows != 0) ? 2 : 1;
+	}
+
 	/* for the tests: every execution analyses its statement again */
 	if (plllvm_debug_inject == PLLLVM_INJECT_PJ_SQL_REPLAN)
 		ResetPlanCache();
@@ -612,6 +734,21 @@ plllvm_pj_sql(PjCtx *ctx, int32 idx)
 			break;
 	}
 
+	if (sql->into)
+	{
+		PjSlot	   *slot = &lv->slots[idx];
+
+		if (slot->sql_out == NULL)
+		{
+			MemoryContext cxt = MemoryContextSwitchTo(lv->cxt);
+
+			slot->sql_out = palloc_array(PjSqlOut, sql->ntargets);
+			MemoryContextSwitchTo(cxt);
+		}
+		sql_move(ctx, sql, slot);
+		return found;
+	}
+
 	/* a statement that is not given a place for its result must not have one */
 	if (SPI_tuptable != NULL)
 		ereport(ERROR,
@@ -630,9 +767,17 @@ void
 plllvm_pj_sql_end(PjCtx *ctx, int32 idx)
 {
 	bool		moved;
+	PjSlot	   *slot = &plllvm_pj_level(ctx)->slots[idx];
 
 	SPI_freetuptable(SPI_tuptable);
 	Assert(SPI_tuptable == NULL);
+
+	/* what the conversions allocated, now that the targets have their copies */
+	if (slot->sql_converted)
+	{
+		plllvm_pj_boxed_reset(ctx);
+		slot->sql_converted = false;
+	}
 
 	/*
 	 * The statement may have run code that changed the user or a privilege.
@@ -645,4 +790,213 @@ plllvm_pj_sql_end(PjCtx *ctx, int32 idx)
 	plllvm_pj_key_recheck(ctx, list_nth(ctx->harvest->exprs, idx));
 	if (moved && !plllvm_pj_guards_ok(ctx->harvest, false))
 		plllvm_pj_count.sql_stale++;
+}
+
+/* where plllvm_pj_sql() left the values of the INTO targets of statement idx */
+void *
+plllvm_pj_sql_out(PjCtx *ctx, int32 idx)
+{
+	return plllvm_pj_level(ctx)->slots[idx].sql_out;
+}
+
+/*
+ * The flags of a list of extra checks of PL/pgSQL (plpgsql.extra_errors and
+ * plpgsql.extra_warnings), parsed as plpgsql_extra_checks_check_hook() does;
+ * the value was accepted by it when it was set.
+ */
+static int
+xcheck_flags(const char *name)
+{
+	const char *value = GetConfigOption(name, true, false);
+	char	   *raw;
+	List	   *elems;
+	int			flags = 0;
+
+	if (value == NULL || pg_strcasecmp(value, "none") == 0)
+		return 0;
+	if (pg_strcasecmp(value, "all") == 0)
+		return PLPGSQL_XCHECK_ALL;
+
+	raw = pstrdup(value);
+	if (SplitIdentifierString(raw, ',', &elems))
+	{
+		foreach_ptr(char, tok, elems)
+		{
+			if (pg_strcasecmp(tok, "too_many_rows") == 0)
+				flags |= PLPGSQL_XCHECK_TOOMANYROWS;
+			else if (pg_strcasecmp(tok, "strict_multi_assignment") == 0)
+				flags |= PLPGSQL_XCHECK_STRICTMULTIASSIGNMENT;
+		}
+	}
+	list_free(elems);
+	pfree(raw);
+	return flags;
+}
+
+/*
+ * The extra checks that an INTO reads, once for the call: PL/pgSQL reads them
+ * at each statement.  They change in a call only through set_config(), which
+ * is not admitted, or through a function that is not what it says it is.
+ */
+static void
+sql_xchecks(PjCtx *ctx)
+{
+	int			errors;
+	int			warnings;
+
+	if (ctx->xchecks)
+		return;
+	errors = xcheck_flags("plpgsql.extra_errors");
+	warnings = xcheck_flags("plpgsql.extra_warnings");
+
+	if (errors & PLPGSQL_XCHECK_TOOMANYROWS)
+		ctx->xrows = ERROR;
+	else if (warnings & PLPGSQL_XCHECK_TOOMANYROWS)
+		ctx->xrows = WARNING;
+	if (errors & PLPGSQL_XCHECK_STRICTMULTIASSIGNMENT)
+		ctx->xcols = ERROR;
+	else if (warnings & PLPGSQL_XCHECK_STRICTMULTIASSIGNMENT)
+		ctx->xcols = WARNING;
+	ctx->xchecks = true;
+}
+
+/*
+ * The row of the result into the targets of the INTO, as exec_move_row() with
+ * a row for a target does it, but for the store: each field is converted to
+ * the type of its variable, checked for NOT NULL, and left in the slot.  The
+ * columns that are dropped do not count, a target without a column gets a
+ * NULL, and a column without a target is ignored (with the extra check, they
+ * are errors).  No row gives a NULL for each target.
+ */
+static void
+sql_move(PjCtx *ctx, PjSql *sql, PjSlot *slot)
+{
+	PjSqlOut   *out = slot->sql_out;
+	SPITupleTable *tuptab = SPI_tuptable;
+	PLpgSQL_function *func = sql->expr->func;
+	TupleDesc	tupdesc = NULL;
+	Datum		values_local[64];
+	bool		nulls_local[64];
+	Datum	   *values = values_local;
+	bool	   *nulls = nulls_local;
+	int			anum = 0;
+
+	if (tuptab == NULL)
+		ereport(ERROR,
+				(errcode(ERRCODE_SYNTAX_ERROR),
+				 errmsg("INTO used with a command that cannot return data")));
+
+	if (SPI_processed == 0)
+	{
+		if (sql->strict)
+			ereport(ERROR,
+					(errcode(ERRCODE_NO_DATA_FOUND),
+					 errmsg("query returned no rows")));
+	}
+	else
+	{
+		if (SPI_processed > 1 && (sql->strict || sql->mod || ctx->xrows != 0))
+			ereport((sql->strict || sql->mod) ? ERROR : ctx->xrows,
+					(errcode(ERRCODE_TOO_MANY_ROWS),
+					 errmsg("query returned more than one row"),
+					 errhint("Make sure the query returns a single row, or use LIMIT 1.")));
+
+		tupdesc = tuptab->tupdesc;
+		if (tupdesc->natts > lengthof(values_local))
+		{
+			values = palloc_array(Datum, tupdesc->natts);
+			nulls = palloc_array(bool, tupdesc->natts);
+		}
+		heap_deform_tuple(tuptab->vals[0], tupdesc, values, nulls);
+	}
+
+	for (int i = 0; i < sql->ntargets; i++)
+	{
+		PLpgSQL_var *var = (PLpgSQL_var *) func->datums[sql->targets[i]];
+		Datum		value = (Datum) 0;
+		bool		isnull = true;
+
+		while (tupdesc != NULL && anum < tupdesc->natts &&
+			   TupleDescAttr(tupdesc, anum)->attisdropped)
+			anum++;
+
+		if (tupdesc != NULL && anum < tupdesc->natts)
+		{
+			Form_pg_attribute att = TupleDescAttr(tupdesc, anum);
+
+			value = values[anum];
+			isnull = nulls[anum];
+			anum++;
+			if (att->atttypid != var->datatype->typoid ||
+				(att->atttypmod != var->datatype->atttypmod &&
+				 var->datatype->atttypmod != -1))
+			{
+				value = plllvm_pj_convert(ctx, value, &isnull, att->atttypid,
+										  att->atttypmod, var->datatype->typoid,
+										  var->datatype->atttypmod);
+				slot->sql_converted = true;
+			}
+		}
+		else if (tupdesc != NULL && ctx->xcols != 0)
+			ereport(ctx->xcols,
+					(errcode(ERRCODE_DATATYPE_MISMATCH),
+					 errmsg("number of source and target fields in assignment does not match"),
+					 errdetail("%s check of %s is active.",
+							   "strict_multi_assignment",
+							   ctx->xcols == ERROR ? "extra_errors" : "extra_warnings"),
+					 errhint("Make sure the query returns the exact list of columns.")));
+
+		if (isnull && var->notnull)
+			plllvm_pj_not_null(var->refname);
+
+		out[i].value = value;
+		out[i].isnull = isnull;
+	}
+
+	if (tupdesc != NULL && ctx->xcols != 0)
+	{
+		while (anum < tupdesc->natts && TupleDescAttr(tupdesc, anum)->attisdropped)
+			anum++;
+		if (anum < tupdesc->natts)
+			ereport(ctx->xcols,
+					(errcode(ERRCODE_DATATYPE_MISMATCH),
+					 errmsg("number of source and target fields in assignment does not match"),
+					 errdetail("%s check of %s is active.",
+							   "strict_multi_assignment",
+							   ctx->xcols == ERROR ? "extra_errors" : "extra_warnings"),
+					 errhint("Make sure the query returns the exact list of columns.")));
+	}
+}
+
+/*
+ * exec_cast_value() for a value of another type than the variable's: the
+ * cast of the type pair as get_cast_hashentry() builds it, run on the value.
+ * It is for a column whose type changed after the statement was admitted; the
+ * statement is then admitted again, or declined, at the next call.  The
+ * result is in the per-tuple memory of the level until plllvm_pj_sql_end().
+ */
+Datum
+plllvm_pj_convert(PjCtx *ctx, Datum value, bool *isnull, Oid srctype,
+				  int32 srctypmod, Oid dsttype, int32 dsttypmod)
+{
+	Expr	   *tree;
+	ExprState  *state;
+	ExprContext *econtext = plllvm_pj_level(ctx)->econtext;
+	MemoryContext oldcxt;
+
+	if (srctype == dsttype && (dsttypmod == -1 || srctypmod == dsttypmod))
+		return value;
+
+	plllvm_pj_cast_get(srctype, srctypmod, dsttype, dsttypmod, &tree);
+	if (tree == NULL)
+		return value;
+
+	oldcxt = MemoryContextSwitchTo(econtext->ecxt_per_tuple_memory);
+	state = ExecInitExpr(tree, NULL);
+	econtext->caseValue_datum = value;
+	econtext->caseValue_isNull = *isnull;
+	value = ExecEvalExpr(state, econtext, isnull);
+	MemoryContextSwitchTo(oldcxt);
+
+	return value;
 }
