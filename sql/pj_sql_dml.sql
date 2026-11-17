@@ -315,6 +315,43 @@ SELECT psd_viewr(4);
 SELECT * FROM psd_vrb ORDER BY a;
 SELECT pj_expect('psd_viewr(integer)', 'declined:relation:view') \gset
 
+-- a DELETE through a view whose rule deletes from the base table by OLD: the
+-- view stays in the query as a subquery with the lock of a write
+CREATE TABLE psd_vdb (id int PRIMARY KEY, b text) WITH (autovacuum_enabled = false);
+INSERT INTO psd_vdb SELECT i, 'x' FROM generate_series(1, 8) i;
+CREATE VIEW psd_vd AS SELECT id AS a, b FROM psd_vdb;
+CREATE RULE psd_vd_d AS ON DELETE TO psd_vd DO INSTEAD DELETE FROM psd_vdb WHERE psd_vdb.id = old.a;
+CREATE FUNCTION psd_viewd(n int) RETURNS int LANGUAGE :pj_lang AS $$
+BEGIN
+  DELETE FROM psd_vd WHERE a = n;
+  RETURN n;
+END $$;
+SELECT psd_viewd(1);
+SELECT psd_viewd(2);
+SELECT psd_viewd(3);
+SELECT psd_viewd(4);
+SELECT * FROM psd_vdb ORDER BY id;
+
+-- a table with row level security: which policies apply depends on the role,
+-- a state that no relation lock protects, so a write to it is the
+-- interpreter's, as the values show equal
+CREATE FUNCTION psd_rlsv(n int) RETURNS bool LANGUAGE plpgsql VOLATILE AS $$
+BEGIN RAISE NOTICE 'policy %', n; RETURN true; END $$;
+CREATE TABLE psd_rls (a int, owner_name text) WITH (autovacuum_enabled = false);
+ALTER TABLE psd_rls ENABLE ROW LEVEL SECURITY;
+CREATE POLICY psd_rls_p ON psd_rls USING (true) WITH CHECK (true);
+CREATE FUNCTION psd_rlsw(n int) RETURNS int LANGUAGE :pj_lang AS $$
+BEGIN
+  INSERT INTO psd_rls VALUES (n, 'o');
+  UPDATE psd_rls SET owner_name = 'p' WHERE a = n;
+  RETURN n;
+END $$;
+SELECT psd_rlsw(1);
+SELECT psd_rlsw(2);
+SELECT psd_rlsw(3);
+SELECT psd_rlsw(4);
+SELECT * FROM psd_rls ORDER BY a;
+
 -- MERGE stays PL/pgSQL's
 CREATE TABLE psd_mg (a int PRIMARY KEY, b text);
 INSERT INTO psd_mg VALUES (1, 'one');

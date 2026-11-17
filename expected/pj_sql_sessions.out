@@ -488,6 +488,60 @@ SELECT * FROM psx_t ORDER BY a;
 
 -- (pg_class says that the table has rules until a VACUUM, so the reason is the rule's)
 SELECT pj_expect('psx_w(integer)', 'declined:relation:rule') \gset
+-- a DELETE through a view whose rule deletes by OLD: the view is a subquery with
+-- the lock of a write, locked by SPI inside the call.  The base table is locked
+-- first by the caller's own statement.
+CREATE TABLE psy_b (id int PRIMARY KEY) WITH (autovacuum_enabled = false);
+INSERT INTO psy_b SELECT i FROM generate_series(1, 9) i;
+CREATE VIEW psy_v AS SELECT id AS a FROM psy_b;
+CREATE RULE psy_v_d AS ON DELETE TO psy_v DO INSTEAD DELETE FROM psy_b WHERE psy_b.id = old.a;
+CREATE FUNCTION psy_fn() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN RAISE NOTICE 'instead of delete %', old.a; DELETE FROM psy_b WHERE id = old.a + 100; RETURN old; END $$;
+CREATE FUNCTION psy_w(n int) RETURNS int LANGUAGE plpgsql_jit AS $$
+BEGIN
+  DELETE FROM psy_v WHERE a = n;
+  RETURN n;
+END $$;
+SELECT psy_w(1), psy_w(2), psy_w(3);
+ psy_w | psy_w | psy_w 
+-------+-------+-------
+     1 |     2 |     3
+(1 row)
+
+BEGIN;
+DELETE FROM psy_b WHERE id = 99;
+SELECT dblink_exec('other', 'DROP RULE psy_v_d ON psy_v; CREATE TRIGGER psy_v_t INSTEAD OF DELETE ON psy_v FOR EACH ROW EXECUTE FUNCTION psy_fn()');
+  dblink_exec   
+----------------
+ CREATE TRIGGER
+(1 row)
+
+SELECT psy_w(4);
+NOTICE:  instead of delete 4
+ psy_w 
+-------
+     4
+(1 row)
+
+COMMIT;
+SELECT psy_w(5);
+NOTICE:  instead of delete 5
+ psy_w 
+-------
+     5
+(1 row)
+
+SELECT * FROM psy_b ORDER BY id;
+ id 
+----
+  4
+  5
+  6
+  7
+  8
+  9
+(6 rows)
+
 SELECT dblink_disconnect('other');
  dblink_disconnect 
 -------------------
