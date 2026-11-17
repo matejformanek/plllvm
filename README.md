@@ -330,9 +330,12 @@ collation does. The prefix `plllvm.` is reserved.
   is a domain CHECK added with NOT VALID, and DDL on a table that the write
   only reads. A domain constraint that runs inside an input function
   (`record_in`, `array_in`, `jsonb_populate_record`) is not looked at.
-* A write through a view, or by the action of a rule on another table, is
-  declined (`relation:view`), and so is a statement that a rule turned into
-  nothing (`relation:none`).
+* A statement is declined if any query of its plan, at any level, has a view
+  or a relation with the lock of a write that is not that query's own result
+  relation (`relation:view`, `relation:rule`): a write through a view, a
+  rule's action, a table that a rule made a SELECT. So is a statement that a
+  rule turned into nothing (`relation:none`). The entry locks every such
+  relation of a plan that it admits, without waiting.
 * Arrays: one dimension, no NULL elements, `int4`, `int8` and `float8` only.
 * Status and counters are per backend.
 

@@ -427,45 +427,56 @@ Only `plllvm_jit.c` and `plllvm_error.cpp` include LLVM headers.
     `relhassubclass` until an ANALYZE, so a table whose last rule or child was
     dropped is still declined until then. The checks of a foreign key (the
     insert side, NO ACTION and RESTRICT) and of a deferrable unique constraint
-    are internal code that changes no row, so they pass. A write through a
-    view, and a statement whose rewriting wrote a table other than its own
-    result relation (a rule's action), is declined as `relation:view`: the
-    view stays among the relations of the query with the lock of a write, so
-    SPI takes that lock inside the call, where what another session committed
-    is delivered. A statement that a rule turned into nothing has no result
-    relation and is declined as `relation:none`. A view whose INSTEAD OF
-    trigger takes the write is declined as `relation:kind`. The walk reads the
-    catalogs under the lock of the entry check (below). It is made at every
-    entry, so a table with foreign-key triggers pays a scan of `pg_trigger`
-    per call; the cost is small beside the planning of the statement it
-    precedes (unmeasured, T1). For a write, `sql_check_volatile()` reads every
-    CHECK of the table with `stringToNode` and scans `pg_constraint` once more
-    for each coercion to a domain, at every entry, reached statement or not; a
-    per-plan cache of the verdict, keyed on the lock-protected relcache state,
-    is not cheap enough to do here, so it stays a cost. A command with INTO
-    has a row limit of two, as in PL/pgSQL, whose error for a second row is
-    P0003.
+    are internal code that changes no row, so they pass. In every query of the
+    plan, at every level (subqueries, CTEs, sublinks, SELECTs as well as
+    commands), a relation, or a view in a subquery, that has the lock of a
+    write and is not that query's own result relation is declined:
+    `relation:view` for a view, `relation:rule` for the rest. A write through
+    a view leaves the view among the relations of the rewritten query with the
+    lock of a write; a rule's action copies the original relations into its
+    query or into the SELECT of an INSERT ... SELECT; the table of a command
+    that a rule made a SELECT keeps it. None of them is a result relation, so
+    no check looked at them, and SPI would lock them inside the call, where
+    what other sessions committed is delivered. (The pseudo relation
+    `excluded` of ON CONFLICT is its target again and does not count.) A
+    statement that a rule turned into nothing has no result relation and is
+    declined as `relation:none`; the walk fails at every entry for a command
+    whose list has no result relation. A view whose INSTEAD OF trigger takes
+    the write is declined as `relation:kind`. The walk reads the catalogs
+    under the lock of the entry check (below). It is made at every entry, so a
+    table with foreign-key triggers pays a scan of `pg_trigger` per call; the
+    cost is small beside the planning of the statement it precedes
+    (unmeasured, T1). For a write, `sql_check_volatile()` reads every CHECK of
+    the table with `stringToNode` and scans `pg_constraint` once more for each
+    coercion to a domain, at every entry, reached statement or not; a per-plan
+    cache of the verdict, keyed on the lock-protected relcache state, is not
+    cheap enough to do here, so it stays a cost. A command with INTO has a row
+    limit of two, as in PL/pgSQL, whose error for a second row is P0003.
   * Entry check of a statement that writes: lock, then look. The check runs at
     the entry of the call because a statement has no deopt point, so only
     there can a miss still send the call to the interpreter. For each
     statement that writes, in this order: (1) a stale plan is a miss,
-    `interpreted:stale plan`; (2) the result tables of the plan's queries,
-    CTEs included, are locked without waiting (`ConditionalLockRelationOid`,
-    the mode the execution takes), and a table that another session holds is a
-    miss, `interpreted:lock` (the call never waits; the interpreter waits, if
-    it reaches the statement, as stock does); (3) the plan is looked at again,
-    since the lock delivered what other sessions committed, and a plan made
-    stale by it is a miss, `interpreted:stale plan`; (4) `search_path`, role
-    and `row_security` that the rewrite depends on, and `paramnos`, are
-    compared; (5) the plan is walked. Triggers, FK actions, defaults,
-    generated columns, CHECK and NOT NULL, rules, policies and the constraints
-    of columns are changed by DDL whose lock conflicts with the
-    RowExclusiveLock taken in (2), so what the walk reads stays true until the
-    transaction ends, and what another session has not committed waits for it.
-    Two kinds of change are not held back: CREATE TABLE ... INHERITS takes
-    only ShareUpdateExclusiveLock on the parent, and ALTER DOMAIN ... ADD
-    CONSTRAINT ... NOT VALID locks no table that uses the domain (the
-    ShareLock is taken only when it validates).
+    `interpreted:stale plan`; (2) every relation of the plan with the lock of
+    a write, in any query at any level, is locked without waiting
+    (`ConditionalLockRelationOid`, in the mode of the entry, which is the mode
+    SPI takes), and one that another session holds is a miss,
+    `interpreted:lock` (the call never waits; the interpreter waits, if it
+    reaches the statement, as stock does); this covers every relation that
+    ScanQueryForLocks would lock with a write mode (it locks the entries of
+    the rtable of every query, of its subqueries, CTEs and sublinks, in the
+    mode of the entry), so none is locked first inside the call; (3) the plan
+    is looked at again, since the lock delivered what other sessions
+    committed, and a plan made stale by it is a miss, `interpreted:stale
+    plan`; (4) `search_path`, role and `row_security` that the rewrite depends
+    on, and `paramnos`, are compared; (5) the plan is walked. Triggers, FK
+    actions, defaults, generated columns, CHECK and NOT NULL, rules, policies
+    and the constraints of columns are changed by DDL whose lock conflicts
+    with the RowExclusiveLock taken in (2), so what the walk reads stays true
+    until the transaction ends, and what another session has not committed
+    waits for it. Two kinds of change are not held back: CREATE TABLE ...
+    INHERITS takes only ShareUpdateExclusiveLock on the parent, and ALTER
+    DOMAIN ... ADD CONSTRAINT ... NOT VALID locks no table that uses the
+    domain (the ShareLock is taken only when it validates).
   * Entry check of a statement that only reads: `search_path`, role,
     `row_security` and `paramnos` are compared, and a valid plan is walked; no
     lock is taken. A stale plan is run, since SPI analyses it again by itself:
