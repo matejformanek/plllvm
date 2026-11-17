@@ -256,19 +256,18 @@ fall_back(FunctionCallInfo fcinfo, PjEntry *e, const char *path)
  * interpreter, which plans them again as it runs, makes them valid.  So such a
  * call is translated after the interpreter has run it, when the plans are
  * valid, instead of at the next start, when they are not.  The flag is read
- * before the call: a nested call of the function sets it again.  The call may
- * have replaced the function (funccache then reuses the same struct, and
- * entry_get() resets the entry to NEW), which is then left alone, as is one
- * the call declined.
+ * before the call: a nested call of the function overwrites it (seen_step()
+ * clears it for an entry that is busy).  The call may have replaced the
+ * function (funccache then reuses the same struct, and entry_get() resets the
+ * entry to NEW), which is then left alone, as is one the call declined.
  */
 static Datum
 fall_back_retry(FunctionCallInfo fcinfo, PjEntry *e, const char *path)
 {
-	bool		retry = e != NULL && e->retry;
+	bool		retry = e->retry;
 	Datum		result;
 
-	if (e != NULL)
-		e->retry = false;
+	e->retry = false;
 	result = fall_back(fcinfo, e, path);
 
 	if (retry)
@@ -282,7 +281,6 @@ fall_back_retry(FunctionCallInfo fcinfo, PjEntry *e, const char *path)
 			e->state = PJ_SEEN;
 			seen_step(func, e);
 		}
-		e->retry = false;
 		fcinfo->isnull = isnull;
 	}
 

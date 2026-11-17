@@ -388,8 +388,8 @@ Only `plllvm_jit.c` and `plllvm_error.cpp` include LLVM headers.
     start, so no translation could see them valid. A call that finds only SQL
     statements stale, or unplanned, is translated after the interpreter has
     run it, which plans them again as it goes (`fall_back_retry()`; the flag
-    is read before the call, since a nested call of the function sets it
-    again); the next call runs compiled, and SPI analyses the stale plans
+    is read before the call, since a nested call of the function
+    overwrites it); the next call runs compiled, and SPI analyses the stale plans
     inside the call, unless a statement reads a view: the entry check misses
     on a stale plan over a view, so with a reset before every call such a
     function alternates these translations with guard misses until it is
