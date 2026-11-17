@@ -789,6 +789,60 @@ SELECT psi_rec(2), psi_rec(3);
 
 SELECT pj_expect('psi_domain(integer)', 'declined:datum:psi_dom') \gset
 SELECT pj_expect('psi_rec(integer)', 'declined:datum:record') \gset
+-- the variable of a simple CASE is named __Case__Variable_N__ in the block
+-- after the CASE, and a statement may take it as a target (N is the number of
+-- its datum): the function is declined, for an INTO of several targets and for
+-- an assignment, as for one target
+CREATE FUNCTION psi_casevar(n int) RETURNS text LANGUAGE :pj_lang AS $$
+DECLARE y int; z int;
+BEGIN
+  CASE n WHEN 1 THEN NULL; ELSE NULL; END CASE;
+  SELECT n, n + 1 INTO "__Case__Variable_4__", y FROM psi_one;
+  RETURN y || '/' || "__Case__Variable_4__";
+END $$;
+CREATE FUNCTION psi_casevar2(n int) RETURNS text LANGUAGE :pj_lang AS $$
+DECLARE y int; z int;
+BEGIN
+  CASE n WHEN 1 THEN NULL; ELSE NULL; END CASE;
+  "__Case__Variable_4__" := n + 5;
+  RETURN "__Case__Variable_4__"::text;
+END $$;
+SELECT psi_casevar(1), psi_casevar(2);
+ psi_casevar | psi_casevar 
+-------------+-------------
+ 2/1         | 3/2
+(1 row)
+
+SELECT psi_casevar(1), psi_casevar(2);
+ psi_casevar | psi_casevar 
+-------------+-------------
+ 2/1         | 3/2
+(1 row)
+
+SELECT psi_casevar(3);
+ psi_casevar 
+-------------
+ 4/3
+(1 row)
+
+SELECT psi_casevar2(1), psi_casevar2(2);
+ psi_casevar2 | psi_casevar2 
+--------------+--------------
+ 6            | 7
+(1 row)
+
+SELECT psi_casevar2(1), psi_casevar2(2);
+ psi_casevar2 | psi_casevar2 
+--------------+--------------
+ 6            | 7
+(1 row)
+
+SELECT psi_casevar2(3);
+ psi_casevar2 
+--------------
+ 8
+(1 row)
+
 -- #print_strict_params adds a DETAIL we do not make: the function is declined
 CREATE FUNCTION psi_psp(n int, t text) RETURNS int LANGUAGE :pj_lang AS $$
 #print_strict_params on
