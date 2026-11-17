@@ -158,5 +158,48 @@ COMMIT;
 SELECT psv_w(5);
 SELECT * FROM psv_b ORDER BY a;
 
+-- the same through a rule whose action selects: the original relations are
+-- copied into the SELECT of the action, with the view among them
+CREATE TABLE psw_b (a int) WITH (autovacuum_enabled = false);
+CREATE VIEW psw_v AS SELECT a FROM psw_b;
+CREATE RULE psw_v_i AS ON INSERT TO psw_v DO INSTEAD INSERT INTO psw_b SELECT new.a;
+CREATE FUNCTION psw_w(n int) RETURNS int LANGUAGE plpgsql_jit AS $$
+BEGIN
+  INSERT INTO psw_v VALUES (n);
+  RETURN n;
+END $$;
+SELECT psw_w(1), psw_w(2), psw_w(3);
+BEGIN;
+INSERT INTO psw_b VALUES (0);
+SELECT dblink_exec('other', 'DROP RULE psw_v_i ON psw_v; CREATE TRIGGER psw_v_t INSTEAD OF INSERT ON psw_v FOR EACH ROW EXECUTE FUNCTION psv_fn()');
+SELECT psw_w(4);
+COMMIT;
+SELECT psw_w(5);
+SELECT * FROM psw_b ORDER BY a;
+
+-- a plain table that gets a rule whose action selects: the statement is then
+-- one SELECT with no result relation and the table among its relations, with
+-- the lock of a write.  The call that finds the plan stale is the interpreter's;
+-- the rule goes and a trigger comes from the other session before the next.
+CREATE TABLE psx_t (a int) WITH (autovacuum_enabled = false);
+CREATE FUNCTION psx_try(q text) RETURNS text LANGUAGE plpgsql AS $$
+BEGIN EXECUTE q; RETURN 'ok';
+EXCEPTION WHEN others THEN RETURN SQLSTATE; END $$;
+CREATE FUNCTION psx_w(n int) RETURNS int LANGUAGE plpgsql_jit AS $$
+BEGIN
+  INSERT INTO psx_t VALUES (n);
+  RETURN n;
+END $$;
+SELECT psx_w(1), psx_w(2), psx_w(3);
+CREATE RULE psx_r AS ON INSERT TO psx_t DO INSTEAD SELECT new.a;
+SELECT psx_try('SELECT psx_w(4)');
+SELECT psx_try('SELECT psx_w(5)');
+BEGIN;
+SELECT dblink_exec('other', 'DROP RULE psx_r ON psx_t; CREATE TRIGGER psx_t_i BEFORE INSERT ON psx_t FOR EACH ROW EXECUTE FUNCTION psc_fn()');
+SELECT psx_w(6);
+COMMIT;
+SELECT psx_w(7);
+SELECT * FROM psx_t ORDER BY a;
+
 SELECT dblink_disconnect('other');
 DROP EXTENSION dblink;
