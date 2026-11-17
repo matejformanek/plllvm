@@ -1400,13 +1400,7 @@ SELECT psd_trunc(6);
          6
 (1 row)
 
--- one call by the interpreter, then the translation, then compiled again
-SELECT pj_delta(1, 1, NULL, 0, 1);
- pj_delta 
-----------
- 
-(1 row)
-
+-- one call by the interpreter, then compiled again, with no translation
 SELECT psd_trunc(7);
  psd_trunc 
 -----------
@@ -1637,9 +1631,10 @@ SELECT id, q FROM psd_o ORDER BY id;
 (5 rows)
 
 SELECT pj_expect('psd_order(integer)', 'declined:cast') \gset
--- a table truncated and analysed in each round (the reset of a benchmark),
--- with calls between: every round costs the interpreter one call, and the
--- function stays compiled; it is not a guard miss that adds up to a decline
+-- a table truncated and analysed in each round (the reset of a benchmark):
+-- the plan of the statement is stale, the interpreter runs the call that
+-- finds it so and plans it again, and the next call is compiled again, with
+-- no translation.  The counters are read over the rounds.
 CREATE TABLE psd_rs (a int, b text);
 CREATE FUNCTION psd_reset(n int) RETURNS int LANGUAGE :pj_lang AS $$
 DECLARE c int;
@@ -1656,6 +1651,8 @@ SELECT psd_reset(1), psd_reset(2), psd_reset(3);
 
 SELECT pj_expect('psd_reset(integer)', 'compiled') \gset
 -- (a statement of its own for each: in one transaction the plan is not stale)
+-- 12 rounds of TRUNCATE, ANALYZE and 5 calls
+SELECT pj_mark() \gset
 \o /dev/null
 SELECT CASE s WHEN 1 THEN 'TRUNCATE psd_rs' WHEN 2 THEN 'ANALYZE psd_rs'
               ELSE format('SELECT psd_reset(%s)', i * 10 + s) END
@@ -1752,36 +1749,154 @@ SELECT count(*), sum(a) FROM psd_rs;
 (1 row)
 
 SELECT pj_expect('psd_reset(integer)', 'compiled') \gset
--- ANALYZE alone is as much a stale plan
-SELECT psd_reset(4), psd_reset(5);
- psd_reset | psd_reset 
------------+-----------
-         4 |         5
-(1 row)
-
-ANALYZE psd_rs;
-SELECT psd_reset(6), psd_reset(7), psd_reset(8);
- psd_reset | psd_reset | psd_reset 
------------+-----------+-----------
-         6 |         7 |         8
-(1 row)
-
-ANALYZE psd_rs;
-SELECT psd_reset(9), psd_reset(10), psd_reset(11);
- psd_reset | psd_reset | psd_reset 
------------+-----------+-----------
-         9 |        10 |        11
-(1 row)
-
+-- 20 rounds of ANALYZE alone and 2 calls
+SELECT pj_mark() \gset
+\o /dev/null
+SELECT CASE s WHEN 1 THEN 'ANALYZE psd_rs' ELSE format('SELECT psd_reset(%s)', 1000 + i * 10 + s) END
+  FROM generate_series(1, 20) i, generate_series(1, 3) s ORDER BY i, s \gexec
+ANALYZE psd_rs
+SELECT psd_reset(1012)
+SELECT psd_reset(1013)
+ANALYZE psd_rs
+SELECT psd_reset(1022)
+SELECT psd_reset(1023)
+ANALYZE psd_rs
+SELECT psd_reset(1032)
+SELECT psd_reset(1033)
+ANALYZE psd_rs
+SELECT psd_reset(1042)
+SELECT psd_reset(1043)
+ANALYZE psd_rs
+SELECT psd_reset(1052)
+SELECT psd_reset(1053)
+ANALYZE psd_rs
+SELECT psd_reset(1062)
+SELECT psd_reset(1063)
+ANALYZE psd_rs
+SELECT psd_reset(1072)
+SELECT psd_reset(1073)
+ANALYZE psd_rs
+SELECT psd_reset(1082)
+SELECT psd_reset(1083)
+ANALYZE psd_rs
+SELECT psd_reset(1092)
+SELECT psd_reset(1093)
+ANALYZE psd_rs
+SELECT psd_reset(1102)
+SELECT psd_reset(1103)
+ANALYZE psd_rs
+SELECT psd_reset(1112)
+SELECT psd_reset(1113)
+ANALYZE psd_rs
+SELECT psd_reset(1122)
+SELECT psd_reset(1123)
+ANALYZE psd_rs
+SELECT psd_reset(1132)
+SELECT psd_reset(1133)
+ANALYZE psd_rs
+SELECT psd_reset(1142)
+SELECT psd_reset(1143)
+ANALYZE psd_rs
+SELECT psd_reset(1152)
+SELECT psd_reset(1153)
+ANALYZE psd_rs
+SELECT psd_reset(1162)
+SELECT psd_reset(1163)
+ANALYZE psd_rs
+SELECT psd_reset(1172)
+SELECT psd_reset(1173)
+ANALYZE psd_rs
+SELECT psd_reset(1182)
+SELECT psd_reset(1183)
+ANALYZE psd_rs
+SELECT psd_reset(1192)
+SELECT psd_reset(1193)
+ANALYZE psd_rs
+SELECT psd_reset(1202)
+SELECT psd_reset(1203)
+\o
 SELECT count(*), sum(a) FROM psd_rs;
- count | sum 
--------+-----
-    13 | 685
+ count |  sum  
+-------+-------
+    45 | 44925
+(1 row)
+
+-- 20 rounds of TRUNCATE and 2 calls: one translation per round, if the plan
+-- of a write were to demote the function
+SELECT pj_mark() \gset
+\o /dev/null
+SELECT CASE s WHEN 1 THEN 'TRUNCATE psd_rs' ELSE format('SELECT psd_reset(%s)', 2000 + i * 10 + s) END
+  FROM generate_series(1, 20) i, generate_series(1, 3) s ORDER BY i, s \gexec
+TRUNCATE psd_rs
+SELECT psd_reset(2012)
+SELECT psd_reset(2013)
+TRUNCATE psd_rs
+SELECT psd_reset(2022)
+SELECT psd_reset(2023)
+TRUNCATE psd_rs
+SELECT psd_reset(2032)
+SELECT psd_reset(2033)
+TRUNCATE psd_rs
+SELECT psd_reset(2042)
+SELECT psd_reset(2043)
+TRUNCATE psd_rs
+SELECT psd_reset(2052)
+SELECT psd_reset(2053)
+TRUNCATE psd_rs
+SELECT psd_reset(2062)
+SELECT psd_reset(2063)
+TRUNCATE psd_rs
+SELECT psd_reset(2072)
+SELECT psd_reset(2073)
+TRUNCATE psd_rs
+SELECT psd_reset(2082)
+SELECT psd_reset(2083)
+TRUNCATE psd_rs
+SELECT psd_reset(2092)
+SELECT psd_reset(2093)
+TRUNCATE psd_rs
+SELECT psd_reset(2102)
+SELECT psd_reset(2103)
+TRUNCATE psd_rs
+SELECT psd_reset(2112)
+SELECT psd_reset(2113)
+TRUNCATE psd_rs
+SELECT psd_reset(2122)
+SELECT psd_reset(2123)
+TRUNCATE psd_rs
+SELECT psd_reset(2132)
+SELECT psd_reset(2133)
+TRUNCATE psd_rs
+SELECT psd_reset(2142)
+SELECT psd_reset(2143)
+TRUNCATE psd_rs
+SELECT psd_reset(2152)
+SELECT psd_reset(2153)
+TRUNCATE psd_rs
+SELECT psd_reset(2162)
+SELECT psd_reset(2163)
+TRUNCATE psd_rs
+SELECT psd_reset(2172)
+SELECT psd_reset(2173)
+TRUNCATE psd_rs
+SELECT psd_reset(2182)
+SELECT psd_reset(2183)
+TRUNCATE psd_rs
+SELECT psd_reset(2192)
+SELECT psd_reset(2193)
+TRUNCATE psd_rs
+SELECT psd_reset(2202)
+SELECT psd_reset(2203)
+\o
+SELECT count(*), sum(a) FROM psd_rs;
+ count | sum  
+-------+------
+     2 | 4405
 (1 row)
 
 SELECT pj_expect('psd_reset(integer)', 'compiled') \gset
--- a call after each reset and none between is what the interpreter does
--- best: it translates after each and runs none, and is declined as thrashing
+-- a call after each reset and none between: the interpreter runs each, the
+-- function is not translated again and not declined, and runs no compiled call
 CREATE TABLE psd_rs1 (a int, b text);
 CREATE FUNCTION psd_reset1(n int) RETURNS int LANGUAGE :pj_lang AS $$
 DECLARE c int;
@@ -1796,29 +1911,10 @@ SELECT psd_reset1(1), psd_reset1(2), psd_reset1(3);
           1 |          2 |          3
 (1 row)
 
+SELECT pj_mark() \gset
 \o /dev/null
-SELECT CASE s WHEN 1 THEN 'TRUNCATE psd_rs1' ELSE format('SELECT psd_reset1(%s)', i) END
+SELECT CASE s WHEN 1 THEN 'TRUNCATE psd_rs1' ELSE format('SELECT psd_reset1(%s)', 10 + i) END
   FROM generate_series(1, 40) i, generate_series(1, 2) s ORDER BY i, s \gexec
-TRUNCATE psd_rs1
-SELECT psd_reset1(1)
-TRUNCATE psd_rs1
-SELECT psd_reset1(2)
-TRUNCATE psd_rs1
-SELECT psd_reset1(3)
-TRUNCATE psd_rs1
-SELECT psd_reset1(4)
-TRUNCATE psd_rs1
-SELECT psd_reset1(5)
-TRUNCATE psd_rs1
-SELECT psd_reset1(6)
-TRUNCATE psd_rs1
-SELECT psd_reset1(7)
-TRUNCATE psd_rs1
-SELECT psd_reset1(8)
-TRUNCATE psd_rs1
-SELECT psd_reset1(9)
-TRUNCATE psd_rs1
-SELECT psd_reset1(10)
 TRUNCATE psd_rs1
 SELECT psd_reset1(11)
 TRUNCATE psd_rs1
@@ -1879,14 +1975,138 @@ TRUNCATE psd_rs1
 SELECT psd_reset1(39)
 TRUNCATE psd_rs1
 SELECT psd_reset1(40)
+TRUNCATE psd_rs1
+SELECT psd_reset1(41)
+TRUNCATE psd_rs1
+SELECT psd_reset1(42)
+TRUNCATE psd_rs1
+SELECT psd_reset1(43)
+TRUNCATE psd_rs1
+SELECT psd_reset1(44)
+TRUNCATE psd_rs1
+SELECT psd_reset1(45)
+TRUNCATE psd_rs1
+SELECT psd_reset1(46)
+TRUNCATE psd_rs1
+SELECT psd_reset1(47)
+TRUNCATE psd_rs1
+SELECT psd_reset1(48)
+TRUNCATE psd_rs1
+SELECT psd_reset1(49)
+TRUNCATE psd_rs1
+SELECT psd_reset1(50)
 \o
 SELECT count(*), sum(a) FROM psd_rs1;
  count | sum 
 -------+-----
-     1 |  40
+     1 |  50
 (1 row)
 
-SELECT pj_expect('psd_reset1(integer)', 'declined:thrash') \gset
+-- what a plan made again shows is looked at before the code runs on it: a
+-- trigger, or a VOLATILE check, that came in since is code the function must
+-- leave to PL/pgSQL
+CREATE TABLE psd_dd (a int, b int);
+CREATE FUNCTION psd_ddt(n int) RETURNS int LANGUAGE :pj_lang AS $$
+BEGIN
+  INSERT INTO psd_dd VALUES (n, n);
+  RETURN n;
+END $$;
+CREATE FUNCTION psd_ddc(n int) RETURNS int LANGUAGE :pj_lang AS $$
+BEGIN
+  UPDATE psd_dd SET b = b + 1 WHERE a = n;
+  RETURN n;
+END $$;
+CREATE FUNCTION psd_dd_fn() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN RAISE NOTICE 'trigger on %', new.a; RETURN new; END $$;
+CREATE FUNCTION psd_dd_v(n int) RETURNS bool LANGUAGE plpgsql VOLATILE AS $$
+BEGIN RAISE NOTICE 'check %', n; RETURN true; END $$;
+SELECT psd_ddt(1), psd_ddt(2), psd_ddt(3);
+ psd_ddt | psd_ddt | psd_ddt 
+---------+---------+---------
+       1 |       2 |       3
+(1 row)
+
+SELECT psd_ddc(1), psd_ddc(2), psd_ddc(3);
+ psd_ddc | psd_ddc | psd_ddc 
+---------+---------+---------
+       1 |       2 |       3
+(1 row)
+
+CREATE TRIGGER psd_dd_t BEFORE INSERT ON psd_dd
+  FOR EACH ROW EXECUTE FUNCTION psd_dd_fn();
+ALTER TABLE psd_dd ADD CONSTRAINT psd_dd_c CHECK (psd_dd_v(b)) NOT VALID;
+SELECT psd_ddt(4);
+NOTICE:  trigger on 4
+NOTICE:  check 4
+ psd_ddt 
+---------
+       4
+(1 row)
+
+SELECT psd_ddt(5);
+NOTICE:  trigger on 5
+NOTICE:  check 5
+ psd_ddt 
+---------
+       5
+(1 row)
+
+SELECT psd_ddt(6);
+NOTICE:  trigger on 6
+NOTICE:  check 6
+ psd_ddt 
+---------
+       6
+(1 row)
+
+SELECT psd_ddt(7);
+NOTICE:  trigger on 7
+NOTICE:  check 7
+ psd_ddt 
+---------
+       7
+(1 row)
+
+SELECT psd_ddc(4);
+NOTICE:  check 5
+ psd_ddc 
+---------
+       4
+(1 row)
+
+SELECT psd_ddc(5);
+NOTICE:  check 6
+ psd_ddc 
+---------
+       5
+(1 row)
+
+SELECT psd_ddc(6);
+NOTICE:  check 7
+ psd_ddc 
+---------
+       6
+(1 row)
+
+SELECT psd_ddc(7);
+NOTICE:  check 8
+ psd_ddc 
+---------
+       7
+(1 row)
+
+SELECT * FROM psd_dd ORDER BY a;
+ a | b 
+---+---
+ 1 | 2
+ 2 | 3
+ 3 | 4
+ 4 | 5
+ 5 | 6
+ 6 | 7
+ 7 | 8
+(7 rows)
+
 -- a CHECK constraint or a domain with a VOLATILE function is code the plan
 -- does not show: the interpreter's.  A constraint of immutable and STABLE
 -- functions is not.
@@ -1901,6 +2121,7 @@ CREATE DOMAIN psd_domd AS psd_domv;
 CREATE TABLE psd_cd (a psd_doms, b int);
 CREATE TABLE psd_cdv (a psd_domv, b int);
 CREATE TABLE psd_cdd (a psd_domd, b int);
+CREATE TABLE psd_ckd (a int, b int CHECK ((b::psd_domv) > 0));
 CREATE FUNCTION psd_ck(n int) RETURNS int LANGUAGE :pj_lang AS $$
 BEGIN
   INSERT INTO psd_ck VALUES (n, n + 1);
@@ -1920,6 +2141,11 @@ END $$;
 CREATE FUNCTION psd_cdd(n int) RETURNS int LANGUAGE :pj_lang AS $$
 BEGIN
   INSERT INTO psd_cdd VALUES (n, n);
+  RETURN n;
+END $$;
+CREATE FUNCTION psd_ckd(n int) RETURNS int LANGUAGE :pj_lang AS $$
+BEGIN
+  INSERT INTO psd_ckd VALUES (n, n);
   RETURN n;
 END $$;
 CREATE FUNCTION psd_cdv(n int) RETURNS int LANGUAGE :pj_lang AS $$
@@ -1999,6 +2225,22 @@ NOTICE:  check -1
          |         |         | PL/pgSQL function psd_try(text) line 4 at EXECUTE
 (1 row)
 
+SELECT psd_ckd(1), psd_ckd(2), psd_ckd(3), psd_try('SELECT psd_ckd(-1)');
+NOTICE:  check 1
+NOTICE:  check 2
+NOTICE:  check 3
+NOTICE:  check -1
+ psd_ckd | psd_ckd | psd_ckd |                                  psd_try                                   
+---------+---------+---------+----------------------------------------------------------------------------
+       1 |       2 |       3 | 23514 value for domain psd_domv violates check constraint "psd_domv_check"+
+         |         |         |                                                                           +
+         |         |         |                                                                           +
+         |         |         | SQL statement "INSERT INTO psd_ckd VALUES (n, n)"                         +
+         |         |         | PL/pgSQL function psd_ckd(integer) line 3 at SQL statement                +
+         |         |         | SQL statement "SELECT psd_ckd(-1)"                                        +
+         |         |         | PL/pgSQL function psd_try(text) line 4 at EXECUTE
+(1 row)
+
 SELECT * FROM psd_ck ORDER BY a;
  a | b 
 ---+---
@@ -2032,6 +2274,14 @@ SELECT * FROM psd_cdv ORDER BY a;
 (3 rows)
 
 SELECT * FROM psd_cdd ORDER BY a;
+ a | b 
+---+---
+ 1 | 1
+ 2 | 2
+ 3 | 3
+(3 rows)
+
+SELECT * FROM psd_ckd ORDER BY a;
  a | b 
 ---+---
  1 | 1
