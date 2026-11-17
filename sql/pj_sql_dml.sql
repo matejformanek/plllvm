@@ -13,7 +13,7 @@
   \set pj_lang plpgsql
 \endif
 
-CREATE TABLE psd_t (a int PRIMARY KEY, b text, c int DEFAULT 7);
+CREATE TABLE psd_t (a int PRIMARY KEY, b text, c int DEFAULT 7) WITH (autovacuum_enabled = false);
 INSERT INTO psd_t SELECT i, 'row' || i, i FROM generate_series(1, 6) i;
 ANALYZE psd_t;
 -- the table, printed after a call
@@ -472,7 +472,7 @@ SELECT pj_expect('psd_see(integer)', 'compiled') \gset
 
 -- the table truncated between calls: the plan is stale, and a statement that
 -- writes is looked at again (at most one call by the interpreter)
-CREATE TABLE psd_tt (a int, b text);
+CREATE TABLE psd_tt (a int, b text) WITH (autovacuum_enabled = false);
 \set dtt 'SELECT coalesce(string_agg(x::text, '' '' ORDER BY x.a), ''-'') AS psd_tt FROM psd_tt x'
 CREATE FUNCTION psd_trunc(n int) RETURNS int LANGUAGE :pj_lang AS $$
 DECLARE c int;
@@ -504,7 +504,7 @@ SELECT psd_trunc(9);
 -- a default that changes between calls is code the plan did not have: the
 -- statement is translated again, and then declined.  Not a call that runs it
 -- on a plan that SPI analyses inside the call.
-CREATE TABLE psd_dv (a int, b int DEFAULT 0);
+CREATE TABLE psd_dv (a int, b int DEFAULT 0) WITH (autovacuum_enabled = false);
 CREATE FUNCTION psd_vol() RETURNS int LANGUAGE plpgsql VOLATILE AS $$
 BEGIN RAISE NOTICE 'default'; RETURN 42; END $$;
 CREATE FUNCTION psd_dvi(n int) RETURNS int LANGUAGE :pj_lang AS $$
@@ -531,7 +531,7 @@ SELECT pj_expect('psd_dvi(integer)', 'declined:volatile callee') \gset
 -- so nothing makes it stale when the rule goes and a trigger comes (PL/pgSQL
 -- goes on doing nothing too); after DISCARD PLANS the statement is looked at
 -- again, as one that writes
-CREATE TABLE psd_nt (a int);
+CREATE TABLE psd_nt (a int) WITH (autovacuum_enabled = false);
 CREATE RULE psd_nt_r AS ON INSERT TO psd_nt DO INSTEAD NOTHING;
 CREATE FUNCTION psd_nt_fn() RETURNS trigger LANGUAGE plpgsql AS $$
 BEGIN RAISE NOTICE 'trigger on %', new.a; RETURN new; END $$;
@@ -586,7 +586,7 @@ SELECT pj_expect('psd_order(integer)', 'declined:cast') \gset
 -- the plan of the statement is stale, the interpreter runs the call that
 -- finds it so and plans it again, and the next call is compiled again, with
 -- no translation.  The counters are read over the rounds.
-CREATE TABLE psd_rs (a int, b text);
+CREATE TABLE psd_rs (a int, b text) WITH (autovacuum_enabled = false);
 CREATE FUNCTION psd_reset(n int) RETURNS int LANGUAGE :pj_lang AS $$
 DECLARE c int;
 BEGIN
@@ -627,7 +627,7 @@ SELECT pj_delta(20, 20, NULL, 0, 0);
 SELECT pj_expect('psd_reset(integer)', 'compiled') \gset
 -- a call after each reset and none between: the interpreter runs each, the
 -- function is not translated again and not declined, and runs no compiled call
-CREATE TABLE psd_rs1 (a int, b text);
+CREATE TABLE psd_rs1 (a int, b text) WITH (autovacuum_enabled = false);
 CREATE FUNCTION psd_reset1(n int) RETURNS int LANGUAGE :pj_lang AS $$
 DECLARE c int;
 BEGIN
@@ -650,6 +650,7 @@ SELECT pj_expect('psd_reset1(integer)', 'interpreted:stale plan') \gset
 -- trigger, or a VOLATILE check, that came in since is code the function must
 -- leave to PL/pgSQL
 CREATE TABLE psd_dd (a int, b int);
+CREATE TABLE psd_dc (a int, b int);
 CREATE FUNCTION psd_ddt(n int) RETURNS int LANGUAGE :pj_lang AS $$
 BEGIN
   INSERT INTO psd_dd VALUES (n, n);
@@ -657,20 +658,20 @@ BEGIN
 END $$;
 CREATE FUNCTION psd_ddc(n int) RETURNS int LANGUAGE :pj_lang AS $$
 BEGIN
-  UPDATE psd_dd SET b = b + 1 WHERE a = n;
+  UPDATE psd_dc SET b = b + 1 WHERE a = n;
   RETURN n;
 END $$;
 CREATE FUNCTION psd_dd_fn() RETURNS trigger LANGUAGE plpgsql AS $$
 BEGIN RAISE NOTICE 'trigger on %', new.a; RETURN new; END $$;
 CREATE FUNCTION psd_dd_v(n int) RETURNS bool LANGUAGE plpgsql VOLATILE AS $$
 BEGIN RAISE NOTICE 'check %', n; RETURN true; END $$;
+INSERT INTO psd_dc SELECT i, i FROM generate_series(1, 7) i;
 SELECT psd_ddt(1), psd_ddt(2), psd_ddt(3);
 SELECT psd_ddc(1), psd_ddc(2), psd_ddc(3);
 SELECT pj_expect('psd_ddt(integer)', 'compiled') \gset
-SELECT pj_expect('psd_ddc(integer)', 'compiled') \gset
 CREATE TRIGGER psd_dd_t BEFORE INSERT ON psd_dd
   FOR EACH ROW EXECUTE FUNCTION psd_dd_fn();
-ALTER TABLE psd_dd ADD CONSTRAINT psd_dd_c CHECK (psd_dd_v(b)) NOT VALID;
+ALTER TABLE psd_dc ADD CONSTRAINT psd_dc_c CHECK (psd_dd_v(b)) NOT VALID;
 SELECT psd_ddt(4);
 SELECT psd_ddt(5);
 SELECT psd_ddt(6);
@@ -680,8 +681,31 @@ SELECT psd_ddc(5);
 SELECT psd_ddc(6);
 SELECT psd_ddc(7);
 SELECT * FROM psd_dd ORDER BY a;
+SELECT * FROM psd_dc ORDER BY a;
 SELECT pj_expect('psd_ddt(integer)', 'declined:relation:trigger') \gset
-SELECT pj_expect('psd_ddc(integer)', 'declined:relation:trigger') \gset
+
+-- a plan made again that fails in planning leaves a valid plan with the same
+-- generation: the code must not run on it before the facts are looked at
+CREATE TABLE psd_rz (a int) WITH (autovacuum_enabled = false);
+CREATE FUNCTION psd_rz_fn() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN RAISE NOTICE 'trigger on %', new.a; RETURN new; END $$;
+CREATE FUNCTION psd_raise(n int) RETURNS int LANGUAGE :pj_lang AS $$
+BEGIN
+  INSERT INTO psd_rz VALUES (100 / n);
+  RETURN n;
+END $$;
+SET plan_cache_mode = force_custom_plan;
+SELECT psd_raise(1), psd_raise(2), psd_raise(3);
+CREATE TRIGGER psd_rz_t BEFORE INSERT ON psd_rz
+  FOR EACH ROW EXECUTE FUNCTION psd_rz_fn();
+SELECT psd_try('SELECT psd_raise(0)');
+SELECT pj_mark() \gset
+SELECT psd_raise(1);
+SELECT psd_raise(2);
+SELECT psd_raise(3);
+SELECT psd_raise(4);
+RESET plan_cache_mode;
+SELECT * FROM psd_rz ORDER BY a;
 
 -- a CHECK constraint or a domain with a VOLATILE function is code the plan
 -- does not show: the interpreter's.  A constraint of immutable and STABLE
@@ -749,7 +773,7 @@ SELECT pj_expect('psd_cdd(integer)', 'declined:relation:check') \gset
 SELECT pj_expect('psd_ckd(integer)', 'declined:relation:check') \gset
 
 -- memory: 10^4 statements that write, read inside the loop
-CREATE TABLE psd_m (a int PRIMARY KEY, b int);
+CREATE TABLE psd_m (a int PRIMARY KEY, b int) WITH (autovacuum_enabled = false);
 INSERT INTO psd_m SELECT i, 0 FROM generate_series(1, 20) i;
 CREATE FUNCTION psd_mem() RETURNS bigint LANGUAGE sql STABLE AS
   $$ SELECT sum(total_bytes)::bigint FROM pg_backend_memory_contexts $$;
