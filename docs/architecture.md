@@ -322,7 +322,8 @@ Only `plllvm_jit.c` and `plllvm_error.cpp` include LLVM headers.
   (`SQL statement "..."`, from the position of the expression and of the
   build); the conversion, the NOT NULL check and the copy come after
   PL/pgSQL has left the query, so they are positioned at the statement.
-* `PERFORM` and a statement with no `INTO` are run by SPI from compiled
+* `PERFORM`, a statement with no `INTO` and a `SELECT INTO` that PL/pgSQL does
+  not evaluate as an expression are run by SPI from compiled
   code, on `expr->plan`, the plan the interpreter prepared. PL/pgSQL's
   statement runners are `static` and its plugin hooks only observe, so the
   code does what `exec_stmt_perform()` and `exec_stmt_execsql()` do around
@@ -348,6 +349,54 @@ Only `plllvm_jit.c` and `plllvm_error.cpp` include LLVM headers.
     of the command code as PL/pgSQL gives it; a SELECT with no `INTO` raises
     its 42601 with PL/pgSQL's HINT; PERFORM has its two messages. The tuples
     are freed after each statement.
+  * `SELECT INTO` of scalar variables, one or several, `STRICT` or not, is
+    `exec_stmt_execsql()` after the call: two rows are asked for when the
+    statement is `STRICT` or `plpgsql.extra_errors` or `extra_warnings` has
+    `too_many_rows`, else one; no row or two rows under `STRICT` raise P0002
+    and P0003 with PL/pgSQL's HINT; and the first row goes to the variables as
+    `exec_move_row()` moves it into a row: dropped columns are skipped, a
+    target with no column gets NULL, `strict_multi_assignment` finds the
+    columns that are too few or too many, and a NOT NULL variable raises 22004.
+    FOUND is stored before the targets, as there. The extra checks are read
+    from the two settings once per call, at the first `INTO`, where PL/pgSQL
+    reads them at each statement; they change in a call only through
+    `set_config()`, which is not admitted, or through a function that is not
+    what it says it is. A query into one variable that PL/pgSQL runs as an
+    expression is still the expression of the previous bullets; one whose plan
+    says it is not an expression is the statement of this one, decided from
+    its plan at each translation.
+  * The value of a column goes to its variable without a cast, so the code is
+    admitted only if each column has the type of its variable (and its typmod,
+    unless the variable has none); a cast that PL/pgSQL would run declines the
+    function (`cast`), as does `#print_strict_params on`, whose DETAIL is not
+    ported. A target takes a NULL for no row or a missing column without a
+    cast; PL/pgSQL calls the input function of its type for it (a function
+    that is not strict must return NULL for a NULL, but may have an effect),
+    so the function is declined unless that input function is strict. A column whose type changed after the
+    statement was admitted is still converted, by the cast PL/pgSQL would
+    use (`plllvm_pj_convert()`); the plan is then no longer what it was
+    admitted as (`sql_stale`), and the next call translates again, and is
+    declined if the cast is no longer none. Where PL/pgSQL marks the cast
+    state of the variable after a failure of that conversion, we do not. The
+    conversion raises "no cast from type" for a column of type `unknown` or
+    `record`, where PL/pgSQL falls back to an I/O coercion; no such column can
+    appear after admission (a table has none, and a result column of those
+    types has no variable of its type to be admitted for), so this is stated
+    and not pinned.
+  * A function whose tables are truncated and analysed before every call (a
+    benchmark's reset) finds the plans of its statements stale at each call
+    start, so no translation could see them valid. A call that finds only SQL
+    statements stale, or unplanned, is translated after the interpreter has
+    run it, which plans them again as it goes (`fall_back_retry()`; the flag
+    is read before the call, since a nested call of the function sets it
+    again); the next call runs compiled, and SPI analyses the stale plans
+    inside the call, unless a statement reads a view: the entry check misses
+    on a stale plan over a view, so with a reset before every call such a
+    function alternates these translations with guard misses until it is
+    declined as thrashing (about eight translations). A statement in a branch
+    that no call takes between two resets stays unplanned and keeps the
+    function waiting; each of its calls then pays two walks of the function
+    for the classification plus `plpgsql_compile()`.
   * Admission: every query of the plan, rewritten, is a SELECT with no data-
     modifying CTE, calls no VOLATILE function but the built-in ones that
     change no input of a plan (`nextval`, `random`, the clocks, `pg_sleep`;

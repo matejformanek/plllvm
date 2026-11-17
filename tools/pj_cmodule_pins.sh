@@ -8,6 +8,11 @@
 #   entry check of plpgsql_jit runs the hook for every function of the
 #   planned expressions, so a call that does not reach the function fails
 #   where PL/pgSQL returns (T3, a stated difference).
+# nzin: SELECT INTO a variable of a type whose input function is not strict.
+#   With no row the variable takes the NULL that the function makes of a NULL,
+#   and PL/pgSQL calls it, so its NOTICE is sent once; the function is declined
+#   (cast) rather than given a NULL with no call.  The column has the type of
+#   the variable, so that the strict input function is the only reason.
 #
 # usage: pj_cmodule_pins.sh <pg bindir> <port> [opt level]
 set -e
@@ -25,10 +30,10 @@ command -v "$cc" >/dev/null 2>&1 ||
 
 tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT
-for m in nout oat_deny; do
+for m in nout oat_deny nzin; do
 	$cc -fPIC -I"$("$bin/pg_config" --includedir-server)" $shlib \
 		-o "$tmp/$m.so" "$here/$m.c" 2>"$tmp/cc.log" ||
-		{ echo "pj_cmodule_pins: skipped, cannot build $m.c:"; cat "$tmp/cc.log"; exit 0; }
+		{ echo "pj_cmodule_pins: cannot build $m.c:" >&2; cat "$tmp/cc.log" >&2; exit 1; }
 done
 
 # $1 = extension to create, $2 = PGOPTIONS, $3 = the script
@@ -84,6 +89,29 @@ SELECT t3(1);
 SQL
 }
 
+# $1 = language
+nzin_sql() {
+	cat <<SQL
+CREATE TYPE nzint;
+CREATE FUNCTION nzint_in(cstring) RETURNS nzint LANGUAGE c IMMUTABLE AS '$tmp/nzin.so', 'nzin_in';
+CREATE FUNCTION nzint_out(nzint) RETURNS cstring LANGUAGE c IMMUTABLE STRICT AS '$tmp/nzin.so', 'nzin_out';
+CREATE TYPE nzint (input = nzint_in, output = nzint_out, internallength = 4, passedbyvalue, alignment = int4);
+CREATE TABLE nz_t (a nzint);
+INSERT INTO nz_t VALUES ('7');
+CREATE FUNCTION nz(n int) RETURNS text LANGUAGE $1 AS \$\$
+DECLARE x nzint;
+BEGIN
+  SELECT a INTO x FROM nz_t WHERE a::text = n::text;
+  RETURN x::text;
+END \$\$;
+SELECT nz(7);
+SELECT nz(8);
+SELECT nz(7);
+SELECT nz(8);
+SELECT nz(9);
+SQL
+}
+
 jit="-c session_preload_libraries=plllvm -c plllvm.pj_opt_level=$opt"
 rc=0
 
@@ -93,6 +121,23 @@ if diff "$tmp/stock" "$tmp/jit"; then
 	echo "pj_cmodule_pins raise: same as PL/pgSQL"
 else
 	echo "pj_cmodule_pins raise: differs from PL/pgSQL" >&2
+	rc=1
+fi
+
+run "" "" "$(nzin_sql plpgsql)" >"$tmp/nz_stock"
+run "CREATE EXTENSION plllvm;" "$jit" "$(nzin_sql plpgsql_jit)" >"$tmp/nz_jit"
+if diff "$tmp/nz_stock" "$tmp/nz_jit"; then
+	echo "pj_cmodule_pins nzin: same as PL/pgSQL"
+else
+	echo "pj_cmodule_pins nzin: differs from PL/pgSQL" >&2
+	rc=1
+fi
+run "CREATE EXTENSION plllvm;" "$jit" "$(nzin_sql plpgsql_jit)
+SELECT last_path FROM plllvm_pj_status('nz(int)'::regprocedure);" | tail -1 >"$tmp/nz_path"
+if [ "$(cat "$tmp/nz_path")" = "declined:cast" ]; then
+	echo "pj_cmodule_pins nzin: declined (cast)"
+else
+	echo "pj_cmodule_pins nzin: path is $(cat "$tmp/nz_path"), not declined:cast" >&2
 	rc=1
 fi
 

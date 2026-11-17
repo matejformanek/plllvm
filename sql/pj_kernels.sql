@@ -481,3 +481,190 @@ SELECT revcomp_k(NULL);  -- fail
 SELECT tokenize_k(NULL);  -- fail
 SELECT spectralnorm_k(-1);  -- fail
 SELECT nbody_k(1), spectralnorm_k(10), revcomp_k(5), tokenize_k(40);
+
+-- A row lookup and a mixed kernel: native code around SELECT INTO through SPI.
+-- The tables are reset between calls, as a measurement does: TRUNCATE and
+-- ANALYZE leave the plans of the statements invalid at the next call.
+CREATE TABLE lk_item (
+  i_id integer PRIMARY KEY, i_im_id integer, i_name varchar(24), i_price numeric(5,2),
+  i_data varchar(50));
+CREATE TABLE lk_stock (
+  s_w_id integer, s_i_id integer, s_quantity integer, s_ytd integer, s_data varchar(50),
+  PRIMARY KEY (s_w_id, s_i_id));
+INSERT INTO lk_item
+SELECT i, 1 + (i * 31) % 10000, substr(md5('name' || i), 1, 14 + i % 10),
+       1.00 + ((i * 7907) % 9901) / 100.0, substr(md5('i' || i), 1, 26)
+FROM generate_series(1, 10000) i;
+CREATE TABLE lk_stock_init AS
+SELECT 1 AS s_w_id, i AS s_i_id, 10 + (i * 7) % 91 AS s_quantity, 0 AS s_ytd,
+       substr(md5('s' || i), 1, 30)::varchar(50) AS s_data
+FROM generate_series(1, 10000) i;
+INSERT INTO lk_stock SELECT * FROM lk_stock_init;
+ANALYZE lk_item, lk_stock;
+CREATE FUNCTION lk_reset() RETURNS void LANGUAGE plpgsql VOLATILE AS $$
+BEGIN
+  TRUNCATE lk_stock;
+  INSERT INTO lk_stock SELECT * FROM lk_stock_init;
+  ANALYZE lk_stock;
+END $$;
+
+CREATE FUNCTION lookup_k(n integer) RETURNS text LANGUAGE :pj_lang STABLE AS $$
+DECLARE
+  seed bigint := 777;
+  k integer; v_i_id integer;
+  v_price numeric(5,2); v_name varchar(24); v_qty integer;
+  acc numeric(16,2) := 0;
+  low integer := 0; vowel integer := 0;
+BEGIN
+  FOR k IN 1..n LOOP
+    seed := (seed * 1103515245 + 12345) % 2147483648;
+    v_i_id := 1 + (seed % 10000)::integer;
+    SELECT i_price, i_name INTO v_price, v_name FROM lk_item WHERE i_id = v_i_id;
+    SELECT s_quantity INTO v_qty FROM lk_stock WHERE s_w_id = 1 AND s_i_id = v_i_id;
+    acc := acc + v_price * v_qty;
+    IF v_qty < 20 THEN
+      low := low + 1;
+    END IF;
+    IF position(substr(v_name, 1, 1) IN 'aeiou') > 0 THEN
+      vowel := vowel + 1;
+    END IF;
+  END LOOP;
+  RETURN acc::text || '/' || low || '/' || vowel;
+END $$;
+SELECT lookup_k(0), lookup_k(1), lookup_k(7);
+SELECT lookup_k(0), lookup_k(1), lookup_k(7);
+SELECT lookup_k(200);
+SELECT lookup_k(200);
+SELECT pj_expect('lookup_k(integer)', 'compiled') \gset
+SELECT lk_reset();
+SELECT lookup_k(200);
+SELECT lk_reset();
+SELECT lookup_k(200);
+SELECT lk_reset();
+SELECT lookup_k(200), lookup_k(7);
+SELECT pj_expect('lookup_k(integer)', 'compiled') \gset
+-- after the reset: compiled, with both statements of each of the 200 rounds
+-- run by SPI, and no translation
+SELECT lk_reset();
+SELECT pj_mark() \gset
+SELECT lookup_k(200);
+SELECT pj_delta(1, 0, NULL, 0, 0, NULL, 400);
+SELECT lk_reset();
+SELECT pj_mark() \gset
+SELECT lookup_k(200);
+SELECT pj_delta(1, 0, NULL, 0, 0, NULL, 400);
+
+CREATE FUNCTION mix_k(n integer, k integer) RETURNS double precision
+LANGUAGE :pj_lang AS $$
+DECLARE seed bigint := 777; x float8 := 0.5; acc float8 := 0; p float8; id integer;
+BEGIN
+  FOR i IN 1..n LOOP
+    seed := (seed * 1103515245 + 12345) % 2147483648;
+    FOR j IN 1..8 LOOP
+      x := x * 3.7::float8 * (1.0::float8 - x);
+      acc := acc + x * x - 0.25::float8 * x;
+    END LOOP;
+    IF k > 0 AND i % k = 0 THEN
+      id := 1 + (seed % 10000)::integer;
+      SELECT i_price::float8 INTO p FROM lk_item WHERE i_id = id;
+      acc := acc + p;
+    END IF;
+  END LOOP;
+  RETURN acc;
+END $$;
+SELECT mix_k(10, 1), mix_k(10, 0);
+SELECT mix_k(10, 1), mix_k(10, 0);
+SELECT mix_k(100, 8), mix_k(100, 64), mix_k(100, 1), mix_k(100, 0);
+SELECT mix_k(100, 8), mix_k(100, 64), mix_k(100, 1), mix_k(100, 0);
+SELECT pj_expect('mix_k(integer,integer)', 'compiled') \gset
+SELECT lk_reset();
+SELECT mix_k(100, 8);
+
+-- The tables are reset before every call, the first ones too, so that the plans
+-- of the statements are stale at each call start and only the interpreter plans
+-- them again: the function is translated after its second call, when they are
+-- valid, and runs compiled from the third.
+CREATE FUNCTION lookup_r(n integer) RETURNS text LANGUAGE :pj_lang STABLE AS $$
+DECLARE
+  seed bigint := 777;
+  v_i_id integer; v_price numeric(5,2); v_name varchar(24); v_qty integer;
+  acc numeric(16,2) := 0;
+BEGIN
+  FOR k IN 1..n LOOP
+    seed := (seed * 1103515245 + 12345) % 2147483648;
+    v_i_id := 1 + (seed % 10000)::integer;
+    SELECT i_price, i_name INTO v_price, v_name FROM lk_item WHERE i_id = v_i_id;
+    SELECT s_quantity INTO v_qty FROM lk_stock WHERE s_w_id = 1 AND s_i_id = v_i_id;
+    acc := acc + v_price * v_qty;
+  END LOOP;
+  RETURN acc::text;
+END $$;
+SELECT lk_reset();
+SELECT lookup_r(100);
+SELECT lk_reset();
+SELECT lookup_r(100);
+SELECT lk_reset();
+SELECT pj_mark() \gset
+SELECT lookup_r(100);
+SELECT pj_expect('lookup_r(integer)', 'compiled') \gset
+SELECT pj_delta(1, 0, NULL, 0, 0, NULL, 200);
+SELECT lk_reset();
+SELECT pj_mark() \gset
+SELECT lookup_r(100);
+SELECT pj_delta(1, 0, NULL, 0, 0, NULL, 200);
+
+-- the same with a statement in a branch no call has taken: the function waits
+-- for it
+CREATE FUNCTION lookup_w(n integer) RETURNS text LANGUAGE :pj_lang STABLE AS $$
+DECLARE v_price numeric(5,2); v_qty integer; acc numeric(16,2) := 0;
+BEGIN
+  FOR k IN 1..least(n, 50) LOOP
+    SELECT i_price INTO v_price FROM lk_item WHERE i_id = k;
+    acc := acc + v_price;
+  END LOOP;
+  IF n > 1000 THEN
+    SELECT s_quantity INTO v_qty FROM lk_stock WHERE s_i_id = 1;
+    acc := acc + v_qty;
+  END IF;
+  RETURN acc::text;
+END $$;
+SELECT lk_reset();
+SELECT lookup_w(10);
+SELECT lk_reset();
+SELECT lookup_w(10);
+SELECT pj_expect('lookup_w(integer)', 'waiting') \gset
+SELECT lk_reset();
+SELECT lookup_w(2000);
+SELECT lk_reset();
+SELECT lookup_w(10);
+-- a call that takes the branch right after a reset plans every statement, and
+-- is translated after; a branch that no call takes between two resets keeps
+-- the function waiting
+SELECT lk_reset();
+SELECT lookup_w(10);
+SELECT lk_reset();
+SELECT lookup_w(2000);
+SELECT lk_reset();
+SELECT pj_mark() \gset
+SELECT lookup_w(10), lookup_w(2000);
+SELECT pj_expect('lookup_w(integer)', 'compiled') \gset
+SELECT pj_delta(2, 0, NULL, 0, 0, NULL, 61);
+
+-- recursion through a statement, with no expression of the function's own, so
+-- that nothing but the call that finds the plans stale at its start can be
+-- translated: the calls inside it are its own
+CREATE FUNCTION lookup_rec(n integer) RETURNS void LANGUAGE :pj_lang STABLE AS $$
+DECLARE q integer;
+BEGIN
+  SELECT s_quantity INTO q FROM lk_stock WHERE s_i_id = n + 1;
+  PERFORM lookup_rec(n - 1) FROM lk_stock WHERE s_i_id = 1 AND n > 0;
+END $$;
+SELECT lk_reset();
+SELECT lookup_rec(3);
+SELECT lk_reset();
+SELECT lookup_rec(3);
+SELECT lk_reset();
+SELECT pj_mark() \gset
+SELECT lookup_rec(3);
+SELECT pj_expect('lookup_rec(integer)', 'compiled') \gset
+SELECT pj_delta(4, 0, NULL, 0, 0);

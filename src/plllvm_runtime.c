@@ -72,6 +72,7 @@ const plllvm_host_symbol plllvm_host_symbols[] =
 	{"plllvm_pj_site_done", (void *) plllvm_pj_site_done},
 	{"plllvm_pj_sql_params", (void *) plllvm_pj_sql_params},
 	{"plllvm_pj_sql", (void *) plllvm_pj_sql},
+	{"plllvm_pj_sql_out", (void *) plllvm_pj_sql_out},
 	{"plllvm_pj_sql_end", (void *) plllvm_pj_sql_end},
 	{"plllvm_keep", (void *) plllvm_keep},
 	{"plllvm_scratch_reset", (void *) plllvm_scratch_reset},

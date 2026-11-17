@@ -217,11 +217,12 @@ run the code. In scope so far: blocks with `DECLARE` (defaults, `NOT NULL`,
 `CONSTANT`), assignment to a variable, `IF`, `CASE` (searched and simple),
 `LOOP`, `WHILE`, `FOR` over integers (`REVERSE`, `BY`), `EXIT` and `CONTINUE`
 with labels, `RETURN`, `RAISE` without `USING`, and `SELECT` *expression*
-`INTO` one variable, the form PL/pgSQL evaluates without SPI (a `FROM`, a
-second target or a record target is declined), `PERFORM` and a statement
-with no `INTO`, run by SPI on PL/pgSQL's own plan (a query with no writes,
+`INTO` one variable, the form PL/pgSQL evaluates without SPI, `PERFORM`, a
+statement with no `INTO` and `SELECT INTO` of scalar variables (one or several,
+`STRICT` or not, the columns of the type of the variables; a record target is
+declined), run by SPI on PL/pgSQL's own plan (a query with no writes,
 no VOLATILE function but the built-in ones that change no plan input, and
-not under `#variable_conflict use_column`),
+not under `#variable_conflict use_column` or `#print_strict_params on`),
 with arguments and variables of a type passed by value that is no domain, or
 of a built-in base type passed by reference (`text`, `varchar`, `numeric`,
 `name`, `uuid`, `interval`, `bytea`, `jsonb`, ...), or an array of one, and
@@ -357,9 +358,9 @@ v0.3 adds `LANGUAGE plpgsql_jit`. It compiles scalar statements and
 locals, and runs the other simple expressions of such a function through the
 executor. An element of a one-dimensional `int4[]`, `int8[]` or `float8[]`
 variable is read and stored in the compiled code; a slice, a constructor and
-the other array types are the executor's. `PERFORM` and statements with no
-`INTO` run through SPI on PL/pgSQL's plan; `SELECT INTO` of other queries,
-DML and exceptions follow.
+the other array types are the executor's. `PERFORM`, statements with no
+`INTO` and `SELECT INTO` of scalar variables run through SPI on PL/pgSQL's
+plan; DML and exceptions follow.
 
 ## Building and testing
 
@@ -392,7 +393,7 @@ make stage cluster-start installcheck doctor cluster-stop
 | `installcheck-pj-once`, `installcheck-pj-opt` | the `pj_` tests whose output comes from plllvm, in one variant, and at the highest opt level |
 | `check-pj-cmodule PLLLVM_PORT=<port>` | `tools/pj_cmodule_pins.sh`: pins that load a C module built on the spot, against `plpgsql` and `plpgsql_jit` (an output function with an effect in a `RAISE`; an object access hook that denies a function at the entry check, a stated difference). Skipped with a printed reason where no module can be built (only macOS and Linux have a recipe) |
 | `installcheck-plpgsql-pj PLLLVM_PORT=<port>` | the tests of `installcheck-plpgsql` without plllvm, then with `LANGUAGE plpgsql` changed to `plpgsql_jit` and the handler off and on; the results must match the first, but for the hunks of `tools/plpgsql_pj_allowed.diff` |
-| `fuzz-pj PLLLVM_PORT=<port> N=<n> NREC=<m> NELEM=<e> NSQL=<q> SEED=<s>` | `tools/pj_fuzz.py`: `N` generated functions, `NREC` recursive ones, `NELEM` of element reads and stores of arrays and `NSQL` of `PERFORM` and statements for SPI, with DDL between the calls, run as `plpgsql` and as `plpgsql_jit` at opt level 0 and 2, values, SQLSTATEs, messages and CONTEXT compared, with role switches and `REVOKE` inside transactions; the classes of a difference are in the script's docstring; reported by seed with its program in `results-fuzz/`; not part of `verify` |
+| `fuzz-pj PLLLVM_PORT=<port> N=<n> NREC=<m> NELEM=<e> NSQL=<q> SEED=<s>` | `tools/pj_fuzz.py`: `N` generated functions, `NREC` recursive ones, `NELEM` of element reads and stores of arrays and `NSQL` of `PERFORM`, `SELECT INTO` and statements for SPI, with DDL between the calls, run as `plpgsql` and as `plpgsql_jit` at opt level 0 and 2, values, SQLSTATEs, messages and CONTEXT compared, with role switches and `REVOKE` inside transactions; the classes of a difference are in the script's docstring; reported by seed with its program in `results-fuzz/`; not part of `verify` |
 | `check-pj-fuzz` | the classes of the fuzzer on two programs of known shape (seed 22:745 stale-privilege, 21:597 frame-mix), a check that a wrong value is not a mix, and 150 programs of element reads and stores at opt level 0 and 2, which must compile without the executor, and deopt; in `verify` |
 | `check-pj-ir PLLLVM_PORT=<port>` | `tools/pj_ircheck.py`: the optimized IR of `loop`, `is_prime`, `fib`, `mandelbrot`, `nbody` and `spectralnorm` against the hand-written kernels: no local slot, and in the innermost loop no call but the poll (and, in the array kernels, the slow functions of an element, which are as cold as the poll); in `verify` |
 | `verify PLLLVM_PORT=<port>` | every suite of a PR in order, with the commit and the exit code of each in `results-verify.log` |

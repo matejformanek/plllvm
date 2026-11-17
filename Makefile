@@ -50,7 +50,7 @@ REGRESS = plllvm_setup $(REGRESS_FEATURES) $(REGRESS_KERNELS) expr_plugin \
 # variant only, REGRESS_PJ_OPT at opt level 3.
 REGRESS_PJ = pj_language pj_basic pj_errors pj_guards pj_execute pj_casts pj_sessions \
 		pj_control pj_kernels pj_ops pj_bounds pj_memory pj_boxed pj_abort pj_planfree pj_calls \
-		pj_byref pj_udf pj_typmod pj_raise pj_array pj_case pj_into pj_elements pj_sql
+		pj_byref pj_udf pj_typmod pj_raise pj_array pj_case pj_into pj_elements pj_sql pj_sql_into
 REGRESS_PJ_ONCE = pj_states pj_discard pj_execute_diff pj_arms pj_ctxraw pj_sql_once \
 		pj_sessions_midcall
 REGRESS_PJ_OPT = pj_kernels pj_ops
@@ -450,11 +450,11 @@ check-pj-cmodule: port-ok
 
 # The differential fuzzer: N programs from SEED, as plpgsql and as plpgsql_jit
 # at opt level 0 and 2, NREC recursive ones, NREF over text and numeric and
-# NELEM of reads and stores of array elements, NSQL of statements for SPI, in
-# the throwaway database pj_fuzz.  A difference is reported by seed, with
-# the program and both outputs in results-fuzz/.  Not part of installcheck or
-# verify.  NCX programs of each of the flat and ref modes also have CASE and
-# SELECT INTO (--cx).
+# NELEM of reads and stores of array elements, NSQL of PERFORM, SELECT INTO and
+# statements for SPI, in the throwaway database pj_fuzz.  A difference is
+# reported by seed, with the program and both outputs in results-fuzz/.  Not
+# part of installcheck or verify.  NCX programs of each of the flat and ref
+# modes also have CASE and SELECT INTO (--cx).
 N ?= 2000
 NREC ?= 500
 NREF ?= 500
@@ -493,8 +493,9 @@ fuzz-pj: port-ok
 # stale-privilege (L2), seed 21:597 frame-mix ((g)); and frame_mix refuses a
 # wrong value.  150 programs of element reads and stores must have no call
 # of the executor in 90% of them, and deopt.  150 programs of statements for
-# SPI must have run one in compiled code in 40% of them.  setup() drops and recreates the
-# fuzz database, so the cluster must be a throwaway
+# SPI must have run one in compiled code in 40% of them, and 30% of those that
+# have SELECT INTO alone.  setup() drops and recreates the fuzz database, so
+# the cluster must be a throwaway
 check-pj-fuzz: port-ok
 	@case "$(origin PLLLVM_PORT):$(PLLLVM_PORT)" in file:*|*:|*:544[2-5]) \
 	  echo "check-pj-fuzz needs the PLLLVM_PORT of a throwaway cluster" >&2; \

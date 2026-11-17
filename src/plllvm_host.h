@@ -160,7 +160,15 @@ extern void plllvm_pj_site_done(struct PjCtx *ctx, int32 idx, int32 flags);
  */
 extern void *plllvm_pj_sql_params(struct PjCtx *ctx, int32 idx);
 extern int32 plllvm_pj_sql(struct PjCtx *ctx, int32 idx);
+extern void *plllvm_pj_sql_out(struct PjCtx *ctx, int32 idx);
 extern void plllvm_pj_sql_end(struct PjCtx *ctx, int32 idx);
+
+/* a value for an INTO target, as plllvm_pj_sql_out() has them */
+typedef struct PjSqlOut
+{
+	Datum		value;
+	bool		isnull;
+} PjSqlOut;
 
 /* what plllvm_pj_sql() says FOUND becomes */
 #define PJ_FOUND_FALSE		0

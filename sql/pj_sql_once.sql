@@ -187,3 +187,119 @@ SELECT pso_ge(2, 5);
 SELECT setval('pso_s1', 1, false);
 SELECT pso_ge(3, 1);
 SELECT nextval('pso_s1') AS next_value;
+
+-- SELECT INTO: a column whose type changes between calls is converted to the
+-- variable's type by the cast PL/pgSQL would use.  The call that sees the new
+-- type converts at run time and finds the statement no longer what it was
+-- admitted as (sql_stale 1); the next call goes to PL/pgSQL, the one after is
+-- translated again and declined, the cast being none no more.
+CREATE TABLE pso_alt (a int, b int, c int);
+INSERT INTO pso_alt VALUES (1, 10, 100), (2, 20, 200);
+CREATE FUNCTION pso_l4(n int) RETURNS int LANGUAGE plpgsql_jit AS $$
+DECLARE x int;
+BEGIN
+  SELECT b INTO x FROM pso_alt WHERE a = n;
+  RETURN x;
+END $$;
+CREATE FUNCTION pso_l4b(n int) RETURNS int LANGUAGE plpgsql_jit AS $$
+DECLARE x int;
+BEGIN
+  SELECT c INTO x FROM pso_alt WHERE a = n;
+  RETURN x;
+END $$;
+SELECT pso_l4(1), pso_l4(2), pso_l4(3);
+SELECT pso_l4(1), pso_l4(2), pso_l4(3);
+SELECT pso_l4b(1), pso_l4b(2), pso_l4b(3);
+SELECT pso_l4b(1), pso_l4b(2), pso_l4b(3);
+SELECT pj_expect('pso_l4(integer)', 'compiled') \gset
+SELECT pj_expect('pso_l4b(integer)', 'compiled') \gset
+ALTER TABLE pso_alt ALTER COLUMN b TYPE text USING b::text;
+ALTER TABLE pso_alt ALTER COLUMN c TYPE bigint;
+SELECT pj_mark() \gset
+SELECT pso_l4(1);
+SELECT pj_delta(1, 0, NULL, 0, 0, NULL, 1, 1, 1);
+SELECT pso_l4(2);
+SELECT pj_expect('pso_l4(integer)', 'interpreted:guard miss') \gset
+SELECT pso_l4(2), pso_l4(3);
+SELECT pj_expect('pso_l4(integer)', 'declined:cast') \gset
+SELECT pj_mark() \gset
+SELECT pso_l4b(2);
+SELECT pj_delta(1, 0, NULL, 0, 0, NULL, 1, 1, 1);
+SELECT pso_l4b(1), pso_l4b(2), pso_l4b(3);
+SELECT pj_expect('pso_l4b(integer)', 'declined:cast') \gset
+-- a conversion that fails, in the call that converts: PL/pgSQL's error
+CREATE TABLE pso_alt2 (a int, b int);
+INSERT INTO pso_alt2 VALUES (1, 10);
+CREATE FUNCTION pso_l4c(n int) RETURNS int LANGUAGE plpgsql_jit AS $$
+DECLARE x int;
+BEGIN
+  SELECT b INTO x FROM pso_alt2 WHERE a = n;
+  RETURN x;
+END $$;
+SELECT pso_l4c(1), pso_l4c(1), pso_l4c(1);
+SELECT pj_expect('pso_l4c(integer)', 'compiled') \gset
+ALTER TABLE pso_alt2 ALTER COLUMN b TYPE text USING b::text;
+INSERT INTO pso_alt2 VALUES (2, 'x');
+SELECT pso_try('SELECT pso_l4c(2)');
+SELECT pso_l4c(1);
+SELECT pso_l4c(1);
+
+-- the extra checks are read at the first INTO of a call: a function that the
+-- statement calls and that sets them is not seen by the INTO after it.
+-- PL/pgSQL reads them at each statement, and raises P0003 at the second one;
+-- the compiled call answers, and the next call, which reads them at its first
+-- INTO, raises there.
+CREATE FUNCTION pso_cfg(v text) RETURNS int LANGUAGE plpgsql STABLE AS $$
+BEGIN PERFORM set_config('plpgsql.extra_errors', v, false); RETURN 1; END $$;
+CREATE FUNCTION pso_xc(n int) RETURNS int LANGUAGE plpgsql_jit AS $$
+DECLARE x int; y int; c int;
+BEGIN
+  SELECT a INTO x FROM pso_t WHERE a > n;
+  SELECT pso_cfg('too_many_rows') INTO c FROM pso_one;
+  SELECT a INTO y FROM pso_t WHERE a > n;
+  RETURN x + y;
+END $$;
+SELECT pso_try('SELECT pso_xc(19)');
+RESET plpgsql.extra_errors;
+SELECT pso_try('SELECT pso_xc(19)');
+RESET plpgsql.extra_errors;
+SELECT pso_try('SELECT pso_xc(19)');
+RESET plpgsql.extra_errors;
+SELECT pj_expect('pso_xc(integer)', 'compiled') \gset
+SELECT pso_try('SELECT pso_xc(3)');
+SELECT pso_try('SELECT pso_xc(3)');
+RESET plpgsql.extra_errors;
+
+-- A variant for another code generation (pj_codegen) of a function that is
+-- translated has its own wait: the function has a statement in a branch no
+-- call has taken, which the first variant leaves to a deopt, and the variant
+-- that runs expressions in the executor cannot.  With the tables reset before
+-- every call it is translated after the call that takes the branch, which plans
+-- the statement.
+CREATE TABLE pso_rs (a int);
+INSERT INTO pso_rs VALUES (1), (2);
+CREATE FUNCTION pso_rs_reset() RETURNS void LANGUAGE plpgsql AS $$
+BEGIN TRUNCATE pso_rs; INSERT INTO pso_rs VALUES (1), (2); ANALYZE pso_rs; END $$;
+CREATE FUNCTION pso_cg(n int) RETURNS int LANGUAGE plpgsql_jit STABLE AS $$
+DECLARE x int := 0;
+BEGIN
+  IF n > 1000 THEN
+    SELECT a INTO x FROM pso_rs WHERE a = 1;
+  END IF;
+  RETURN x + n;
+END $$;
+SELECT pso_cg(1), pso_cg(2), pso_cg(3);
+SELECT pj_expect('pso_cg(integer)', 'compiled') \gset
+SET plllvm.pj_codegen = boxed;
+SELECT pso_cg(1);
+SELECT pj_expect('pso_cg(integer)', 'waiting') \gset
+SELECT pso_rs_reset();
+SELECT pso_cg(2000);
+SELECT pso_rs_reset();
+SELECT pso_cg(2000);
+SELECT pso_rs_reset();
+SELECT pj_mark() \gset
+SELECT pso_cg(1);
+SELECT pj_expect('pso_cg(integer)', 'compiled') \gset
+SELECT pj_delta(1, 0, NULL, 0, 0);
+RESET plllvm.pj_codegen;
