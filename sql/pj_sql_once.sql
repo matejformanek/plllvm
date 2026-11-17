@@ -102,6 +102,26 @@ SELECT pso_ib(6, 1);
 SELECT pj_expect('pso_ib(integer,integer)', 'declined:volatile callee') \gset
 SELECT pso_ib(7, 1);
 
+-- an interpreted call whose planning fails, between two compiled ones: the
+-- statement was analysed again after the callee became VOLATILE, the plan
+-- that failed to build leaves the new query list valid, and the entry walks it
+CREATE FUNCTION pso_cal2(n int) RETURNS int LANGUAGE plpgsql STABLE AS $$
+BEGIN RETURN n; END $$;
+CREATE FUNCTION pso_ibr(n int, h int) RETURNS int LANGUAGE plpgsql_jit AS $$
+BEGIN
+  PERFORM pso_cal2(100 / n) FROM pso_one;
+  RETURN n;
+END $$;
+SET plan_cache_mode = force_custom_plan;
+SELECT pso_ibr(1, 1), pso_ibr(2, 1), pso_ibr(3, 1);
+ALTER FUNCTION pso_cal2(int) VOLATILE;
+SELECT pso_try('SELECT pso_ibr(0, NULL)');
+SELECT pj_mark() \gset
+SELECT pso_ibr(1, 1);
+SELECT pso_ibr(2, 1);
+SELECT pso_ibr(3, 1);
+RESET plan_cache_mode;
+
 -- N-SQL: a function replaced inside the statement stales the plan of a later
 -- expression of the call; the call goes on with the tree it has, and the next
 -- one translates again.  PL/pgSQL plans the expression again at its next

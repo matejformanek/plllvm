@@ -712,6 +712,79 @@ SELECT pj_expect('psd_raise(integer)', 'declined:relation:trigger') \gset
 RESET plan_cache_mode;
 SELECT * FROM psd_rz ORDER BY a;
 
+-- a call with a NULL argument goes to the interpreter, which analyses the
+-- statement again; its planning fails, and the trigger that came with the DDL
+-- is in the plan that the next compiled call finds valid
+CREATE TABLE psd_nr (a int) WITH (autovacuum_enabled = false);
+CREATE FUNCTION psd_nr_fn() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN RAISE NOTICE 'trigger on %', new.a; RETURN new; END $$;
+CREATE FUNCTION psd_nullre(n int, h int) RETURNS int LANGUAGE :pj_lang AS $$
+BEGIN
+  INSERT INTO psd_nr VALUES (100 / n);
+  RETURN n;
+END $$;
+SET plan_cache_mode = force_custom_plan;
+SELECT psd_nullre(1, 1), psd_nullre(2, 1), psd_nullre(3, 1);
+CREATE TRIGGER psd_nr_t BEFORE INSERT ON psd_nr
+  FOR EACH ROW EXECUTE FUNCTION psd_nr_fn();
+SELECT psd_try('SELECT psd_nullre(0, NULL)');
+SELECT pj_mark() \gset
+SELECT psd_nullre(1, 1);
+SELECT psd_nullre(2, 1);
+SELECT psd_nullre(3, 1);
+SELECT psd_nullre(4, 1);
+RESET plan_cache_mode;
+SELECT * FROM psd_nr ORDER BY a;
+
+-- planning is the statement's own, once per execution: a STABLE function that
+-- says when it runs at planning gives the notices of stock, under custom plans
+-- and under the automatic choice
+CREATE FUNCTION psd_pn(n int) RETURNS int LANGUAGE plpgsql STABLE AS $$
+BEGIN RAISE NOTICE 'pn %', n; RETURN n; END $$;
+CREATE TABLE psd_p5 (a int, b int) WITH (autovacuum_enabled = false);
+INSERT INTO psd_p5 SELECT i, 0 FROM generate_series(1, 4) i;
+CREATE FUNCTION psd_plan(n int) RETURNS int LANGUAGE :pj_lang AS $$
+BEGIN
+  UPDATE psd_p5 SET b = b + 1 WHERE a = psd_pn(n);
+  RETURN n;
+END $$;
+SET plan_cache_mode = force_custom_plan;
+SELECT psd_plan(1);
+SELECT psd_plan(2);
+SELECT psd_plan(3);
+SELECT psd_plan(4);
+SELECT psd_plan(1);
+SELECT psd_plan(2);
+SELECT psd_plan(3);
+RESET plan_cache_mode;
+SELECT psd_plan(1);
+SELECT psd_plan(2);
+SELECT psd_plan(3);
+SELECT psd_plan(4);
+SELECT psd_plan(1);
+SELECT psd_plan(2);
+SELECT psd_plan(3);
+SELECT psd_plan(4);
+SELECT * FROM psd_p5 ORDER BY a;
+
+-- a function of a CHECK constraint that becomes VOLATILE between calls is
+-- no dependency of the plan: the walk at the next entry finds it
+CREATE FUNCTION psd_cf(n int) RETURNS bool LANGUAGE plpgsql STABLE AS $$
+BEGIN RETURN n > 0; END $$;
+CREATE TABLE psd_cft (a int CHECK (psd_cf(a))) WITH (autovacuum_enabled = false);
+CREATE FUNCTION psd_cff(n int) RETURNS int LANGUAGE :pj_lang AS $$
+BEGIN
+  INSERT INTO psd_cft VALUES (n);
+  RETURN n;
+END $$;
+SELECT psd_cff(1), psd_cff(2), psd_cff(3);
+ALTER FUNCTION psd_cf(int) VOLATILE;
+SELECT pj_mark() \gset
+SELECT psd_cff(4);
+SELECT psd_cff(5);
+SELECT psd_cff(6);
+SELECT * FROM psd_cft ORDER BY a;
+
 -- a CHECK constraint or a domain with a VOLATILE function is code the plan
 -- does not show: the interpreter's.  A constraint of immutable and STABLE
 -- functions is not.
