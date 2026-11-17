@@ -23,6 +23,7 @@ plpgsql_jit` (v0.3).
 | `src/plllvm_pj.c`, `src/plllvm_pj.h` | `LANGUAGE plpgsql_jit`: the call handler, the side entry of each PL/pgSQL function, translation in a subtransaction, guards, the error context, the counters of `plllvm_pj_stats()`; includes `plpgsql.h` |
 | `src/plllvm_pj_boxed.c` | `plpgsql_jit`: the expressions the compiler does not do, run by the executor on the translator's copy of the planned tree, and the per-transaction state they use; includes no `plpgsql.h` |
 | `src/plllvm_pj_sites.c` | `plpgsql_jit`: the sites, the calls compiled code makes through fmgr and the I/O functions, built per level and transaction; includes no `plpgsql.h` |
+| `src/plllvm_pj_records.c` | `plpgsql_jit`: the result of a function with OUT parameters or a composite type, the conversion to the declared type at the exit of a call and the tools/pl-drift list of the PostgreSQL functions it takes that from; includes no `plpgsql.h` |
 | `src/plllvm_pj_sql.c` | `plpgsql_jit`: the SQL statements of a function, run by SPI on PL/pgSQL's plans: the shadow estate, the parameter lists, the execution and its result codes, the checks of a statement's plan; includes `plpgsql.h` |
 | `src/plllvm_pj_translate.c` | `plpgsql_jit`: scope of a function, the planned trees of its expressions, the casts to their targets, the IR of a function (statements, loops, labels, positions); includes `plpgsql.h` |
 | `src/plllvm_ir.c` | IR text builder: temporaries, blocks, declarations |
@@ -322,6 +323,29 @@ Only `plllvm_jit.c` and `plllvm_error.cpp` include LLVM headers.
   (`SQL statement "..."`, from the position of the expression and of the
   build); the conversion, the NOT NULL check and the copy come after
   PL/pgSQL has left the query, so they are positioned at the statement.
+* OUT parameters and composite results. One OUT parameter is a variable like
+  any other and the function returns its type, as PL/pgSQL does: nothing new.
+  Several OUT parameters are a row, formed at the RETURN from their slots over
+  a copy of the descriptor that the harvest keeps (blessed on first use; PL/pgSQL
+  blesses its own, and descriptors that agree get one typmod). A RETURN of a
+  row expression, a call or a cast to the row type is evaluated by the executor
+  with no conversion to the declared type of the function. Either value then
+  goes through `plllvm_pj_ret_tuple()`, the end of `plpgsql_exec_function()`: a
+  type that is not the declared one is converted by position (dropped columns,
+  RECORD against a named type, the column list of the caller, `get_call_result_type()`
+  at every call), and a RECORD descriptor gets its typmod, as
+  `SPI_returntuple()` does (`get_call_result_type()` has assigned one by then,
+  so no input reaches that step: it is kept as the copy of what stock does). It is written again because those functions are
+  `static` and a call that returns a row must not need an SPI connection;
+  `tools/pl-drift` fails when a body it follows changes. What it makes lives in
+  the datum context of the level, which the handler resets after it has copied
+  the result. A conversion that fails is raised at the exit of the function,
+  which PL/pgSQL names with the context "while casting return value to
+  function's return type" and no expression, so no expression is marked and
+  the next call is not sent to PL/pgSQL. A value that is no row, or a result
+  that is a domain over a composite type (its CHECK is user code, which a
+  helper must not run), is declined. Not in scope: a composite OUT parameter
+  or a record variable of any kind.
 * `PERFORM`, a statement with no `INTO` and a `SELECT INTO` that PL/pgSQL does
   not evaluate as an expression are run by SPI from compiled
   code, on `expr->plan`, the plan the interpreter prepared. PL/pgSQL's
