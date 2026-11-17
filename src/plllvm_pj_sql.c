@@ -244,7 +244,7 @@ sql_facts_ok(PjSql *sql)
 	CachedPlanSource *psrc = sql->plansource;
 	bool		ok = false;
 
-	/* the lists are in the caller's context, which lives as long as the call */
+	/* the lists are in the caller's context, which lasts as long as the call */
 	if (bms_equal(sql->expr->paramnos, sql->paramnos) &&
 		!sql_scan_walker((Node *) psrc->query_list, &facts) &&
 		facts.has_view == sql->has_view &&
@@ -396,10 +396,11 @@ plllvm_pj_sql_guard(PjSql *sql)
  * list's address would not tell (the new one can take the place of the old),
  * the counter of plans does: it moves with every plan built, and a new query
  * list is followed by one, unless the plan that follows the analysis fails
- * to build (a custom plan that raises): then the next call runs that list once
- * unchecked, and this check, after it, finds it.  The statement goes on with the trees it
- * has, as PL/pgSQL does until its next evaluation, and the next call translates
- * again if the plan is no longer the one it was admitted as.
+ * to build (a custom plan that raises): then the next call runs that list
+ * once unchecked, and this check, after it, finds it.  The statement goes on
+ * with the trees it has, as PL/pgSQL does until its next evaluation, and the
+ * next call translates again if the plan is no longer the one it was
+ * admitted as.
  */
 static void
 sql_recheck(PjHarvest *h, PjSql *sql)

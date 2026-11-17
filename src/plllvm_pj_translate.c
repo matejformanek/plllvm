@@ -997,9 +997,13 @@ harvest_sql(PLpgSQL_function *func, PjHarvest *h, PjExpr *pe)
 		PLpgSQL_datum *datum = func->datums[dno];
 
 		if (pj_var(h, func, dno) == NULL)
-			return datum->dtype == PLPGSQL_DTYPE_VAR ?
-				psprintf("datum:%s", ((PLpgSQL_var *) datum)->datatype->typname) :
-				"datum:record";
+		{
+			if (datum->dtype == PLPGSQL_DTYPE_VAR ||
+				datum->dtype == PLPGSQL_DTYPE_PROMISE)
+				return psprintf("datum:%s",
+								((PLpgSQL_var *) datum)->datatype->typname);
+			return "datum:record";
+		}
 	}
 	return plllvm_pj_sql_harvest(func, h, pe);
 }

@@ -1413,6 +1413,7 @@ SELECT pj_expect('psq_loop(integer,integer)', 'compiled') \gset
 -- custom plans, which move the generation of the plan at every execution
 SET plan_cache_mode = force_custom_plan;
 SELECT psq_loop(1000, 1000) AS m1 \gset
+SELECT pj_mark() \gset
 SELECT psq_loop(20000, 20000) - :m1 < 262144 AS flat_custom;
  flat_custom 
 -------------
@@ -1420,6 +1421,13 @@ SELECT psq_loop(20000, 20000) - :m1 < 262144 AS flat_custom;
 (1 row)
 
 RESET plan_cache_mode;
+-- the 20000 statements ran in compiled code, one call
+SELECT pj_delta(1, 0, NULL, 0, 0, NULL, 20000);
+ pj_delta 
+----------
+ 
+(1 row)
+
 -- parallel query inside a statement: the parameters of the list are serialized
 -- (PERFORM fetches all rows, so the plan may use workers)
 CREATE TABLE psq_big AS
@@ -1430,14 +1438,14 @@ BEGIN
   PERFORM 1 FROM psq_big WHERE a < n AND b <> t;
   RETURN found;
 END $$;
-CREATE FUNCTION psq_workers() RETURNS bigint LANGUAGE plpgsql AS $$
-DECLARE w bigint;
-BEGIN
-  PERFORM pg_stat_force_next_flush();
-  SELECT parallel_workers_launched INTO w FROM pg_stat_database WHERE datname = current_database();
-  RETURN w;
-END $$;
+-- Workers are counted from the statistics, read in a statement of their own
+-- after a forced flush, as a backend's pending counts are not in them before.
+-- The plan is forced parallel, so the count does not depend on costs.
 SET debug_parallel_query = regress;
+SET parallel_setup_cost = 0;
+SET parallel_tuple_cost = 0;
+SET min_parallel_table_scan_size = 0;
+SET max_parallel_workers_per_gather = 2;
 SELECT psq_par(100, 'text3'), psq_par(1, 'text3');
  psq_par | psq_par 
 ---------+---------
@@ -1450,19 +1458,35 @@ SELECT psq_par(100, 'text3'), psq_par(1, 'text3');
  t       | f
 (1 row)
 
-SELECT psq_workers() AS w0 \gset
+SELECT pg_stat_force_next_flush() IS NULL AS flushed;
+ flushed 
+---------
+ f
+(1 row)
+
+SELECT parallel_workers_launched AS w0 FROM pg_stat_database WHERE datname = current_database() \gset
 SELECT psq_par(100, 'text3'), psq_par(1, 'text3');
  psq_par | psq_par 
 ---------+---------
  t       | f
 (1 row)
 
-SELECT psq_workers() - :w0 >= 2 AS launched;
+SELECT pg_stat_force_next_flush() IS NULL AS flushed;
+ flushed 
+---------
+ f
+(1 row)
+
+SELECT parallel_workers_launched - :w0 >= 2 AS launched FROM pg_stat_database WHERE datname = current_database();
  launched 
 ----------
  t
 (1 row)
 
+RESET max_parallel_workers_per_gather;
+RESET min_parallel_table_scan_size;
+RESET parallel_tuple_cost;
+RESET parallel_setup_cost;
 RESET debug_parallel_query;
 SELECT pj_expect('psq_par(integer,text)', 'compiled') \gset
 DROP OWNED BY regress_psq_u;

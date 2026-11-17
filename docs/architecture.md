@@ -366,7 +366,7 @@ Only `plllvm_jit.c` and `plllvm_error.cpp` include LLVM headers.
     then the admission walk is made again over the current query list. After
     each execution the same comparison finds an analysis done inside the
     call; the address of the new query list is no sign, since the old one is
-    deleted first and the new one can take its place.  A new query list is
+    deleted first and the new one can take its place. A new query list is
     followed by a plan, and so by a new `generation`, unless that plan fails
     to build (a custom plan that raises): the next call then runs the list once
     unchecked, and the check after that execution finds it. A statement found no
