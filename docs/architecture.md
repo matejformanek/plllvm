@@ -389,11 +389,16 @@ Only `plllvm_jit.c` and `plllvm_error.cpp` include LLVM headers.
     statements stale, or unplanned, is translated after the interpreter has
     run it, which plans them again as it goes (`fall_back_retry()`; the flag
     is read before the call, since a nested call of the function
-    overwrites it); the next call runs compiled, and SPI analyses the stale plans
-    inside the call, unless a statement reads a view: the entry check misses
-    on a stale plan over a view, so with a reset before every call such a
-    function alternates these translations with guard misses until it is
-    declined as thrashing (about eight translations). A statement in a branch
+    overwrites it); the next call runs compiled, and SPI analyses the stale
+    plans inside the call, unless a statement reads a view or writes: the
+    entry check misses on a stale plan of either. A view with a reset before
+    every call alternates these translations with guard misses until the
+    function is declined as thrashing (about eight translations). A miss on a
+    statement that writes is not counted towards that when the code has run
+    since its translation, so a table that is truncated or analysed between
+    rounds of calls (autovacuum included) costs the interpreter one call per
+    round; only a reset before every call, with none between, is declined
+    (`psd_reset1`). A statement in a branch
     that no call takes between two resets stays unplanned and keeps the
     function waiting; each of its calls then pays two walks of the function
     for the classification plus `plpgsql_compile()`.
@@ -408,15 +413,21 @@ Only `plllvm_jit.c` and `plllvm_error.cpp` include LLVM headers.
     that is written is code no walk of the query shows, so a table that is
     written must be a plain table with no trigger of a user, no rule, no
     foreign-key action that changes rows (cascade, SET NULL, SET DEFAULT), no
-    children, and not a partition root or a foreign table (reasons
+    children, no CHECK constraint or domain constraint that calls a VOLATILE
+    function, and not a partition root or a foreign table (reasons
     `relation:trigger`, `rule`, `cascade`, `inheritance`, `partitioned`,
-    `foreign table`, `kind`). The checks of a foreign key (the insert side, NO
+    `foreign table`, `check`, `kind`). `pg_class` keeps `relhasrules` and
+    `relhassubclass` until a VACUUM, so a table whose last rule or child
+    was dropped is still declined until then. The checks of a foreign key (the insert side, NO
     ACTION and RESTRICT) and of a deferrable unique constraint are internal
     code that changes no row, so they pass. A view is written through its
     rewrite, so its base table is the one tested (an INSTEAD OF trigger is
     a trigger of the view, which has none in the plan: that case is declined
     as `relation:kind`). The catalogs are read without a lock on the table;
-    what matters invalidates the plan. A command with INTO has a row limit
+    what matters invalidates the plan. The walk is made again whenever a
+    plan was built since the last look, so a table with foreign-key
+    triggers pays a scan of `pg_trigger` for each custom plan the statement
+    builds; the cost is small beside the planning it follows. A command with INTO has a row limit
     of two, as in PL/pgSQL, whose error for a second row is P0003.
   * A statement that writes with an invalid plan is a guard miss, not a plan
     SPI analyses again: a default, a generated column, a trigger or a rule is

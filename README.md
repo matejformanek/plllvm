@@ -224,8 +224,8 @@ declined), and `INSERT`, `UPDATE` and `DELETE`, with `RETURNING INTO` of scalar
 variables, run by SPI on PL/pgSQL's own plan (no VOLATILE function but the
 built-in ones that change no plan input, not under `#variable_conflict
 use_column` or `#print_strict_params on`, and a table that is written has no
-trigger, rule, cascading foreign-key action, children, partitions or foreign
-wrapper; `MERGE` is declined),
+trigger, rule, cascading foreign-key action, VOLATILE check constraint,
+children, partitions or foreign wrapper; `MERGE` is declined),
 with arguments and variables of a type passed by value that is no domain, or
 of a built-in base type passed by reference (`text`, `varchar`, `numeric`,
 `name`, `uuid`, `interval`, `bytea`, `jsonb`, ...), or an array of one, and
@@ -313,9 +313,9 @@ collation does. The prefix `plllvm.` is reserved.
   fmgr hook's decision (`FmgrHookIsNeeded`, e.g. after `SECURITY LABEL`) is
   taken only when a site is rebuilt.
 * SQL: `PERFORM`, `SELECT INTO`, `INSERT`, `UPDATE` and `DELETE`; no
-  cursors, `MERGE`, other commands or dynamic SQL. "Plain SELECT" is checked at the top level only, so a VOLATILE
-  function may run `FOR UPDATE` in a subquery (a STABLE one is refused by
-  SPI's read-only check).
+  cursors, `MERGE`, other commands or dynamic SQL. "Plain SELECT" is checked
+  at the top level only, so a VOLATILE function may run `FOR UPDATE` in a
+  subquery (a STABLE one is refused by SPI's read-only check).
 * Arrays: one dimension, no NULL elements, `int4`, `int8` and `float8` only.
 * Status and counters are per backend.
 

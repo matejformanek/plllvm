@@ -752,7 +752,18 @@ run_compiled(PLpgSQL_function *func, FunctionCallInfo fcinfo, PjEntry *e)
 		e->guard_misses++;
 		if (e->since_translation >= PJ_MISS_FORGET)
 			e->misses = 0;
-		if (++e->misses >= PJ_MAX_MISSES)
+
+		/*
+		 * A statement that writes has no plan that SPI may analyse again by
+		 * itself, so a table that is truncated or analysed costs the
+		 * interpreter one call, which plans it, and the next translates.  It
+		 * does not add up to a decline when the code has run since it was
+		 * translated: only a function that never runs between two of them
+		 * thrashes.
+		 */
+		if (e->harvest->replan_miss && e->since_translation > 0)
+			e->state = PJ_SEEN;
+		else if (++e->misses >= PJ_MAX_MISSES)
 		{
 			if (func->cfunc.use_count == 0)
 				decline_idle(e, "thrash");
@@ -994,17 +1005,38 @@ exec_error_callback(void *arg)
 bool
 plllvm_pj_guards_ok(PjHarvest *h, bool sql)
 {
+	h->replan_miss = false;
 	if (sql && h->sql_stale)
 		return false;
 
+	/*
+	 * The checks of a statement read the catalogs and may take a lock, which
+	 * delivers invalidations; they come first, so that no plan that was found
+	 * valid before is stale when they are done.  A plan of a statement that
+	 * writes, found valid by its own check and stale after another's, is a
+	 * miss as well.
+	 */
+	if (sql)
+	{
+		foreach_ptr(PjExpr, pe, h->exprs)
+		{
+			if (pe->h1 == PJ_H1_SQL &&
+				!plllvm_pj_sql_guard(pe->sql, &h->replan_miss))
+				return false;
+		}
+		foreach_ptr(PjExpr, pe, h->exprs)
+		{
+			if (pe->h1 == PJ_H1_SQL && pe->sql->writes &&
+				!pe->sql->plansource->is_valid)
+			{
+				h->replan_miss = true;
+				return false;
+			}
+		}
+	}
+
 	foreach_ptr(PjExpr, pe, h->exprs)
 	{
-		if (pe->h1 == PJ_H1_SQL)
-		{
-			if (sql && !plllvm_pj_sql_guard(pe->sql))
-				return false;
-			continue;
-		}
 		if (pe->h1 != PJ_H1_READY)
 			continue;
 		if (pe->expr != NULL &&

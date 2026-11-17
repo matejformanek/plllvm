@@ -34,6 +34,7 @@ CheckState
 CmdType
 CoalesceExpr
 CoerceParamHook
+CoerceToDomain
 CoerceViaIO
 CoercionForm
 ColumnRef
@@ -84,15 +85,19 @@ ForkNumber
 FormData_pg_attribute
 FormData_pg_cast
 FormData_pg_class
+FormData_pg_constraint
 FormData_pg_index
 FormData_pg_proc
 FormData_pg_trigger
+FormData_pg_type
 Form_pg_attribute
 Form_pg_cast
 Form_pg_class
+Form_pg_constraint
 Form_pg_index
 Form_pg_proc
 Form_pg_trigger
+Form_pg_type
 FromExpr
 FuncExpr
 FunctionCallInfo

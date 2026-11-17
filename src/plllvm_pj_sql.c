@@ -49,14 +49,18 @@
 #include "catalog/indexing.h"
 #include "catalog/namespace.h"
 #include "catalog/pg_class.h"
+#include "catalog/pg_constraint.h"
 #include "catalog/pg_proc.h"
 #include "catalog/pg_trigger.h"
+#include "catalog/pg_type.h"
 #include "executor/spi.h"
 #include "miscadmin.h"
 #include "nodes/nodeFuncs.h"
 #include "nodes/params.h"
+#include "optimizer/optimizer.h"
 #include "parser/parsetree.h"
 #include "plpgsql.h"
+#include "utils/builtins.h"
 #include "utils/fmgroids.h"
 #include "utils/guc.h"
 #include "utils/lsyscache.h"
@@ -90,9 +94,12 @@ typedef struct SqlFacts
 } SqlFacts;
 
 static bool sql_scan_walker(Node *node, SqlFacts *facts);
+static bool sql_cmd_writes(CachedPlanSource *psrc);
 static const char *sql_write_reason(Query *query);
 static const char *sql_relation_reason(Oid relid);
 static const char *sql_trigger_reason(Oid relid);
+static bool sql_check_volatile(Oid conrelid, Oid typid);
+static bool sql_domain_volatile(Oid typid);
 static bool sql_scan_func(Oid funcid, void *context);
 static bool sql_func_pinned(Oid funcid);
 static bool sql_facts_ok(PjSql *sql);
@@ -198,9 +205,29 @@ sql_scan_walker(Node *node, SqlFacts *facts)
 		}
 		return query_tree_walker(query, sql_scan_walker, facts, 0);
 	}
+	if (IsA(node, CoerceToDomain) &&
+		sql_domain_volatile(((CoerceToDomain *) node)->resulttype))
+	{
+		facts->reason = "relation:check";
+		return true;
+	}
 	if (check_functions_in_node(node, sql_scan_func, facts))
 		return true;
 	return expression_tree_walker(node, sql_scan_walker, facts);
+}
+
+/*
+ * Is the statement INSERT, UPDATE, DELETE or MERGE?  The command tag says, as
+ * for exec_stmt_execsql(): not the rewritten query, which a rule may have made
+ * into something else, or into nothing.
+ */
+static bool
+sql_cmd_writes(CachedPlanSource *psrc)
+{
+	return psrc->commandTag == CMDTAG_INSERT ||
+		psrc->commandTag == CMDTAG_UPDATE ||
+		psrc->commandTag == CMDTAG_DELETE ||
+		psrc->commandTag == CMDTAG_MERGE;
 }
 
 /* the result relation of a command that writes, as the rewriter left it */
@@ -250,8 +277,77 @@ sql_relation_reason(Oid relid)
 		reason = "relation:inheritance";
 	else if (rel->relhastriggers)
 		reason = sql_trigger_reason(relid);
+	if (reason == NULL && rel->relchecks > 0 &&
+		sql_check_volatile(relid, InvalidOid))
+		reason = "relation:check";
 	ReleaseSysCache(tup);
 	return reason;
+}
+
+/*
+ * Does a CHECK constraint of the table, or of the domain, call a VOLATILE
+ * function?  The executor runs the constraints, so they are no part of the
+ * plan: the walk over the query does not show them.
+ */
+static bool
+sql_check_volatile(Oid conrelid, Oid typid)
+{
+	Relation	conrel = table_open(ConstraintRelationId, AccessShareLock);
+	ScanKeyData key[2];
+	SysScanDesc scan;
+	HeapTuple	tup;
+	bool		found = false;
+
+	ScanKeyInit(&key[0], Anum_pg_constraint_conrelid, BTEqualStrategyNumber,
+				F_OIDEQ, ObjectIdGetDatum(conrelid));
+	ScanKeyInit(&key[1], Anum_pg_constraint_contypid, BTEqualStrategyNumber,
+				F_OIDEQ, ObjectIdGetDatum(typid));
+	scan = systable_beginscan(conrel, ConstraintRelidTypidNameIndexId, true,
+							  NULL, 2, key);
+	while (!found && HeapTupleIsValid(tup = systable_getnext(scan)))
+	{
+		Form_pg_constraint con = (Form_pg_constraint) GETSTRUCT(tup);
+		Datum		bin;
+		bool		isnull;
+
+		if (con->contype != CONSTRAINT_CHECK)
+			continue;
+		bin = heap_getattr(tup, Anum_pg_constraint_conbin,
+						   RelationGetDescr(conrel), &isnull);
+		if (isnull)
+			continue;
+		found = contain_volatile_functions(stringToNode(TextDatumGetCString(bin)));
+	}
+	systable_endscan(scan);
+	table_close(conrel, AccessShareLock);
+	return found;
+}
+
+/* the same for a domain and the domains it is made on */
+static bool
+sql_domain_volatile(Oid typid)
+{
+	while (OidIsValid(typid))
+	{
+		HeapTuple	tup = SearchSysCache1(TYPEOID, ObjectIdGetDatum(typid));
+		Form_pg_type typ;
+		Oid			base;
+
+		if (!HeapTupleIsValid(tup))
+			return false;
+		typ = (Form_pg_type) GETSTRUCT(tup);
+		if (typ->typtype != TYPTYPE_DOMAIN)
+		{
+			ReleaseSysCache(tup);
+			return false;
+		}
+		base = typ->typbasetype;
+		ReleaseSysCache(tup);
+		if (sql_check_volatile(InvalidOid, typid))
+			return true;
+		typid = base;
+	}
+	return false;
 }
 
 static const char *
@@ -461,11 +557,9 @@ plllvm_pj_sql_harvest(PLpgSQL_function *func, PjHarvest *h, PjExpr *pe)
 		PLpgSQL_row *row = (PLpgSQL_row *) stmt->target;
 		TupleDesc	desc = psrc->resultDesc;
 
-		/* set before any plan exists for a harvest to see */
-		Assert(stmt->mod_stmt_set);
 		sql->into = true;
 		sql->strict = stmt->strict;
-		sql->mod = stmt->mod_stmt;
+		sql->mod = sql_cmd_writes(psrc);
 		sql->ntargets = row->nfields;
 		sql->targets = palloc_array(int, row->nfields);
 		memcpy(sql->targets, row->varnos, sizeof(int) * row->nfields);
@@ -487,10 +581,7 @@ plllvm_pj_sql_harvest(PLpgSQL_function *func, PjHarvest *h, PjExpr *pe)
 	 * A command that a rule turned into nothing has no query to show it, and
 	 * writes as much as any: its tag tells
 	 */
-	sql->writes = facts.writes || psrc->commandTag == CMDTAG_INSERT ||
-		psrc->commandTag == CMDTAG_UPDATE ||
-		psrc->commandTag == CMDTAG_DELETE ||
-		psrc->commandTag == CMDTAG_MERGE;
+	sql->writes = facts.writes || sql_cmd_writes(psrc);
 	sql->nfuncs = list_length(facts.funcs);
 	sql->funcs = palloc_array(Oid, Max(sql->nfuncs, 1));
 	sql->volatility = palloc_array(char, Max(sql->nfuncs, 1));
@@ -586,7 +677,7 @@ sql_result_same(PjSql *sql, CachedPlanSource *psrc)
  * call may have) is checked as it stands.
  */
 bool
-plllvm_pj_sql_guard(PjSql *sql)
+plllvm_pj_sql_guard(PjSql *sql, bool *replan)
 {
 	CachedPlanSource *psrc = sql->plansource;
 
@@ -610,7 +701,12 @@ plllvm_pj_sql_guard(PjSql *sql)
 		 * A statement that writes also depends on what its table has: a
 		 * default, a generated column, a trigger, a rule
 		 */
-		if (sql->has_view || sql->writes)
+		if (sql->writes)
+		{
+			*replan = true;
+			return false;
+		}
+		if (sql->has_view)
 			return false;
 		for (int i = 0; i < sql->nfuncs; i++)
 		{

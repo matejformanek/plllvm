@@ -149,6 +149,7 @@ SELECT psd_try('SELECT psd_stable(52)');
 (1 row)
 
 -- the error came from SPI, in compiled code
+SELECT pj_expect('psd_stable(integer)', 'compiled') \gset
 SELECT pj_mark() \gset
 SELECT psd_try('SELECT psd_stable(53)');
                             psd_try                            
@@ -160,6 +161,12 @@ SELECT psd_try('SELECT psd_stable(53)');
  PL/pgSQL function psd_stable(integer) line 3 at SQL statement+
  SQL statement "SELECT psd_stable(53)"                        +
  PL/pgSQL function psd_try(text) line 4 at EXECUTE
+(1 row)
+
+SELECT pj_delta(1, 0, NULL, 0, 0, NULL, 1);
+ pj_delta 
+----------
+ 
 (1 row)
 
 -- a serial column: the default is nextval(), a pinned built-in; RETURNING INTO
@@ -1647,6 +1654,7 @@ SELECT psd_reset(1), psd_reset(2), psd_reset(3);
          1 |         2 |         3
 (1 row)
 
+SELECT pj_expect('psd_reset(integer)', 'compiled') \gset
 -- (a statement of its own for each: in one transaction the plan is not stale)
 \o /dev/null
 SELECT CASE s WHEN 1 THEN 'TRUNCATE psd_rs' WHEN 2 THEN 'ANALYZE psd_rs'
@@ -1743,6 +1751,7 @@ SELECT count(*), sum(a) FROM psd_rs;
      5 | 625
 (1 row)
 
+SELECT pj_expect('psd_reset(integer)', 'compiled') \gset
 -- ANALYZE alone is as much a stale plan
 SELECT psd_reset(4), psd_reset(5);
  psd_reset | psd_reset 
@@ -1770,6 +1779,7 @@ SELECT count(*), sum(a) FROM psd_rs;
     13 | 685
 (1 row)
 
+SELECT pj_expect('psd_reset(integer)', 'compiled') \gset
 -- a call after each reset and none between is what the interpreter does
 -- best: it translates after each and runs none, and is declined as thrashing
 CREATE TABLE psd_rs1 (a int, b text);
@@ -1876,6 +1886,7 @@ SELECT count(*), sum(a) FROM psd_rs1;
      1 |  40
 (1 row)
 
+SELECT pj_expect('psd_reset1(integer)', 'declined:thrash') \gset
 -- a CHECK constraint or a domain with a VOLATILE function is code the plan
 -- does not show: the interpreter's.  A constraint of immutable and STABLE
 -- functions is not.
@@ -2028,6 +2039,11 @@ SELECT * FROM psd_cdd ORDER BY a;
  3 | 3
 (3 rows)
 
+SELECT pj_expect('psd_ck(integer)', 'compiled') \gset
+SELECT pj_expect('psd_ckv(integer)', 'declined:relation:check') \gset
+SELECT pj_expect('psd_cd(integer)', 'compiled') \gset
+SELECT pj_expect('psd_cdv(integer)', 'declined:relation:check') \gset
+SELECT pj_expect('psd_cdd(integer)', 'declined:relation:check') \gset
 -- memory: 10^4 statements that write, read inside the loop
 CREATE TABLE psd_m (a int PRIMARY KEY, b int);
 INSERT INTO psd_m SELECT i, 0 FROM generate_series(1, 20) i;

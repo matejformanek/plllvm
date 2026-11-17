@@ -50,7 +50,7 @@ REGRESS = plllvm_setup $(REGRESS_FEATURES) $(REGRESS_KERNELS) expr_plugin \
 # variant only, REGRESS_PJ_OPT at opt level 3.
 REGRESS_PJ = pj_language pj_basic pj_errors pj_guards pj_execute pj_casts pj_sessions \
 		pj_control pj_kernels pj_ops pj_bounds pj_memory pj_boxed pj_abort pj_planfree pj_calls \
-		pj_byref pj_udf pj_typmod pj_raise pj_array pj_case pj_into pj_elements pj_sql pj_sql_into pj_sql_dml pj_sql_fdw
+		pj_byref pj_udf pj_typmod pj_raise pj_array pj_case pj_into pj_elements pj_sql pj_sql_into pj_sql_dml
 REGRESS_PJ_ONCE = pj_states pj_discard pj_execute_diff pj_arms pj_ctxraw pj_sql_once \
 		pj_sessions_midcall
 REGRESS_PJ_OPT = pj_kernels pj_ops
@@ -183,7 +183,7 @@ endif
 
 .PHONY: port-ok doctor stage cluster-init cluster-start cluster-stop pgindent \
 	installcheck-discard installcheck-opt installcheck-hazard installcheck-plpgsql \
-	installcheck-expr installcheck-pj installcheck-pj-once installcheck-pj-opt \
+	installcheck-expr installcheck-pj installcheck-pj-once installcheck-pj-opt installcheck-pj-fdw \
 	installcheck-plpgsql-pj check-pj-ir check-pj-cmodule verify check-host-api kernels check-kernels
 
 # 5432, 5433 belong to pg-claude, 5444 to the perf cluster
@@ -355,6 +355,16 @@ installcheck-pj:
 installcheck-pj-once:
 	@[ -z '$(REGRESS_PJ_ONCE)' ] || \
 	  $(call pj_run,$(PLPGSQL_LOAD),$(PJ_FIXTURE) $(REGRESS_PJ_ONCE))
+
+# A foreign table of postgres_fdw (contrib), on a loopback server: skipped, with
+# the reason, on an installation without it
+installcheck-pj-fdw:
+	@if [ -f '$(pkglibdir)/postgres_fdw$(DLSUFFIX)' ] && \
+	    [ -f '$(datadir)/extension/postgres_fdw.control' ]; then \
+	  $(call pj_run,$(PLPGSQL_LOAD),$(PJ_FIXTURE) pj_sql_fdw); \
+	else \
+	  echo 'installcheck-pj-fdw: skipped, postgres_fdw is not installed (contrib)'; \
+	fi
 
 # no file needs it yet
 installcheck-pj-opt:
@@ -549,7 +559,7 @@ verify: port-ok
 	'$(bindir)/pg_ctl' -D '$(PLLLVM_DATA)' status > /dev/null || step $(MAKE) cluster-start; \
 	for t in installcheck installcheck-opt installcheck-discard installcheck-hazard \
 	  check-host-api pgindent doctor installcheck-expr installcheck-plpgsql \
-	  installcheck-pj installcheck-pj-once installcheck-pj-opt installcheck-plpgsql-pj \
+	  installcheck-pj installcheck-pj-once installcheck-pj-opt installcheck-pj-fdw installcheck-plpgsql-pj \
 	  check-pj-ir check-pj-cmodule check-pj-fuzz; do \
 	  step $(MAKE) $$t; \
 	  [ $$t != pgindent ] || step git diff --exit-code; \

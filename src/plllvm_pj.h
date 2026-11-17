@@ -335,6 +335,8 @@ typedef struct PjHarvest
 	int			npos;
 	int			nbase;			/* then one per expression */
 	bool		has_notice;		/* as in PjScope */
+	bool		replan_miss;	/* the last guard miss was a statement that
+								 * writes, with a plan to be made again */
 	bool		sql_stale;		/* a statement changed what it was admitted
 								 * for during a call: the next one translates
 								 * again */
@@ -366,7 +368,7 @@ extern bool plllvm_pj_guards_ok(PjHarvest *h, bool sql);
 /* plllvm_pj_sql.c */
 extern const char *plllvm_pj_sql_harvest(struct PLpgSQL_function *func,
 										 PjHarvest *h, PjExpr *pe);
-extern bool plllvm_pj_sql_guard(PjSql *sql);
+extern bool plllvm_pj_sql_guard(PjSql *sql, bool *replan);
 extern void plllvm_pj_sql_finish(PjCtx *ctx);
 extern Datum plllvm_pj_convert(PjCtx *ctx, Datum value, bool *isnull,
 							   Oid srctype, int32 srctypmod,
