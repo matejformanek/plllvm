@@ -420,21 +420,31 @@ Only `plllvm_jit.c` and `plllvm_error.cpp` include LLVM headers.
     coercion to a domain, also inside a table's CHECK), that calls a VOLATILE
     function, and not a partition root or a foreign table (reasons
     `relation:trigger`, `rule`, `cascade`, `inheritance`, `partitioned`,
-    `foreign table`, `check`, `kind`). A domain constraint that runs inside an
-    input function (`record_in`, `array_in`, `domain_in`,
+    `foreign table`, `check`, `kind`, `view`, `none`). A domain constraint
+    that runs inside an input function (`record_in`, `array_in`, `domain_in`,
     `jsonb_populate_record`) is a stated gap: those functions are STABLE, so
     the walk admits them. `pg_class` keeps `relhasrules` until a VACUUM and
     `relhassubclass` until an ANALYZE, so a table whose last rule or child was
     dropped is still declined until then. The checks of a foreign key (the
     insert side, NO ACTION and RESTRICT) and of a deferrable unique constraint
-    are internal code that changes no row, so they pass. A view is written
-    through its rewrite, so its base table is the one tested (an INSTEAD OF
-    trigger is a trigger of the view, which has none in the plan: that case is
-    declined as `relation:kind`). The walk reads the catalogs under the lock of
-    the entry check (below). It is made at every entry, so a table with
-    foreign-key triggers pays a scan of `pg_trigger` per call; the cost is
-    small beside the planning of the statement it precedes (unmeasured). A command with INTO has a row limit of
-    two, as in PL/pgSQL, whose error for a second row is P0003.
+    are internal code that changes no row, so they pass. A write through a
+    view, and a statement whose rewriting wrote a table other than its own
+    result relation (a rule's action), is declined as `relation:view`: the
+    view stays among the relations of the query with the lock of a write, so
+    SPI takes that lock inside the call, where what another session committed
+    is delivered. A statement that a rule turned into nothing has no result
+    relation and is declined as `relation:none`. A view whose INSTEAD OF
+    trigger takes the write is declined as `relation:kind`. The walk reads the
+    catalogs under the lock of the entry check (below). It is made at every
+    entry, so a table with foreign-key triggers pays a scan of `pg_trigger`
+    per call; the cost is small beside the planning of the statement it
+    precedes (unmeasured, T1). For a write, `sql_check_volatile()` reads every
+    CHECK of the table with `stringToNode` and scans `pg_constraint` once more
+    for each coercion to a domain, at every entry, reached statement or not; a
+    per-plan cache of the verdict, keyed on the lock-protected relcache state,
+    is not cheap enough to do here, so it stays a cost. A command with INTO
+    has a row limit of two, as in PL/pgSQL, whose error for a second row is
+    P0003.
   * Entry check of a statement that writes: lock, then look. The check runs at
     the entry of the call because a statement has no deopt point, so only
     there can a miss still send the call to the interpreter. For each
@@ -447,14 +457,15 @@ Only `plllvm_jit.c` and `plllvm_error.cpp` include LLVM headers.
     since the lock delivered what other sessions committed, and a plan made
     stale by it is a miss, `interpreted:stale plan`; (4) `search_path`, role
     and `row_security` that the rewrite depends on, and `paramnos`, are
-    compared; (5) the plan is walked. This is the order in which plancache
-    itself locks and then looks. Triggers, FK actions, defaults, generated
-    columns, CHECK and NOT NULL, rules, policies and the constraints of
-    domains on the columns of a table are changed by DDL whose lock conflicts
-    with the RowExclusiveLock taken in (2), so what the walk reads stays true
-    until the transaction ends, and what another session has not committed
-    waits for it. Inheritance children are the exception: CREATE TABLE ...
-    INHERITS takes only ShareUpdateExclusiveLock on the parent.
+    compared; (5) the plan is walked. Triggers, FK actions, defaults,
+    generated columns, CHECK and NOT NULL, rules, policies and the constraints
+    of columns are changed by DDL whose lock conflicts with the
+    RowExclusiveLock taken in (2), so what the walk reads stays true until the
+    transaction ends, and what another session has not committed waits for it.
+    Two kinds of change are not held back: CREATE TABLE ... INHERITS takes
+    only ShareUpdateExclusiveLock on the parent, and ALTER DOMAIN ... ADD
+    CONSTRAINT ... NOT VALID locks no table that uses the domain (the
+    ShareLock is taken only when it validates).
   * Entry check of a statement that only reads: `search_path`, role,
     `row_security` and `paramnos` are compared, and a valid plan is walked; no
     lock is taken. A stale plan is run, since SPI analyses it again by itself:
@@ -487,13 +498,20 @@ Only `plllvm_jit.c` and `plllvm_error.cpp` include LLVM headers.
     callee, a new volatility, a table of the same name earlier in the
     search_path) runs once unchecked; the next entry walks it. The same holds
     for a stale plan of a read that SPI analyses again inside the call.
-    (Children) A child added to a written table after the entry lock can be
-    planned into an UPDATE or DELETE inside the call, and its triggers then
-    fire; the next entry declines `relation:inheritance`. (Own session) A
-    callee that does DDL in the caller's own backend is not blocked by the
-    caller's locks. (Parallel) A PARALLEL SAFE function with a write in a
-    branch that no call takes ran without error in the workers of a parallel
-    query (`psd_pw`); the lock in a worker is not observed apart from that.
+    (Domain) A domain CHECK added with NOT VALID locks no table, so one with a
+    VOLATILE function that another session commits in the middle of a call
+    runs inside the write; the next entry's walk sees it. (Reads of a write)
+    The tables that a write only reads are not locked at the entry: DDL on
+    them delivered in the middle of a call, such as an ALTER COLUMN TYPE that
+    changes the overload resolution, is analysed by SPI inside the call and
+    runs once unchecked. (Children) A child added to a written table after the
+    entry lock can be planned into an UPDATE or DELETE inside the call, and
+    its triggers then fire; the next entry declines `relation:inheritance`.
+    (Own session) A callee that does DDL in the caller's own backend is not
+    blocked by the caller's locks. (Parallel) A PARALLEL SAFE function with a
+    write in a branch that no call takes ran without error in the workers of a
+    parallel query (`psd_pw`); the lock in a worker is not observed apart from
+    that.
   * `sql_stale` also counts a failed simple-expression guard after a
     statement, but only when `exec_epoch` moved during the statement (a
     function or privilege changed), not after every statement: a scan of the

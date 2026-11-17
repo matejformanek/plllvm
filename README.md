@@ -326,9 +326,13 @@ collation does. The prefix `plllvm.` is reserved.
 * A function, type or schema changed by another session in the middle of a
   call can make SPI analyse a statement inside the call; what it shows runs
   once before the next call's entry checks it. So does a stale plan of a read.
-  A child added to a written table after the entry lock is the same. A domain
-  constraint that runs inside an input function (`record_in`, `array_in`,
-  `jsonb_populate_record`) is not looked at.
+  A child added to a written table after the entry lock is the same, and so
+  is a domain CHECK added with NOT VALID, and DDL on a table that the write
+  only reads. A domain constraint that runs inside an input function
+  (`record_in`, `array_in`, `jsonb_populate_record`) is not looked at.
+* A write through a view, or by the action of a rule on another table, is
+  declined (`relation:view`), and so is a statement that a rule turned into
+  nothing (`relation:none`).
 * Arrays: one dimension, no NULL elements, `int4`, `int8` and `float8` only.
 * Status and counters are per backend.
 
