@@ -725,14 +725,17 @@ BEGIN
 END $$;
 SET plan_cache_mode = force_custom_plan;
 SELECT psd_nullre(1, 1), psd_nullre(2, 1), psd_nullre(3, 1);
+SELECT pj_expect('psd_nullre(integer,integer)', 'compiled') \gset
 CREATE TRIGGER psd_nr_t BEFORE INSERT ON psd_nr
   FOR EACH ROW EXECUTE FUNCTION psd_nr_fn();
 SELECT psd_try('SELECT psd_nullre(0, NULL)');
 SELECT pj_mark() \gset
 SELECT psd_nullre(1, 1);
+SELECT pj_delta(0, 1, NULL, 0, 0, NULL, 0);
 SELECT psd_nullre(2, 1);
 SELECT psd_nullre(3, 1);
 SELECT psd_nullre(4, 1);
+SELECT pj_expect('psd_nullre(integer,integer)', 'declined:relation:trigger') \gset
 RESET plan_cache_mode;
 SELECT * FROM psd_nr ORDER BY a;
 
@@ -766,6 +769,7 @@ SELECT psd_plan(2);
 SELECT psd_plan(3);
 SELECT psd_plan(4);
 SELECT * FROM psd_p5 ORDER BY a;
+SELECT pj_expect('psd_plan(integer)', 'compiled') \gset
 
 -- a function of a CHECK constraint that becomes VOLATILE between calls is
 -- no dependency of the plan: the walk at the next entry finds it
@@ -778,12 +782,15 @@ BEGIN
   RETURN n;
 END $$;
 SELECT psd_cff(1), psd_cff(2), psd_cff(3);
+SELECT pj_expect('psd_cff(integer)', 'compiled') \gset
 ALTER FUNCTION psd_cf(int) VOLATILE;
 SELECT pj_mark() \gset
 SELECT psd_cff(4);
+SELECT pj_delta(0, 1, NULL, 0, 0, NULL, 0);
 SELECT psd_cff(5);
 SELECT psd_cff(6);
 SELECT * FROM psd_cft ORDER BY a;
+SELECT pj_expect('psd_cff(integer)', 'declined:relation:check') \gset
 
 -- a CHECK constraint or a domain with a VOLATILE function is code the plan
 -- does not show: the interpreter's.  A constraint of immutable and STABLE
@@ -849,6 +856,34 @@ SELECT pj_expect('psd_cd(integer)', 'compiled') \gset
 SELECT pj_expect('psd_cdv(integer)', 'declined:relation:check') \gset
 SELECT pj_expect('psd_cdd(integer)', 'declined:relation:check') \gset
 SELECT pj_expect('psd_ckd(integer)', 'declined:relation:check') \gset
+
+-- a PARALLEL SAFE function with a write in a branch that no call takes, run
+-- in the workers of a parallel query: the entry lock is no error there
+CREATE TABLE psd_pwt (a int) WITH (autovacuum_enabled = false);
+CREATE TABLE psd_pwb AS SELECT i AS a FROM generate_series(1, 5000) i;
+ANALYZE psd_pwb;
+CREATE FUNCTION psd_pw(n int) RETURNS int LANGUAGE :pj_lang PARALLEL SAFE AS $$
+BEGIN
+  IF n < 0 THEN
+    INSERT INTO psd_pwt VALUES (n);
+  END IF;
+  RETURN n;
+END $$;
+SELECT psd_pw(-1), psd_pw(-2), psd_pw(-3);
+SET parallel_setup_cost = 0;
+SET parallel_tuple_cost = 0;
+SET min_parallel_table_scan_size = 0;
+SET max_parallel_workers_per_gather = 2;
+SET debug_parallel_query = on;
+SELECT sum(psd_pw(a)) FROM psd_pwb;
+SELECT sum(psd_pw(a)) FROM psd_pwb;
+SELECT sum(psd_pw(a)) FROM psd_pwb;
+RESET debug_parallel_query;
+RESET max_parallel_workers_per_gather;
+RESET min_parallel_table_scan_size;
+RESET parallel_tuple_cost;
+RESET parallel_setup_cost;
+SELECT * FROM psd_pwt ORDER BY a;
 
 -- memory: 10^4 statements that write, read inside the loop
 CREATE TABLE psd_m (a int PRIMARY KEY, b int) WITH (autovacuum_enabled = false);

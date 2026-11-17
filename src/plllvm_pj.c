@@ -752,16 +752,12 @@ run_compiled(PLpgSQL_function *func, FunctionCallInfo fcinfo, PjEntry *e)
 		e->guard_misses++;
 
 		/*
-		 * The plan of a statement that writes is stale: SPI must not analyse
-		 * it inside the call, since what the new plan shows (a trigger, a
-		 * check) would run before anybody looked at it.  The interpreter runs
-		 * this call and plans it again; the entry guard of the next call
-		 * finds a valid plan that is new, and the facts the code depends on
-		 * are checked on it (plllvm_pj_sql_guard()).  Nothing is translated,
-		 * so it is not a miss that adds up to a decline.
+		 * The plan of a statement that writes is stale, or its table is held
+		 * by another session: the interpreter runs this call.  Nothing is
+		 * translated, so it is not a miss that adds up to a decline.
 		 */
-		if (h->replan_miss)
-			return fall_back(fcinfo, e, "interpreted:stale plan");
+		if (h->soft_miss != NULL)
+			return fall_back(fcinfo, e, h->soft_miss);
 
 		if (e->since_translation >= PJ_MISS_FORGET)
 			e->misses = 0;
@@ -1007,36 +1003,19 @@ exec_error_callback(void *arg)
 bool
 plllvm_pj_guards_ok(PjHarvest *h, bool sql)
 {
-	h->replan_miss = false;
-	if (sql && h->sql_stale)
-		return false;
+	h->soft_miss = NULL;
 
 	/*
-	 * The checks of a statement read the catalogs and may take a lock, which
-	 * delivers invalidations; they come first, so that the plans of the
-	 * expressions are not found valid before them and stale after.  The
-	 * second pass catches a statement that writes whose plan went stale
-	 * during the check of another; one that does not write has SPI to analyse
-	 * it, and sql_recheck() after the execution is the backstop for the
-	 * facts.
+	 * The statements come first: the lock on the table of a write delivers
+	 * the invalidations that the plans of the expressions below must see
 	 */
 	if (sql)
 	{
 		foreach_ptr(PjExpr, pe, h->exprs)
 		{
 			if (pe->h1 == PJ_H1_SQL &&
-				!plllvm_pj_sql_guard(pe->sql, &h->replan_miss))
+				!plllvm_pj_sql_guard(pe->sql, &h->soft_miss))
 				return false;
-		}
-		foreach_ptr(PjExpr, pe, h->exprs)
-		{
-			if (pe->h1 == PJ_H1_SQL && pe->sql->writes &&
-				!pe->sql->plansource->is_valid)
-			{
-				pe->sql->rewalk = true;
-				h->replan_miss = true;
-				return false;
-			}
 		}
 	}
 

@@ -60,6 +60,7 @@
 #include "optimizer/optimizer.h"
 #include "parser/parsetree.h"
 #include "plpgsql.h"
+#include "storage/lmgr.h"
 #include "utils/builtins.h"
 #include "utils/fmgroids.h"
 #include "utils/guc.h"
@@ -105,7 +106,7 @@ static bool sql_expr_volatile_walker(Node *node, void *context);
 static bool sql_scan_func(Oid funcid, void *context);
 static bool sql_func_pinned(Oid funcid);
 static bool sql_facts_ok(PjSql *sql);
-static void sql_recheck(PjHarvest *h, PjSql *sql);
+static bool sql_lock_writes(Node *node, void *context);
 static const char *sql_into_admit(PLpgSQL_function *func,
 								  CachedPlanSource *psrc,
 								  PLpgSQL_stmt_execsql *stmt);
@@ -602,7 +603,6 @@ plllvm_pj_sql_harvest(PLpgSQL_function *func, PjHarvest *h, PjExpr *pe)
 	}
 	sql->paramnos = bms_copy(expr->paramnos);
 	sql->plansource = psrc;
-	sql->generation = psrc->generation;
 	sql->has_view = facts.has_view;
 
 	/*
@@ -691,23 +691,80 @@ sql_result_same(PjSql *sql, CachedPlanSource *psrc)
 }
 
 /*
- * May the next call run the statement on the plan it has?  The checks SPI
- * itself would make are the ones that can change what the code assumed, so
- * they are made before anything runs: a miss sends the call to the
- * interpreter, which translates again.
+ * The tables that the statement writes, locked as its execution will lock
+ * them, but without waiting.  True if one is held by another session.
+ */
+static bool
+sql_lock_writes(Node *node, void *context)
+{
+	if (node == NULL)
+		return false;
+	if (IsA(node, Query))
+	{
+		Query	   *query = (Query *) node;
+
+		if (query->resultRelation > 0)
+		{
+			RangeTblEntry *rte = rt_fetch(query->resultRelation, query->rtable);
+
+			if (rte->rtekind == RTE_RELATION &&
+				!ConditionalLockRelationOid(rte->relid, rte->rellockmode))
+				return true;
+		}
+		return query_tree_walker(query, sql_lock_writes, context, 0);
+	}
+	return expression_tree_walker(node, sql_lock_writes, context);
+}
+
+/*
+ * May this call run the statement on the plan it has?  Checked at the entry,
+ * where a miss can still send the call to the interpreter: a statement has no
+ * deopt point.
  *
- * An invalid plan is not a miss: SPI analyses it again inside the call, and
- * a function whose table is truncated and analysed between calls would
- * otherwise never stay compiled.  It is one only if what the statement was
- * admitted for may have changed: a callee that is not as it was, a view, a
- * policy, or the table of a statement that writes, which may have a trigger
- * now.  A plan that others have rebuilt since our last look (an interpreted
- * call may have) is checked as it stands.
+ * The facts about the tables a statement writes (triggers, rules, defaults,
+ * constraints, policies) change under locks that conflict with the one a
+ * write takes.  So the tables are locked first, as plancache does before it
+ * looks at a plan, and the plan is looked at after: a change that another
+ * session committed is delivered by the lock and has made the plan invalid, a
+ * change that it has not committed waits for our transaction.  Nothing is
+ * waited for here: a table that is held makes the interpreter run the call.
+ * What the lock gives is for the rest of the transaction.
+ *
+ * Every valid plan is walked at every entry (sql_facts_ok()): whoever made
+ * the query list, the interpreter, a nested call, SPI in an earlier call or a
+ * planning that failed after it, it is the one that is walked.  An invalid
+ * plan of a write is the interpreter's to make again, as SPI would make it
+ * inside the call, where what it shows would run before anybody looked.  An
+ * invalid plan of a read is run, since SPI analyses it again by itself: it is
+ * how a function whose table is truncated and analysed between calls stays
+ * compiled.  It is a miss only if what the statement was admitted for may
+ * have changed: a callee that is not as it was, a view, a policy.
  */
 bool
-plllvm_pj_sql_guard(PjSql *sql, bool *replan)
+plllvm_pj_sql_guard(PjSql *sql, const char **soft)
 {
 	CachedPlanSource *psrc = sql->plansource;
+
+	if (sql->writes)
+	{
+		if (!psrc->is_valid)
+		{
+			*soft = "interpreted:stale plan";
+			return false;
+		}
+		if (sql_lock_writes((Node *) psrc->query_list, NULL))
+		{
+			*soft = "interpreted:lock";
+			return false;
+		}
+
+		/* the lock has delivered what others committed */
+		if (!psrc->is_valid)
+		{
+			*soft = "interpreted:stale plan";
+			return false;
+		}
+	}
 
 	/* the names would resolve in another schema */
 	if (psrc->search_path == NULL ||
@@ -725,22 +782,6 @@ plllvm_pj_sql_guard(PjSql *sql, bool *replan)
 
 	if (!psrc->is_valid)
 	{
-		/*
-		 * A statement that writes also depends on what its table has: a
-		 * default, a generated column, a trigger, a rule
-		 */
-		if (sql->writes)
-		{
-			/*
-			 * The interpreter plans it again, and a planning that fails (a
-			 * custom plan that raises) leaves the new query list in a valid
-			 * plan source with the old generation: so the walk is for the
-			 * next valid plan, whatever the counter says
-			 */
-			sql->rewalk = true;
-			*replan = true;
-			return false;
-		}
 		if (sql->has_view)
 			return false;
 		for (int i = 0; i < sql->nfuncs; i++)
@@ -760,45 +801,13 @@ plllvm_pj_sql_guard(PjSql *sql, bool *replan)
 		return true;
 	}
 
-	if (psrc->generation != sql->generation || sql->rewalk)
-	{
-		plllvm_pj_count.sql_rewalks++;
-		if (!sql_facts_ok(sql))
-			return false;
-		sql->generation = psrc->generation;
-		sql->rewalk = false;
-	}
-	return true;
-}
-
-/*
- * After an execution: if a plan was built since we looked, SPI may have
- * analysed the statement again, and the query list has changed under us.  The
- * list's address would not tell (the new one can take the place of the old),
- * the counter of plans does: it moves with every plan built, and a new query
- * list is followed by one, unless the plan that follows the analysis fails
- * to build (a custom plan that raises): then the next call runs that list
- * once unchecked, and this check, after it, finds it.  The statement goes on
- * with the trees it has, as PL/pgSQL does until its next evaluation, and the
- * next call translates again if the plan is no longer the one it was
- * admitted as.
- */
-static void
-sql_recheck(PjHarvest *h, PjSql *sql)
-{
-	CachedPlanSource *psrc = sql->plansource;
-
-	if (psrc->generation == sql->generation || !psrc->is_valid)
-		return;
-
 	plllvm_pj_count.sql_rewalks++;
-	if (sql_facts_ok(sql))
-		sql->generation = psrc->generation;
-	else
+	if (!sql_facts_ok(sql))
 	{
 		plllvm_pj_count.sql_stale++;
-		h->sql_stale = true;
+		return false;
 	}
+	return true;
 }
 
 /*
@@ -943,8 +952,6 @@ plllvm_pj_sql(PjCtx *ctx, int32 idx)
 	}
 	PG_END_TRY();
 	MemoryContextSwitchTo(oldcxt);
-
-	sql_recheck(h, sql);
 
 	if (sql->kind == PJ_SQL_PERFORM)
 	{

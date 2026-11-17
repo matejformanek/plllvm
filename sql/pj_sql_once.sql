@@ -37,7 +37,7 @@ SET plllvm.debug_inject = pj_sql_replan;
 SELECT pj_mark() \gset
 SELECT pso_shadow(5, 'x'), pso_shadow(6, 'x'), pso_shadow(7, 'y');
 SELECT pso_try('SELECT pso_shadow(1, ''x'')');
-SELECT pj_delta(4, 0, NULL, 0, 0, NULL, 4, 0, 3);
+SELECT pj_delta(4, 0, NULL, 0, 0, NULL, 4, 0, 4);
 RESET plllvm.debug_inject;
 
 -- an error inside the statement, then an interpreted call that analyses the
@@ -62,9 +62,9 @@ ALTER TABLE pso_one RENAME b TO a;
 SELECT pso_g8(2, 1), pso_g8(2, NULL), pso_g8(3, 1);
 SELECT pj_expect('pso_g8(integer,integer)', 'compiled') \gset
 
--- P-REWALK: a statement analysed again at each of 200 executions of one call
--- is checked 200 times, not 199 or 0.  The address of the new query list may
--- be the old one's.
+-- A statement analysed again at each of 200 executions of one call is walked
+-- once, at the entry of the call: what SPI makes of it inside the call is
+-- walked at the next entry
 CREATE FUNCTION pso_rewalk(n int) RETURNS int LANGUAGE plpgsql_jit AS $$
 BEGIN
   FOR i IN 1..n LOOP
@@ -77,7 +77,7 @@ SELECT pj_expect('pso_rewalk(integer)', 'compiled') \gset
 SET plllvm.debug_inject = pj_sql_replan;
 SELECT pj_mark() \gset
 SELECT pso_rewalk(200);
-SELECT pj_delta(1, 0, NULL, 0, 0, NULL, 200, 0, 200);
+SELECT pj_delta(1, 0, NULL, 0, 0, NULL, 200, 0, 1);
 RESET plllvm.debug_inject;
 
 -- P-IBETWEEN: an interpreted call analyses the statement again between two
@@ -96,7 +96,7 @@ ALTER FUNCTION pso_callee(int) VOLATILE;
 SELECT pso_ib(4, NULL);
 SELECT pj_mark() \gset
 SELECT pso_ib(5, 1);
-SELECT pj_delta(0, 1, NULL, 0, 0, NULL, NULL, 0, NULL);
+SELECT pj_delta(0, 1, NULL, 0, 0, NULL, NULL, 1, NULL);
 SELECT pj_expect('pso_ib(integer,integer)', 'interpreted:guard miss') \gset
 SELECT pso_ib(6, 1);
 SELECT pj_expect('pso_ib(integer,integer)', 'declined:volatile callee') \gset
@@ -114,12 +114,15 @@ BEGIN
 END $$;
 SET plan_cache_mode = force_custom_plan;
 SELECT pso_ibr(1, 1), pso_ibr(2, 1), pso_ibr(3, 1);
+SELECT pj_expect('pso_ibr(integer,integer)', 'compiled') \gset
 ALTER FUNCTION pso_cal2(int) VOLATILE;
 SELECT pso_try('SELECT pso_ibr(0, NULL)');
 SELECT pj_mark() \gset
 SELECT pso_ibr(1, 1);
+SELECT pj_delta(0, 1, NULL, 0, 0, NULL, 0);
 SELECT pso_ibr(2, 1);
 SELECT pso_ibr(3, 1);
+SELECT pj_expect('pso_ibr(integer,integer)', 'declined:volatile callee') \gset
 RESET plan_cache_mode;
 
 -- N-SQL: a function replaced inside the statement stales the plan of a later
@@ -237,14 +240,14 @@ ALTER TABLE pso_alt ALTER COLUMN b TYPE text USING b::text;
 ALTER TABLE pso_alt ALTER COLUMN c TYPE bigint;
 SELECT pj_mark() \gset
 SELECT pso_l4(1);
-SELECT pj_delta(1, 0, NULL, 0, 0, NULL, 1, 1, 1);
+SELECT pj_delta(1, 0, NULL, 0, 0, NULL, 1, 0, 0);
 SELECT pso_l4(2);
 SELECT pj_expect('pso_l4(integer)', 'interpreted:guard miss') \gset
 SELECT pso_l4(2), pso_l4(3);
 SELECT pj_expect('pso_l4(integer)', 'declined:cast') \gset
 SELECT pj_mark() \gset
 SELECT pso_l4b(2);
-SELECT pj_delta(1, 0, NULL, 0, 0, NULL, 1, 1, 1);
+SELECT pj_delta(1, 0, NULL, 0, 0, NULL, 1, 0, 0);
 SELECT pso_l4b(1), pso_l4b(2), pso_l4b(3);
 SELECT pj_expect('pso_l4b(integer)', 'declined:cast') \gset
 -- a conversion that fails, in the call that converts: PL/pgSQL's error

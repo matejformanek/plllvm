@@ -40,12 +40,16 @@ BEGIN
   RETURN n;
 END $$;
 SELECT psc_w(1), psc_w(2), psc_w(3);
+SELECT pj_expect('psc_w(integer)', 'compiled') \gset
 BEGIN;
+SELECT pj_mark() \gset
 SELECT dblink_exec('other', 'CREATE TRIGGER psc_t_i BEFORE INSERT ON psc_t FOR EACH ROW EXECUTE FUNCTION psc_fn()');
 SELECT psc_w(4);
+SELECT pj_delta(0, 1, NULL, 0, 0, NULL, 0);
 COMMIT;
 SELECT psc_w(5);
 SELECT psc_w(6);
+SELECT pj_expect('psc_w(integer)', 'declined:relation:trigger') \gset
 SELECT * FROM psc_t ORDER BY a;
 
 -- P10: the search_path of the call names another table once the other session
@@ -58,9 +62,15 @@ BEGIN
 END $$;
 SET search_path = "$user", public;
 SELECT psp_w(1), psp_w(2), psp_w(3);
+SELECT pj_expect('psp_w(integer)', 'compiled') \gset
 BEGIN;
+SELECT pj_mark() \gset
 SELECT dblink_exec('other', format('CREATE SCHEMA %I; CREATE TABLE %I.psp_t (a int); CREATE TRIGGER psp_t_i BEFORE INSERT ON %I.psp_t FOR EACH ROW EXECUTE FUNCTION public.psc_fn()', current_user, current_user, current_user));
 SELECT psp_w(4);
+SELECT pj_delta(0, 1, NULL, 0, 0, NULL, 0);
+-- (the new schema stales the plan: the lock delivers it, and the entry sees a
+-- stale plan of a write, not a path that differs)
+SELECT pj_expect('psp_w(integer)', 'interpreted:stale plan') \gset
 COMMIT;
 SELECT psp_w(5);
 SELECT psp_w(6);
@@ -83,9 +93,13 @@ BEGIN
   RETURN n;
 END $$;
 SELECT psl_f(2000), psl_f(2001), psl_f(2002), psl_f(1);
+SELECT pj_expect('psl_f(integer)', 'compiled') \gset
 BEGIN;
 SELECT psl_f(1);
+-- 55P03 here, ok on stock
+SELECT psc_other('CREATE TRIGGER psl_t_i BEFORE INSERT ON psl_t FOR EACH ROW EXECUTE FUNCTION psc_fn()');
 ROLLBACK;
+SELECT psc_other('DROP TRIGGER IF EXISTS psl_t_i ON psl_t');
 
 -- P4b: a table that the other session holds is no wait for the call: it goes
 -- to the interpreter, call after call, and is not declined
@@ -93,11 +107,14 @@ SELECT dblink_exec('other', 'BEGIN');
 SELECT dblink_exec('other', 'LOCK TABLE psl_t IN SHARE MODE');
 SET lock_timeout = '200ms';
 SELECT psl_f(1);
+SELECT pj_expect('psl_f(integer)', 'interpreted:lock') \gset
 SELECT psl_f(1), psl_f(1), psl_f(1), psl_f(1), psl_f(1);
 SELECT psl_f(1), psl_f(1), psl_f(1), psl_f(1), psl_f(1);
+SELECT pj_expect('psl_f(integer)', 'interpreted:lock') \gset
 RESET lock_timeout;
 SELECT dblink_exec('other', 'ROLLBACK');
 SELECT psl_f(1), psl_f(1);
+SELECT pj_expect('psl_f(integer)', 'compiled') \gset
 
 -- P4c: a table that is only read takes no lock at the entry
 CREATE TABLE psl_t2 (a int) WITH (autovacuum_enabled = false);
@@ -111,6 +128,7 @@ BEGIN
   RETURN n;
 END $$;
 SELECT psl_r(2000), psl_r(2001), psl_r(2002), psl_r(1);
+SELECT pj_expect('psl_r(integer)', 'compiled') \gset
 BEGIN;
 SELECT psl_r(1);
 SELECT psc_other('ALTER TABLE psl_t2 ADD COLUMN z int');
