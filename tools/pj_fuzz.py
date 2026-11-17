@@ -2121,7 +2121,7 @@ class SqlGen:
     def cond(self):
         r = self.r
         return r.choice(["n > 2", "n % 2 = 0", "t = 'row3'", "n < %d" % SQL_BAD,
-                         "found", "n = %d" % r.randint(1, 6)])
+                         "found", "n = %d" % r.randint(0, 6)])
 
     def perform(self, loop):
         r = self.r
@@ -2261,9 +2261,9 @@ class SqlProgram:
         st.append(self.call("rare"))
         # the plans the DDL above made stale are made again by the interpreter
         # (h is NULL), at each branch, and the function is then run compiled
-        for n in list(range(1, 7)) + [SQL_RARE, SQL_RARE + 1]:
+        for n in list(range(0, 7)) + [SQL_RARE, SQL_RARE + 1]:
             st.append("SELECT w(%d, NULL, '%s');" % (n, ["row3", "x", "row1"][n % 3]))
-        for n in list(range(1, 7)) + [SQL_RARE, SQL_RARE + 1]:
+        for n in list(range(0, 7)) + [SQL_RARE, SQL_RARE + 1]:
             st.append("SELECT w(%d, 1, '%s');" % (n, ["row3", "x", "row1"][n % 3]))
         for _ in range(3):
             st.append(self.call("harmless"))

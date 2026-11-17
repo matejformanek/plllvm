@@ -953,6 +953,13 @@ sql_move(PjCtx *ctx, PjSql *sql, PjSlot *slot)
 		out[i].isnull = isnull;
 	}
 
+	/* the arrays are the call's, which lasts through a loop of statements */
+	if (values != values_local)
+	{
+		pfree(values);
+		pfree(nulls);
+	}
+
 	if (tupdesc != NULL && ctx->xcols != 0)
 	{
 		while (anum < tupdesc->natts && TupleDescAttr(tupdesc, anum)->attisdropped)

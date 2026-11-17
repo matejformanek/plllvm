@@ -370,13 +370,19 @@ Only `plllvm_jit.c` and `plllvm_error.cpp` include LLVM headers.
     unless the variable has none); a cast that PL/pgSQL would run declines the
     function (`cast`), as does `#print_strict_params on`, whose DETAIL is not
     ported. A target takes a NULL for no row or a missing column without a
-    cast, which is the cast of PL/pgSQL only if the input function of its type
-    is strict, so that is admitted too. A column whose type changed after the
+    cast; PL/pgSQL calls the input function of its type for it (a function
+    that is not strict must return NULL for a NULL, but may have an effect),
+    so the function is declined unless that input function is strict. A column whose type changed after the
     statement was admitted is still converted, by the cast PL/pgSQL would
     use (`plllvm_pj_convert()`); the plan is then no longer what it was
     admitted as (`sql_stale`), and the next call translates again, and is
     declined if the cast is no longer none. Where PL/pgSQL marks the cast
-    state of the variable after a failure of that conversion, we do not.
+    state of the variable after a failure of that conversion, we do not. The
+    conversion raises "no cast from type" for a column of type `unknown` or
+    `record`, where PL/pgSQL falls back to an I/O coercion; no such column can
+    appear after admission (a table has none, and a result column of those
+    types has no variable of its type to be admitted for), so this is stated
+    and not pinned.
   * Admission: every query of the plan, rewritten, is a SELECT with no data-
     modifying CTE, calls no VOLATILE function but the built-in ones that
     change no input of a plan (`nextval`, `random`, the clocks, `pg_sleep`;

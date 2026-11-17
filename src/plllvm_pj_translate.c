@@ -766,8 +766,11 @@ plllvm_pj_classify(PjScope *scope)
 
 		/*
 		 * A query into one variable is an expression if its plan says so, and
-		 * the interpreter's own SPI statement if not.  Once planned it stays
-		 * what it is (exec_simple_check_plan() runs at the prepare only).
+		 * the interpreter's own SPI statement if not.  A query that is not
+		 * simple stays so, but a simple one can become not simple when
+		 * PL/pgSQL plans it again (exec_save_simple_expr() runs after each
+		 * replan); the guard of its plan then misses and the function is
+		 * translated again, with the statement for SPI.
 		 */
 		if (pe->into_sql && expr->plan != NULL && expr->expr_simple_expr == NULL)
 		{

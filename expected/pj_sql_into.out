@@ -792,57 +792,60 @@ SELECT pj_expect('psi_rec(integer)', 'declined:datum:record') \gset
 -- the variable of a simple CASE is named __Case__Variable_N__ in the block
 -- after the CASE, and a statement may take it as a target (N is the number of
 -- its datum): the function is declined, for an INTO of several targets and for
--- an assignment, as for one target
+-- an assignment, as for one target (the function does not read it, which
+-- would decline it as well)
 CREATE FUNCTION psi_casevar(n int) RETURNS text LANGUAGE :pj_lang AS $$
 DECLARE y int; z int;
 BEGIN
   CASE n WHEN 1 THEN NULL; ELSE NULL; END CASE;
   SELECT n, n + 1 INTO "__Case__Variable_4__", y FROM psi_one;
-  RETURN y || '/' || "__Case__Variable_4__";
+  RETURN y::text;
 END $$;
 CREATE FUNCTION psi_casevar2(n int) RETURNS text LANGUAGE :pj_lang AS $$
 DECLARE y int; z int;
 BEGIN
   CASE n WHEN 1 THEN NULL; ELSE NULL; END CASE;
   "__Case__Variable_4__" := n + 5;
-  RETURN "__Case__Variable_4__"::text;
+  RETURN n::text;
 END $$;
 SELECT psi_casevar(1), psi_casevar(2);
  psi_casevar | psi_casevar 
 -------------+-------------
- 2/1         | 3/2
+ 2           | 3
 (1 row)
 
 SELECT psi_casevar(1), psi_casevar(2);
  psi_casevar | psi_casevar 
 -------------+-------------
- 2/1         | 3/2
+ 2           | 3
 (1 row)
 
 SELECT psi_casevar(3);
  psi_casevar 
 -------------
- 4/3
+ 4
 (1 row)
 
 SELECT psi_casevar2(1), psi_casevar2(2);
  psi_casevar2 | psi_casevar2 
 --------------+--------------
- 6            | 7
+ 1            | 2
 (1 row)
 
 SELECT psi_casevar2(1), psi_casevar2(2);
  psi_casevar2 | psi_casevar2 
 --------------+--------------
- 6            | 7
+ 1            | 2
 (1 row)
 
 SELECT psi_casevar2(3);
  psi_casevar2 
 --------------
- 8
+ 3
 (1 row)
 
+SELECT pj_expect('psi_casevar(integer)', 'declined:datum:case variable') \gset
+SELECT pj_expect('psi_casevar2(integer)', 'declined:datum:case variable') \gset
 -- #print_strict_params adds a DETAIL we do not make: the function is declined
 CREATE FUNCTION psi_psp(n int, t text) RETURNS int LANGUAGE :pj_lang AS $$
 #print_strict_params on
@@ -1645,6 +1648,49 @@ SELECT psi_loop_sum(3000);
 (1 row)
 
 RESET plan_cache_mode;
+-- a result of more than 64 columns: the arrays that hold the row are the
+-- statement's, and memory read inside the loop does not grow
+DO $$
+BEGIN
+  EXECUTE 'CREATE TABLE psi_wide AS SELECT 1 AS c1, ' ||
+    (SELECT string_agg('2 AS c' || i, ', ') FROM generate_series(2, 70) i);
+END $$;
+CREATE FUNCTION psi_wide_loop(n int, probe int) RETURNS bigint LANGUAGE :pj_lang AS $$
+DECLARE m bigint := 0; x int; y int;
+BEGIN
+  FOR i IN 1..n LOOP
+    SELECT c1, c2 INTO x, y FROM psi_wide;
+    SELECT * INTO x, y FROM psi_wide;
+    IF i = probe THEN m := psi_mem(); END IF;
+  END LOOP;
+  RETURN m + x + y;
+END $$;
+SELECT psi_wide_loop(3, 1) > 0, psi_wide_loop(3, 2) > 0;
+ ?column? | ?column? 
+----------+----------
+ t        | t
+(1 row)
+
+SELECT psi_wide_loop(3, 1) > 0, psi_wide_loop(3, 2) > 0;
+ ?column? | ?column? 
+----------+----------
+ t        | t
+(1 row)
+
+SELECT psi_wide_loop(3, 1) > 0, psi_wide_loop(3, 2) > 0;
+ ?column? | ?column? 
+----------+----------
+ t        | t
+(1 row)
+
+SELECT psi_wide_loop(1000, 1000) AS m1 \gset
+SELECT psi_wide_loop(20000, 20000) - :m1 < 262144 AS flat_wide;
+ flat_wide 
+-----------
+ t
+(1 row)
+
+SELECT pj_expect('psi_wide_loop(integer,integer)', 'compiled') \gset
 -- plan identity: the custom and generic plans of the statement are PL/pgSQL's
 -- (the same sequence as the PERFORM of pj_sql, through INTO).  Planning 1 / n
 -- for n = 0 raises, a generic plan does not.
