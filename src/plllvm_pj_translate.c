@@ -137,6 +137,7 @@ typedef struct PjEmit
 } PjEmit;
 
 #define PJ_INIT_TEXT "during statement block local variable initialization"
+#define PJ_EXIT_TEXT "while casting return value to function's return type"
 
 static HTAB *casts = NULL;
 
@@ -144,6 +145,7 @@ static const char *walk_stmts(PjScopeWalk *w, List *stmts);
 static const char *walk_stmt(PjScopeWalk *w, PLpgSQL_stmt *stmt);
 static const char *walk_block(PjScopeWalk *w, PLpgSQL_stmt_block *block);
 static const char *var_reason(PLpgSQL_function *func, int dno);
+static const char *out_row_reason(PLpgSQL_function *func, int dno);
 static void scope_pos(PjScopeWalk *w, PLpgSQL_stmt *stmt);
 static void scope_expr(PjScopeWalk *w, const void *owner, PLpgSQL_expr *expr,
 					   Oid dsttype, int32 dsttypmod);
@@ -224,6 +226,9 @@ static void emit_loop(PjEmit *em, PLpgSQL_stmt *stmt);
 static void emit_fori(PjEmit *em, PLpgSQL_stmt_fori *stmt);
 static void emit_exit(PjEmit *em, PLpgSQL_stmt_exit *stmt);
 static void emit_return(PjEmit *em, PLpgSQL_stmt_return *stmt);
+static void return_row(PjEmit *em, const char **datum);
+static void return_tuple(PjEmit *em, const char **datum, const char *isnull,
+						 Oid type);
 static void emit_raise(PjEmit *em, PLpgSQL_stmt_raise *stmt);
 static const char *raise_string(PjEmit *em, const char *str);
 static void raise_text(PjEmit *em, const char *text);
@@ -269,9 +274,8 @@ plllvm_pj_scope(PLpgSQL_function *func, PjScope *scope)
 
 	if (func->fn_is_trigger != PLPGSQL_NOT_TRIGGER ||
 		func->fn_prokind != PROKIND_FUNCTION ||
-		func->fn_retset || func->fn_retistuple ||
-		func->out_param_varno >= 0 ||
-		signature_polymorphic(func))
+		func->fn_retset || signature_polymorphic(func) ||
+		(func->fn_retistuple && func->fn_retisdomain))
 	{
 		scope->reason = "signature";
 		return;
@@ -424,6 +428,14 @@ walk_stmt(PjScopeWalk *w, PLpgSQL_stmt *stmt)
 			{
 				PLpgSQL_stmt_return *ret = (PLpgSQL_stmt_return *) stmt;
 
+				if (ret->retvarno >= 0 &&
+					func->datums[ret->retvarno]->dtype == PLPGSQL_DTYPE_ROW)
+				{
+					/* the several OUT parameters, the only row a RETURN names */
+					if (ret->retvarno != func->out_param_varno)
+						return "datum:record";
+					return out_row_reason(func, ret->retvarno);
+				}
 				if (ret->retvarno >= 0)
 				{
 					PLpgSQL_var *var = arg_var(func, ret->retvarno);
@@ -435,7 +447,17 @@ walk_stmt(PjScopeWalk *w, PLpgSQL_stmt *stmt)
 						ret->retvarno;
 				}
 				else if (ret->expr != NULL)
-					scope_expr(w, ret->expr, ret->expr, func->fn_rettype, -1);
+				{
+					/*
+					 * A composite result is converted to the declared type
+					 * after the evaluation, so the expression has no target
+					 */
+					scope_expr(w, ret->expr, ret->expr,
+							   func->fn_retistuple ? InvalidOid : func->fn_rettype,
+							   -1);
+					((PjExpr *) llast(w->scope->exprs))->ret_tuple =
+						func->fn_retistuple;
+				}
 				return NULL;
 			}
 
@@ -602,6 +624,26 @@ var_reason(PLpgSQL_function *func, int dno)
 		var->datatype->typtype == TYPTYPE_DOMAIN)
 		return psprintf("datum:%s", var->datatype->typname);
 
+	return NULL;
+}
+
+/*
+ * Why the row of the OUT parameters cannot be the result: each of them must
+ * be a variable that var_reason() accepts, since the result is formed from
+ * their slots
+ */
+static const char *
+out_row_reason(PLpgSQL_function *func, int dno)
+{
+	PLpgSQL_row *row = (PLpgSQL_row *) func->datums[dno];
+
+	for (int i = 0; i < row->nfields; i++)
+	{
+		const char *reason = var_reason(func, row->varnos[i]);
+
+		if (reason != NULL)
+			return reason;
+	}
 	return NULL;
 }
 
@@ -870,7 +912,7 @@ plllvm_pj_harvest(PLpgSQL_function *func, const PjScope *scope, PjHarvest *h)
 	h->has_notice = scope->has_notice;
 	foreach_ptr(PjExpr, pe, scope->exprs)
 		nextra += pe->into_sql;
-	h->npos = scope->npos + list_length(scope->exprs) + nextra;
+	h->npos = scope->npos + list_length(scope->exprs) + nextra + 1;
 	h->pos = palloc_array(PjPos, h->npos);
 	build_pos = palloc_array(int, list_length(scope->exprs));
 	memcpy(h->pos, scope->pos, sizeof(PjPos) * scope->npos);
@@ -898,7 +940,21 @@ plllvm_pj_harvest(PLpgSQL_function *func, const PjScope *scope, PjHarvest *h)
 			nextra++;
 		}
 	}
+
+	/*
+	 * The exit of the function, last so that the positions of the other
+	 * statements are those of a function that has no result to convert
+	 */
+	h->exit_pos = h->npos - 1;
+	memset(&h->pos[h->exit_pos], 0, sizeof(PjPos));
+	h->pos[h->exit_pos].text = PJ_EXIT_TEXT;
+	h->pos[h->exit_pos].expr = -1;
 	h->fori = list_copy(scope->fori);
+	h->rettype = func->fn_rettype;
+	if (func->out_param_varno >= 0 &&
+		func->datums[func->out_param_varno]->dtype == PLPGSQL_DTYPE_ROW)
+		h->rowdesc = CreateTupleDescCopy(((PLpgSQL_row *)
+										  func->datums[func->out_param_varno])->rowtupdesc);
 	h->ndatums = func->ndatums;
 	h->nparams = 2 * func->ndatums;
 	h->ptypes = palloc0_array(Oid, h->nparams);
@@ -1117,6 +1173,13 @@ harvest_expr(PLpgSQL_function *func, PjHarvest *h, PjEnv *env, PjExpr *pe,
 		MemoryContextSwitchTo(oldcxt);
 	}
 	funcs_walker((Node *) tree, funcs);
+
+	/*
+	 * A value that is no row is PL/pgSQL's error to raise, unless it is a
+	 * NULL, which it returns as it is
+	 */
+	if (pe->ret_tuple && !null_const && !type_is_rowtype(pe->type))
+		return "cast";
 
 	/* a RAISE parameter has no target */
 	if (pe->dsttype == InvalidOid)
@@ -2094,6 +2157,12 @@ plllvm_pj_emit(PLpgSQL_function *func, PjHarvest *h, PjVariant *v)
 	}
 	if (has_elem)
 		plllvm_ir_emit(em.ir, "%%en = alloca i8");
+	if (h->rowdesc != NULL)
+	{
+		/* the OUT parameters on their way to the result */
+		plllvm_ir_emit(em.ir, "%%rv = alloca [%d x i64]", h->rowdesc->natts);
+		plllvm_ir_emit(em.ir, "%%rn = alloca [%d x i8]", h->rowdesc->natts);
+	}
 	foreach_int(id, h->fori)
 	{
 		plllvm_ir_emit(em.ir, "%%fc%d = alloca i32", id);
@@ -2844,10 +2913,19 @@ emit_return(PjEmit *em, PLpgSQL_stmt_return *stmt)
 	 * it
 	 */
 	em->in_return = true;
-	if (stmt->retvarno >= 0)
+	if (stmt->retvarno >= 0 &&
+		em->func->datums[stmt->retvarno]->dtype == PLPGSQL_DTYPE_ROW)
+		return_row(em, &datum);
+	else if (stmt->retvarno >= 0)
 		expr_value(em, stmt, &datum, &isnull);
 	else if (stmt->expr != NULL)
+	{
+		const PjExpr *pe = list_nth(em->h->exprs, em->next_expr);
+
 		expr_value(em, stmt->expr, &datum, &isnull);
+		if (pe->ret_tuple && pe->h1 == PJ_H1_READY)
+			return_tuple(em, &datum, isnull, pe->type);
+	}
 	else if (em->func->fn_rettype != VOIDOID)
 		isnull = "true";
 	em->in_return = false;
@@ -2858,6 +2936,62 @@ emit_return(PjEmit *em, PLpgSQL_stmt_return *stmt)
 	plllvm_ir_emit(ir, "store i8 %s, ptr %s", z, at);
 	plllvm_ir_emit(ir, "ret i64 %s", datum);
 	em->open = false;
+}
+
+/*
+ * The result of a function with several OUT parameters: a row of their
+ * values, as exec_eval_datum() forms it, then converted as any composite
+ * result is
+ */
+static void
+return_row(PjEmit *em, const char **datum)
+{
+	plllvm_ir  *ir = em->ir;
+	PLpgSQL_row *row = (PLpgSQL_row *) em->func->datums[em->func->out_param_varno];
+	const char *formed = plllvm_ir_tmp(ir);
+
+	for (int i = 0; i < row->nfields; i++)
+	{
+		int			dno = row->varnos[i];
+		const char *value = plllvm_ir_tmp(ir);
+		const char *n = plllvm_ir_tmp(ir);
+		const char *z = plllvm_ir_tmp(ir);
+
+		plllvm_ir_emit(ir, "%s = load i64, ptr %%v%d", value, dno);
+		plllvm_ir_emit(ir, "%s = load i1, ptr %%n%d", n, dno);
+		plllvm_ir_emit(ir, "%s = zext i1 %s to i8", z, n);
+		plllvm_ir_emit(ir, "store i64 %s, ptr %s", value,
+					   field_ptr(ir, "%rv", i * sizeof(Datum)));
+		plllvm_ir_emit(ir, "store i8 %s, ptr %s", z,
+					   field_ptr(ir, "%rn", i * sizeof(bool)));
+	}
+
+	/* the exit's error is the function's, as the interpreter's */
+	set_pos(em, em->h->exit_pos);
+	plllvm_ir_declare(ir, "declare i64 @plllvm_pj_ret_row(ptr, ptr, ptr)");
+	plllvm_ir_emit(ir, "%s = call i64 @plllvm_pj_ret_row(ptr %%ctx, ptr %%rv, ptr %%rn)",
+				   formed);
+	*datum = formed;
+	return_tuple(em, datum, "false", RECORDOID);
+}
+
+/*
+ * The value of a RETURN of a function with a composite result, as
+ * plpgsql_exec_function() converts it to the declared type.  What fails
+ * there is no expression: the position is the exit of the function.
+ */
+static void
+return_tuple(PjEmit *em, const char **datum, const char *isnull, Oid type)
+{
+	plllvm_ir  *ir = em->ir;
+	const char *result = plllvm_ir_tmp(ir);
+
+	if (em->cur != em->h->exit_pos)
+		set_pos(em, em->h->exit_pos);
+	plllvm_ir_declare(ir, "declare i64 @plllvm_pj_ret_tuple(ptr, ptr, i64, i1, i32)");
+	plllvm_ir_emit(ir, "%s = call i64 @plllvm_pj_ret_tuple(ptr %%ctx, ptr %%fcinfo, i64 %s, i1 %s, i32 %u)",
+				   result, *datum, isnull, type);
+	*datum = result;
 }
 
 /*

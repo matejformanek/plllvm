@@ -267,7 +267,7 @@ SELECT pj_expect('pb_decl(int)', 'compiled') \gset
 SELECT pj_expect('pb_exc(int)', 'declined:exception block') \gset
 SELECT pj_expect('pb_text(text)', 'compiled') \gset
 SELECT pj_expect('pb_poly(anyelement)', 'declined:signature') \gset
-SELECT pj_expect('pb_out(int)', 'declined:signature') \gset
+SELECT pj_expect('pb_out(int)', 'compiled') \gset
 SELECT pj_expect('pb_set1(int)', 'declined:signature') \gset
 SELECT pj_expect('pb_rec(int)', 'declined:cast') \gset
 SELECT pj_expect('pb_rnd()', 'declined:volatile callee') \gset

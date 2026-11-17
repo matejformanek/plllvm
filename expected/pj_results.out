@@ -36,6 +36,8 @@ SELECT * FROM po_out1(7);
  14
 (1 row)
 
+SELECT pj_expect('po_out1(int)', 'compiled') \gset
+SELECT pj_variant('po_out1(int)', false, true) \gset
 -- an OUT parameter nobody assigns is NULL
 CREATE FUNCTION po_unset(n int, OUT m int) LANGUAGE :pj_lang AS $$
 BEGIN NULL; END $$;
@@ -51,6 +53,7 @@ SELECT po_unset(2) IS NULL AS unset;
  t
 (1 row)
 
+SELECT pj_expect('po_unset(int)', 'compiled') \gset
 -- INOUT: an argument that is also the result
 CREATE FUNCTION po_inout(INOUT x int, y int) LANGUAGE :pj_lang AS $$
 BEGIN x := x + y; END $$;
@@ -72,6 +75,7 @@ SELECT * FROM po_inout(100, 200);
  300
 (1 row)
 
+SELECT pj_expect('po_inout(int,int)', 'compiled') \gset
 -- several: a row, with a NULL among its fields
 CREATE FUNCTION po_out3(a int, OUT x int, OUT y text, OUT z float8)
 LANGUAGE :pj_lang AS $$
@@ -118,6 +122,7 @@ SELECT po_out3(5)::text, row_to_json(po_out3(5)), po_out3(5) IS NULL AS isnull;
  (10,n5,2.5) | {"x":10,"y":"n5","z":2.5} | f
 (1 row)
 
+SELECT pj_expect('po_out3(int)', 'compiled') \gset
 -- the fields of other types
 CREATE FUNCTION po_types(n int, OUT b bool, OUT l int8, OUT d date, OUT t text,
                          OUT num numeric)
@@ -153,6 +158,7 @@ SELECT row_to_json(po_types(3));
  {"b":true,"l":9,"d":"2020-01-04","t":"ababab","num":4.5}
 (1 row)
 
+SELECT pj_expect('po_types(int)', 'compiled') \gset
 -- an OUT function that leaves the code once: the interpreter finishes the call
 CREATE FUNCTION po_deopt(a int, OUT x int, OUT y text) LANGUAGE :pj_lang AS $$
 BEGIN
@@ -170,18 +176,24 @@ SELECT po_deopt(2);
  (2,pos)
 (1 row)
 
+SELECT pj_expect('po_deopt(int)', 'compiled') \gset
+SELECT pj_variant('po_deopt(int)', false, true) \gset
+SELECT pj_mark() \gset
 SELECT po_deopt(-1);
  po_deopt 
 ----------
  (2,neg)
 (1 row)
 
+SELECT pj_delta(NULL, NULL, NULL, 1, 0) \gset
+SELECT pj_expect('po_deopt(int)', 'deopt') \gset
 SELECT po_deopt(-2), po_deopt(3);
  po_deopt | po_deopt 
 ----------+----------
  (4,neg)  | (3,pos)
 (1 row)
 
+SELECT pj_expect('po_deopt(int)', 'compiled') \gset
 -- a recursion that returns three OUT parameters at each level
 CREATE FUNCTION po_depth(n int, OUT a int, OUT b int, OUT c text)
 LANGUAGE :pj_lang IMMUTABLE AS $$
@@ -210,6 +222,7 @@ SELECT * FROM po_depth(50);
  50 | 100 | x
 (1 row)
 
+SELECT pj_expect('po_depth(int)', 'compiled') \gset
 -- what the signature still declines: a procedure
 CREATE PROCEDURE po_proc(INOUT x int) LANGUAGE :pj_lang AS $$
 BEGIN x := x + 1; END $$;
@@ -277,6 +290,9 @@ SELECT po_odom(2);
  (2,2)
 (1 row)
 
+SELECT pj_expect('po_orec(int)', 'declined:datum:record') \gset
+SELECT pj_expect('po_orec2(int)', 'declined:datum:record') \gset
+SELECT pj_expect('po_odom(int)', 'declined:datum:po_dom') \gset
 -- a composite result from a row expression
 CREATE FUNCTION po_row(x int) RETURNS po_t LANGUAGE :pj_lang AS $$
 BEGIN RETURN ROW(x, 'a' || x); END $$;
@@ -316,6 +332,8 @@ SELECT po_row(6) IS NULL AS isnull;
  f
 (1 row)
 
+SELECT pj_expect('po_row(int)', 'compiled') \gset
+SELECT pj_variant('po_row(int)', true, false) \gset
 -- a cast to the type, and a call of a function that returns it
 CREATE FUNCTION po_cast(x int) RETURNS po_t LANGUAGE :pj_lang AS $$
 BEGIN RETURN (x, 'b')::po_t; END $$;
@@ -341,6 +359,8 @@ SELECT row_to_json(po_cast(3)), row_to_json(po_call(3));
  {"a":3,"b":"b"} | {"a":6,"b":"g"}
 (1 row)
 
+SELECT pj_expect('po_cast(int)', 'compiled') \gset
+SELECT pj_expect('po_call(int)', 'compiled') \gset
 -- a row of another shape: the error is raised at the exit of the function,
 -- which names no expression, so the next call in the transaction is compiled
 CREATE FUNCTION po_bad(x int) RETURNS po_t LANGUAGE :pj_lang AS $$
@@ -387,6 +407,7 @@ SELECT po_bad(1);
  (1,a)
 (1 row)
 
+SELECT pj_expect('po_bad(int)', 'compiled') \gset
 COMMIT;
 -- NULL is returned as it is
 CREATE FUNCTION po_null(x int) RETURNS po_t LANGUAGE :pj_lang AS $$
@@ -403,6 +424,7 @@ SELECT po_null(2) IS NULL AS isnull, po_null(2)::text AS txt;
  t      | 
 (1 row)
 
+SELECT pj_expect('po_null(int)', 'compiled') \gset
 -- RECORD: passed as it is, or given the type of the caller's column list
 CREATE FUNCTION po_rec(x int) RETURNS record LANGUAGE :pj_lang AS $$
 BEGIN RETURN ROW(x, 'a'::text); END $$;
@@ -438,6 +460,7 @@ SELECT * FROM po_rec(6) AS (a int);  -- fail
 ERROR:  returned record type does not match expected record type
 DETAIL:  Number of returned columns (2) does not match expected column count (1).
 CONTEXT:  PL/pgSQL function po_rec(integer) while casting return value to function's return type
+SELECT pj_expect('po_rec(int)', 'compiled') \gset
 -- a type with a dropped column: the fields are mapped, and the result is
 -- labelled with the type of the function
 CREATE TYPE po_d AS (a int, gone int, b text);
@@ -468,6 +491,7 @@ SELECT (po_drop(4)).b;
  d
 (1 row)
 
+SELECT pj_expect('po_drop(int)', 'compiled') \gset
 -- a column added between calls: the row no longer fits
 CREATE TYPE po_add AS (a int, b text);
 CREATE FUNCTION po_addf(x int) RETURNS po_add LANGUAGE :pj_lang AS $$
@@ -500,6 +524,7 @@ SELECT po_addf(4);
  (4,e)
 (1 row)
 
+SELECT pj_expect('po_addf(int)', 'compiled') \gset
 -- a value that is no row is PL/pgSQL's to refuse
 CREATE FUNCTION po_noncomp(x int) RETURNS po_t LANGUAGE :pj_lang AS $$
 BEGIN RETURN x + 1; END $$;
@@ -512,6 +537,7 @@ CONTEXT:  PL/pgSQL function po_noncomp(integer) line 2 at RETURN
 SELECT po_noncomp(3);  -- fail
 ERROR:  cannot return non-composite value from function returning composite type
 CONTEXT:  PL/pgSQL function po_noncomp(integer) line 2 at RETURN
+SELECT pj_expect('po_noncomp(int)', 'declined:cast') \gset
 -- a composite domain checks its value with user code: out of scope
 CREATE TYPE po_two AS (q1 int8, q2 int8);
 CREATE DOMAIN po_ordered AS po_two CHECK ((VALUE).q1 <= (VALUE).q2);
