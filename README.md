@@ -325,17 +325,23 @@ collation does. The prefix `plllvm.` is reserved.
   call to PL/pgSQL.
 * A function, type or schema changed by another session in the middle of a
   call can make SPI analyse a statement inside the call; what it shows runs
-  once before the next call's entry checks it. So does a stale plan of a read.
+  once before the next call's entry checks it. So does a stale plan of a read,
+  and so does a change of a role (membership, BYPASSRLS, the owner of the
+  database) that decides which policies apply to a table that is read.
   A child added to a written table after the entry lock is the same, and so
   is a domain CHECK added with NOT VALID, and DDL on a table that the write
-  only reads. A domain constraint that runs inside an input function
+  only reads. Relations that the executor opens after planning (the indexes of
+  a written table, the tables of its triggers and foreign-key checks) are not
+  locked at the entry; a change to them cannot re-analyse the statement. A domain constraint that runs inside an input function
   (`record_in`, `array_in`, `jsonb_populate_record`) is not looked at.
 * A statement is declined if any query of its plan, at any level, has a view
   or a relation with the lock of a write that is not that query's own result
   relation (`relation:view`, `relation:rule`): a write through a view, a
   rule's action, a table that a rule made a SELECT. So is a statement that a
-  rule turned into nothing (`relation:none`). The entry locks every such
-  relation of a plan that it admits, without waiting.
+  rule turned into nothing (`relation:none`), and a write to a table with row
+  level security (`relation:rls`: which policies apply depends on the role,
+  which no relation lock protects). The entry locks every relation that the
+  statement writes (its result relations), without waiting.
 * Arrays: one dimension, no NULL elements, `int4`, `int8` and `float8` only.
 * Status and counters are per backend.
 
