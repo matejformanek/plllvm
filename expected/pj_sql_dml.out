@@ -148,6 +148,20 @@ SELECT psd_try('SELECT psd_stable(52)');
  (1,row1,1) (2,row2,402) (3,row3,3) (4,row4,4) (5,row5,5) (6,row6,6)
 (1 row)
 
+-- the error came from SPI, in compiled code
+SELECT pj_mark() \gset
+SELECT psd_try('SELECT psd_stable(53)');
+                            psd_try                            
+---------------------------------------------------------------
+ 0A000 INSERT is not allowed in a non-volatile function       +
+                                                              +
+                                                              +
+ SQL statement "INSERT INTO psd_t VALUES (n, 'stable', 0)"    +
+ PL/pgSQL function psd_stable(integer) line 3 at SQL statement+
+ SQL statement "SELECT psd_stable(53)"                        +
+ PL/pgSQL function psd_try(text) line 4 at EXECUTE
+(1 row)
+
 -- a serial column: the default is nextval(), a pinned built-in; RETURNING INTO
 CREATE TABLE psd_s (id serial PRIMARY KEY, v text, w int DEFAULT 5);
 \set ds 'SELECT coalesce(string_agg(x::text, '' '' ORDER BY x.id), ''-'') AS psd_s FROM psd_s x'
@@ -1616,6 +1630,404 @@ SELECT id, q FROM psd_o ORDER BY id;
 (5 rows)
 
 SELECT pj_expect('psd_order(integer)', 'declined:cast') \gset
+-- a table truncated and analysed in each round (the reset of a benchmark),
+-- with calls between: every round costs the interpreter one call, and the
+-- function stays compiled; it is not a guard miss that adds up to a decline
+CREATE TABLE psd_rs (a int, b text);
+CREATE FUNCTION psd_reset(n int) RETURNS int LANGUAGE :pj_lang AS $$
+DECLARE c int;
+BEGIN
+  INSERT INTO psd_rs VALUES (n, 'x');
+  UPDATE psd_rs SET b = 'y' WHERE a = n RETURNING a INTO c;
+  RETURN c;
+END $$;
+SELECT psd_reset(1), psd_reset(2), psd_reset(3);
+ psd_reset | psd_reset | psd_reset 
+-----------+-----------+-----------
+         1 |         2 |         3
+(1 row)
+
+-- (a statement of its own for each: in one transaction the plan is not stale)
+\o /dev/null
+SELECT CASE s WHEN 1 THEN 'TRUNCATE psd_rs' WHEN 2 THEN 'ANALYZE psd_rs'
+              ELSE format('SELECT psd_reset(%s)', i * 10 + s) END
+  FROM generate_series(1, 12) i, generate_series(1, 7) s ORDER BY i, s \gexec
+TRUNCATE psd_rs
+ANALYZE psd_rs
+SELECT psd_reset(13)
+SELECT psd_reset(14)
+SELECT psd_reset(15)
+SELECT psd_reset(16)
+SELECT psd_reset(17)
+TRUNCATE psd_rs
+ANALYZE psd_rs
+SELECT psd_reset(23)
+SELECT psd_reset(24)
+SELECT psd_reset(25)
+SELECT psd_reset(26)
+SELECT psd_reset(27)
+TRUNCATE psd_rs
+ANALYZE psd_rs
+SELECT psd_reset(33)
+SELECT psd_reset(34)
+SELECT psd_reset(35)
+SELECT psd_reset(36)
+SELECT psd_reset(37)
+TRUNCATE psd_rs
+ANALYZE psd_rs
+SELECT psd_reset(43)
+SELECT psd_reset(44)
+SELECT psd_reset(45)
+SELECT psd_reset(46)
+SELECT psd_reset(47)
+TRUNCATE psd_rs
+ANALYZE psd_rs
+SELECT psd_reset(53)
+SELECT psd_reset(54)
+SELECT psd_reset(55)
+SELECT psd_reset(56)
+SELECT psd_reset(57)
+TRUNCATE psd_rs
+ANALYZE psd_rs
+SELECT psd_reset(63)
+SELECT psd_reset(64)
+SELECT psd_reset(65)
+SELECT psd_reset(66)
+SELECT psd_reset(67)
+TRUNCATE psd_rs
+ANALYZE psd_rs
+SELECT psd_reset(73)
+SELECT psd_reset(74)
+SELECT psd_reset(75)
+SELECT psd_reset(76)
+SELECT psd_reset(77)
+TRUNCATE psd_rs
+ANALYZE psd_rs
+SELECT psd_reset(83)
+SELECT psd_reset(84)
+SELECT psd_reset(85)
+SELECT psd_reset(86)
+SELECT psd_reset(87)
+TRUNCATE psd_rs
+ANALYZE psd_rs
+SELECT psd_reset(93)
+SELECT psd_reset(94)
+SELECT psd_reset(95)
+SELECT psd_reset(96)
+SELECT psd_reset(97)
+TRUNCATE psd_rs
+ANALYZE psd_rs
+SELECT psd_reset(103)
+SELECT psd_reset(104)
+SELECT psd_reset(105)
+SELECT psd_reset(106)
+SELECT psd_reset(107)
+TRUNCATE psd_rs
+ANALYZE psd_rs
+SELECT psd_reset(113)
+SELECT psd_reset(114)
+SELECT psd_reset(115)
+SELECT psd_reset(116)
+SELECT psd_reset(117)
+TRUNCATE psd_rs
+ANALYZE psd_rs
+SELECT psd_reset(123)
+SELECT psd_reset(124)
+SELECT psd_reset(125)
+SELECT psd_reset(126)
+SELECT psd_reset(127)
+\o
+SELECT count(*), sum(a) FROM psd_rs;
+ count | sum 
+-------+-----
+     5 | 625
+(1 row)
+
+-- ANALYZE alone is as much a stale plan
+SELECT psd_reset(4), psd_reset(5);
+ psd_reset | psd_reset 
+-----------+-----------
+         4 |         5
+(1 row)
+
+ANALYZE psd_rs;
+SELECT psd_reset(6), psd_reset(7), psd_reset(8);
+ psd_reset | psd_reset | psd_reset 
+-----------+-----------+-----------
+         6 |         7 |         8
+(1 row)
+
+ANALYZE psd_rs;
+SELECT psd_reset(9), psd_reset(10), psd_reset(11);
+ psd_reset | psd_reset | psd_reset 
+-----------+-----------+-----------
+         9 |        10 |        11
+(1 row)
+
+SELECT count(*), sum(a) FROM psd_rs;
+ count | sum 
+-------+-----
+    13 | 685
+(1 row)
+
+-- a call after each reset and none between is what the interpreter does
+-- best: it translates after each and runs none, and is declined as thrashing
+CREATE TABLE psd_rs1 (a int, b text);
+CREATE FUNCTION psd_reset1(n int) RETURNS int LANGUAGE :pj_lang AS $$
+DECLARE c int;
+BEGIN
+  INSERT INTO psd_rs1 VALUES (n, 'x');
+  UPDATE psd_rs1 SET b = 'y' WHERE a = n RETURNING a INTO c;
+  RETURN c;
+END $$;
+SELECT psd_reset1(1), psd_reset1(2), psd_reset1(3);
+ psd_reset1 | psd_reset1 | psd_reset1 
+------------+------------+------------
+          1 |          2 |          3
+(1 row)
+
+\o /dev/null
+SELECT CASE s WHEN 1 THEN 'TRUNCATE psd_rs1' ELSE format('SELECT psd_reset1(%s)', i) END
+  FROM generate_series(1, 40) i, generate_series(1, 2) s ORDER BY i, s \gexec
+TRUNCATE psd_rs1
+SELECT psd_reset1(1)
+TRUNCATE psd_rs1
+SELECT psd_reset1(2)
+TRUNCATE psd_rs1
+SELECT psd_reset1(3)
+TRUNCATE psd_rs1
+SELECT psd_reset1(4)
+TRUNCATE psd_rs1
+SELECT psd_reset1(5)
+TRUNCATE psd_rs1
+SELECT psd_reset1(6)
+TRUNCATE psd_rs1
+SELECT psd_reset1(7)
+TRUNCATE psd_rs1
+SELECT psd_reset1(8)
+TRUNCATE psd_rs1
+SELECT psd_reset1(9)
+TRUNCATE psd_rs1
+SELECT psd_reset1(10)
+TRUNCATE psd_rs1
+SELECT psd_reset1(11)
+TRUNCATE psd_rs1
+SELECT psd_reset1(12)
+TRUNCATE psd_rs1
+SELECT psd_reset1(13)
+TRUNCATE psd_rs1
+SELECT psd_reset1(14)
+TRUNCATE psd_rs1
+SELECT psd_reset1(15)
+TRUNCATE psd_rs1
+SELECT psd_reset1(16)
+TRUNCATE psd_rs1
+SELECT psd_reset1(17)
+TRUNCATE psd_rs1
+SELECT psd_reset1(18)
+TRUNCATE psd_rs1
+SELECT psd_reset1(19)
+TRUNCATE psd_rs1
+SELECT psd_reset1(20)
+TRUNCATE psd_rs1
+SELECT psd_reset1(21)
+TRUNCATE psd_rs1
+SELECT psd_reset1(22)
+TRUNCATE psd_rs1
+SELECT psd_reset1(23)
+TRUNCATE psd_rs1
+SELECT psd_reset1(24)
+TRUNCATE psd_rs1
+SELECT psd_reset1(25)
+TRUNCATE psd_rs1
+SELECT psd_reset1(26)
+TRUNCATE psd_rs1
+SELECT psd_reset1(27)
+TRUNCATE psd_rs1
+SELECT psd_reset1(28)
+TRUNCATE psd_rs1
+SELECT psd_reset1(29)
+TRUNCATE psd_rs1
+SELECT psd_reset1(30)
+TRUNCATE psd_rs1
+SELECT psd_reset1(31)
+TRUNCATE psd_rs1
+SELECT psd_reset1(32)
+TRUNCATE psd_rs1
+SELECT psd_reset1(33)
+TRUNCATE psd_rs1
+SELECT psd_reset1(34)
+TRUNCATE psd_rs1
+SELECT psd_reset1(35)
+TRUNCATE psd_rs1
+SELECT psd_reset1(36)
+TRUNCATE psd_rs1
+SELECT psd_reset1(37)
+TRUNCATE psd_rs1
+SELECT psd_reset1(38)
+TRUNCATE psd_rs1
+SELECT psd_reset1(39)
+TRUNCATE psd_rs1
+SELECT psd_reset1(40)
+\o
+SELECT count(*), sum(a) FROM psd_rs1;
+ count | sum 
+-------+-----
+     1 |  40
+(1 row)
+
+-- a CHECK constraint or a domain with a VOLATILE function is code the plan
+-- does not show: the interpreter's.  A constraint of immutable and STABLE
+-- functions is not.
+CREATE FUNCTION psd_chk_v(n int) RETURNS bool LANGUAGE plpgsql VOLATILE AS $$
+BEGIN RAISE NOTICE 'check %', n; RETURN n > 0; END $$;
+CREATE FUNCTION psd_chk_s(n int) RETURNS bool LANGUAGE sql STABLE AS $$ SELECT n > 0 $$;
+CREATE TABLE psd_ck (a int CHECK (a < 1000), b int CHECK (psd_chk_s(b)));
+CREATE TABLE psd_ckv (a int, b int CHECK (psd_chk_v(b)));
+CREATE DOMAIN psd_domv AS int CHECK (psd_chk_v(VALUE));
+CREATE DOMAIN psd_doms AS int CHECK (VALUE > 0 AND psd_chk_s(VALUE));
+CREATE DOMAIN psd_domd AS psd_domv;
+CREATE TABLE psd_cd (a psd_doms, b int);
+CREATE TABLE psd_cdv (a psd_domv, b int);
+CREATE TABLE psd_cdd (a psd_domd, b int);
+CREATE FUNCTION psd_ck(n int) RETURNS int LANGUAGE :pj_lang AS $$
+BEGIN
+  INSERT INTO psd_ck VALUES (n, n + 1);
+  RETURN n;
+END $$;
+CREATE FUNCTION psd_ckv(n int) RETURNS int LANGUAGE :pj_lang AS $$
+BEGIN
+  INSERT INTO psd_ckv VALUES (n, n + 1);
+  RETURN n;
+END $$;
+CREATE FUNCTION psd_cd(n int) RETURNS int LANGUAGE :pj_lang AS $$
+BEGIN
+  INSERT INTO psd_cd VALUES (n, n);
+  UPDATE psd_cd SET a = n + 1000 WHERE b = n;
+  RETURN n;
+END $$;
+CREATE FUNCTION psd_cdd(n int) RETURNS int LANGUAGE :pj_lang AS $$
+BEGIN
+  INSERT INTO psd_cdd VALUES (n, n);
+  RETURN n;
+END $$;
+CREATE FUNCTION psd_cdv(n int) RETURNS int LANGUAGE :pj_lang AS $$
+BEGIN
+  INSERT INTO psd_cdv VALUES (n, n);
+  RETURN n;
+END $$;
+SELECT psd_ck(1), psd_ck(2), psd_ck(3), psd_try('SELECT psd_ck(5000)');
+ psd_ck | psd_ck | psd_ck |                                    psd_try                                     
+--------+--------+--------+--------------------------------------------------------------------------------
+      1 |      2 |      3 | 23514 new row for relation "psd_ck" violates check constraint "psd_ck_a_check"+
+        |        |        | Failing row contains (5000, 5001).                                            +
+        |        |        |                                                                               +
+        |        |        | SQL statement "INSERT INTO psd_ck VALUES (n, n + 1)"                          +
+        |        |        | PL/pgSQL function psd_ck(integer) line 3 at SQL statement                     +
+        |        |        | SQL statement "SELECT psd_ck(5000)"                                           +
+        |        |        | PL/pgSQL function psd_try(text) line 4 at EXECUTE
+(1 row)
+
+SELECT psd_ckv(1), psd_ckv(2), psd_ckv(3), psd_try('SELECT psd_ckv(-4)');
+NOTICE:  check 2
+NOTICE:  check 3
+NOTICE:  check 4
+NOTICE:  check -3
+ psd_ckv | psd_ckv | psd_ckv |                                     psd_try                                      
+---------+---------+---------+----------------------------------------------------------------------------------
+       1 |       2 |       3 | 23514 new row for relation "psd_ckv" violates check constraint "psd_ckv_b_check"+
+         |         |         | Failing row contains (-4, -3).                                                  +
+         |         |         |                                                                                 +
+         |         |         | SQL statement "INSERT INTO psd_ckv VALUES (n, n + 1)"                           +
+         |         |         | PL/pgSQL function psd_ckv(integer) line 3 at SQL statement                      +
+         |         |         | SQL statement "SELECT psd_ckv(-4)"                                              +
+         |         |         | PL/pgSQL function psd_try(text) line 4 at EXECUTE
+(1 row)
+
+SELECT psd_cd(1), psd_cd(2), psd_cd(3), psd_try('SELECT psd_cd(-1)');
+ psd_cd | psd_cd | psd_cd |                                  psd_try                                   
+--------+--------+--------+----------------------------------------------------------------------------
+      1 |      2 |      3 | 23514 value for domain psd_doms violates check constraint "psd_doms_check"+
+        |        |        |                                                                           +
+        |        |        |                                                                           +
+        |        |        | SQL statement "INSERT INTO psd_cd VALUES (n, n)"                          +
+        |        |        | PL/pgSQL function psd_cd(integer) line 3 at SQL statement                 +
+        |        |        | SQL statement "SELECT psd_cd(-1)"                                         +
+        |        |        | PL/pgSQL function psd_try(text) line 4 at EXECUTE
+(1 row)
+
+SELECT psd_cdv(1), psd_cdv(2), psd_cdv(3), psd_try('SELECT psd_cdv(-1)');
+NOTICE:  check 1
+NOTICE:  check 2
+NOTICE:  check 3
+NOTICE:  check -1
+ psd_cdv | psd_cdv | psd_cdv |                                  psd_try                                   
+---------+---------+---------+----------------------------------------------------------------------------
+       1 |       2 |       3 | 23514 value for domain psd_domv violates check constraint "psd_domv_check"+
+         |         |         |                                                                           +
+         |         |         |                                                                           +
+         |         |         | SQL statement "INSERT INTO psd_cdv VALUES (n, n)"                         +
+         |         |         | PL/pgSQL function psd_cdv(integer) line 3 at SQL statement                +
+         |         |         | SQL statement "SELECT psd_cdv(-1)"                                        +
+         |         |         | PL/pgSQL function psd_try(text) line 4 at EXECUTE
+(1 row)
+
+SELECT psd_cdd(1), psd_cdd(2), psd_cdd(3), psd_try('SELECT psd_cdd(-1)');
+NOTICE:  check 1
+NOTICE:  check 2
+NOTICE:  check 3
+NOTICE:  check -1
+ psd_cdd | psd_cdd | psd_cdd |                                  psd_try                                   
+---------+---------+---------+----------------------------------------------------------------------------
+       1 |       2 |       3 | 23514 value for domain psd_domd violates check constraint "psd_domv_check"+
+         |         |         |                                                                           +
+         |         |         |                                                                           +
+         |         |         | SQL statement "INSERT INTO psd_cdd VALUES (n, n)"                         +
+         |         |         | PL/pgSQL function psd_cdd(integer) line 3 at SQL statement                +
+         |         |         | SQL statement "SELECT psd_cdd(-1)"                                        +
+         |         |         | PL/pgSQL function psd_try(text) line 4 at EXECUTE
+(1 row)
+
+SELECT * FROM psd_ck ORDER BY a;
+ a | b 
+---+---
+ 1 | 2
+ 2 | 3
+ 3 | 4
+(3 rows)
+
+SELECT * FROM psd_ckv ORDER BY a;
+ a | b 
+---+---
+ 1 | 2
+ 2 | 3
+ 3 | 4
+(3 rows)
+
+SELECT * FROM psd_cd ORDER BY a;
+  a   | b 
+------+---
+ 1001 | 1
+ 1002 | 2
+ 1003 | 3
+(3 rows)
+
+SELECT * FROM psd_cdv ORDER BY a;
+ a | b 
+---+---
+ 1 | 1
+ 2 | 2
+ 3 | 3
+(3 rows)
+
+SELECT * FROM psd_cdd ORDER BY a;
+ a | b 
+---+---
+ 1 | 1
+ 2 | 2
+ 3 | 3
+(3 rows)
+
 -- memory: 10^4 statements that write, read inside the loop
 CREATE TABLE psd_m (a int PRIMARY KEY, b int);
 INSERT INTO psd_m SELECT i, 0 FROM generate_series(1, 20) i;
