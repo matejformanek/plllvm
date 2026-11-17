@@ -169,10 +169,13 @@ BEGIN
   RETURN n;
 END $$;
 SELECT psw_w(1), psw_w(2), psw_w(3);
+SELECT pj_expect('psw_w(integer)', 'declined:relation:view') \gset
 BEGIN;
 INSERT INTO psw_b VALUES (0);
+SELECT pj_mark() \gset
 SELECT dblink_exec('other', 'DROP RULE psw_v_i ON psw_v; CREATE TRIGGER psw_v_t INSTEAD OF INSERT ON psw_v FOR EACH ROW EXECUTE FUNCTION psv_fn()');
 SELECT psw_w(4);
+SELECT pj_delta(0, 1, NULL, 0, 0, NULL, 0);
 COMMIT;
 SELECT psw_w(5);
 SELECT * FROM psw_b ORDER BY a;
@@ -191,15 +194,22 @@ BEGIN
   RETURN n;
 END $$;
 SELECT psx_w(1), psx_w(2), psx_w(3);
+SELECT pj_expect('psx_w(integer)', 'compiled') \gset
 CREATE RULE psx_r AS ON INSERT TO psx_t DO INSTEAD SELECT new.a;
 SELECT psx_try('SELECT psx_w(4)');
-SELECT psx_try('SELECT psx_w(5)');
 BEGIN;
+SELECT pj_mark() \gset
 SELECT dblink_exec('other', 'DROP RULE psx_r ON psx_t; CREATE TRIGGER psx_t_i BEFORE INSERT ON psx_t FOR EACH ROW EXECUTE FUNCTION psc_fn()');
 SELECT psx_w(6);
+SELECT pj_delta(0, 1, NULL, 0, 0, NULL, 0);
 COMMIT;
 SELECT psx_w(7);
+-- (the plan of the rule is walked at the entry: a miss, not a run)
+SELECT pj_expect('psx_w(integer)', 'interpreted:guard miss') \gset
+SELECT psx_w(8);
 SELECT * FROM psx_t ORDER BY a;
+-- (pg_class says that the table has rules until a VACUUM, so the reason is the rule's)
+SELECT pj_expect('psx_w(integer)', 'declined:relation:rule') \gset
 
 SELECT dblink_disconnect('other');
 DROP EXTENSION dblink;

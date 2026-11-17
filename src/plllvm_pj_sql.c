@@ -90,14 +90,16 @@ typedef struct SqlFacts
 	const char *reason;			/* why the statement is not admitted */
 	List	   *funcs;			/* the callees, once each ... */
 	List	   *volatility;		/* ... and their provolatile (as int) */
-	bool		has_view;
-	bool		writes;			/* a command or a CTE of it writes */
-	bool		result;			/* a query has a result relation */
+	bool		has_view;		/* true, when a view is among the relations */
+	bool		writes;			/* true, when a command or a CTE of it writes */
+	bool		result;			/* true, when a query has a result relation */
 } SqlFacts;
 
 static bool sql_scan_walker(Node *node, SqlFacts *facts);
 static bool sql_cmd_writes(CachedPlanSource *psrc);
 static const char *sql_write_reason(Query *query);
+static bool sql_rte_write_locked(RangeTblEntry *rte);
+static const char *sql_extra_writes_reason(Query *query);
 static const char *sql_relation_reason(Oid relid);
 static const char *sql_trigger_reason(Oid relid);
 static bool sql_check_volatile(Oid conrelid, Oid typid);
@@ -202,6 +204,11 @@ sql_scan_walker(Node *node, SqlFacts *facts)
 		}
 		if (query->hasModifyingCTE)
 			facts->writes = true;
+
+		/* of every query at every level, a SELECT too */
+		facts->reason = sql_extra_writes_reason(query);
+		if (facts->reason != NULL)
+			return true;
 		foreach_node(RangeTblEntry, rte, query->rtable)
 		{
 			/* ApplyRetrieveRule() leaves the relkind of the view */
@@ -246,24 +253,49 @@ sql_write_reason(Query *query)
 	rte = rt_fetch(query->resultRelation, query->rtable);
 	if (rte->rtekind != RTE_RELATION)
 		return "relation:kind";
+	return sql_relation_reason(rte->relid);
+}
 
-	/*
-	 * A view that was written through, or a relation a rule's action was
-	 * copied from, stays among the relations of the query with the lock of a
-	 * write, but is no result relation.  SPI takes that lock inside the call,
-	 * where the facts of the relation are delivered and were not looked at.
-	 */
+/*
+ * Is the entry one that SPI locks, ScanQueryForLocks() as it scans a plan,
+ * with the lock of a write?  A relation, or a view in a subquery.
+ */
+static bool
+sql_rte_write_locked(RangeTblEntry *rte)
+{
+	return (rte->rtekind == RTE_RELATION ||
+			(rte->rtekind == RTE_SUBQUERY && OidIsValid(rte->relid))) &&
+		rte->rellockmode >= RowExclusiveLock;
+}
+
+/*
+ * A view that was written through, and a relation that a rule's action was
+ * copied from, stay among the relations of the query with the lock of a
+ * write, in the query or in a subquery of it, and so does the table of a
+ * command that a rule made a SELECT.  None is the result relation of its
+ * query, so none is looked at, and SPI takes the lock inside the call, where
+ * what other sessions committed is delivered.  So no query at any level may
+ * have such an entry but its own result relation (and the pseudo relation
+ * excluded of ON CONFLICT, which is that relation again).
+ */
+static const char *
+sql_extra_writes_reason(Query *query)
+{
+	Oid			target = InvalidOid;
+
+	if (query->resultRelation > 0)
+		target = rt_fetch(query->resultRelation, query->rtable)->relid;
+
 	for (int i = 1; i <= list_length(query->rtable); i++)
 	{
-		RangeTblEntry *other = rt_fetch(i, query->rtable);
+		RangeTblEntry *rte = rt_fetch(i, query->rtable);
 
-		/* (the pseudo relation excluded of ON CONFLICT is the target again) */
-		if (i != query->resultRelation && other->rtekind == RTE_RELATION &&
-			other->relid != rte->relid &&
-			other->rellockmode >= RowExclusiveLock)
-			return "relation:view";
+		if (sql_rte_write_locked(rte) && i != query->resultRelation &&
+			rte->relid != target)
+			return rte->relkind == RELKIND_VIEW ? "relation:view" :
+				"relation:rule";
 	}
-	return sql_relation_reason(rte->relid);
+	return NULL;
 }
 
 /*
@@ -531,6 +563,7 @@ sql_facts_ok(PjSql *sql)
 	if (bms_equal(sql->expr->paramnos, sql->paramnos) &&
 		(!sql->into || sql_result_same(sql, psrc)) &&
 		!sql_scan_walker((Node *) psrc->query_list, &facts) &&
+		(!sql_cmd_writes(psrc) || facts.result) &&
 		facts.has_view == sql->has_view &&
 		list_length(facts.funcs) == sql->nfuncs)
 	{
@@ -714,8 +747,11 @@ sql_result_same(PjSql *sql, CachedPlanSource *psrc)
 }
 
 /*
- * The tables that the statement writes, locked as its execution will lock
- * them, but without waiting.  True if one is held by another session.
+ * Every relation of the plan that SPI will lock with the lock of a write,
+ * locked the same, but without waiting: ScanQueryForLocks() locks the entries
+ * of the rtable of every query, of its subqueries, CTEs and sublinks, in the
+ * mode of the entry, and so does this walk, for the entries of a write.  True
+ * if one is held by another session.
  */
 static bool
 sql_lock_writes(Node *node, void *context)
@@ -726,11 +762,9 @@ sql_lock_writes(Node *node, void *context)
 	{
 		Query	   *query = (Query *) node;
 
-		if (query->resultRelation > 0)
+		foreach_node(RangeTblEntry, rte, query->rtable)
 		{
-			RangeTblEntry *rte = rt_fetch(query->resultRelation, query->rtable);
-
-			if (rte->rtekind == RTE_RELATION &&
+			if (sql_rte_write_locked(rte) &&
 				!ConditionalLockRelationOid(rte->relid, rte->rellockmode))
 				return true;
 		}
