@@ -154,6 +154,19 @@ extern Datum plllvm_pj_invoke_track(PjSite *site);
 extern Datum plllvm_pj_io(struct PjCtx *ctx, int32 idx, Datum arg, int32 isnull);
 extern void plllvm_pj_site_done(struct PjCtx *ctx, int32 idx, int32 flags);
 
+/*
+ * An SQL statement of the function, run by SPI on the plan of PL/pgSQL
+ * (plllvm_pj_sql.c): its parameters, the execution, and the end of its tuples
+ */
+extern void *plllvm_pj_sql_params(struct PjCtx *ctx, int32 idx);
+extern int32 plllvm_pj_sql(struct PjCtx *ctx, int32 idx);
+extern void plllvm_pj_sql_end(struct PjCtx *ctx, int32 idx);
+
+/* what plllvm_pj_sql() says FOUND becomes */
+#define PJ_FOUND_FALSE		0
+#define PJ_FOUND_TRUE		1
+#define PJ_FOUND_UNCHANGED	2
+
 /* the flags of plllvm_pj_site_done() */
 #define PJ_DONE_RECHECK		1
 #define PJ_DONE_RESET		2

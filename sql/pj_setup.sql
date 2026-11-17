@@ -81,7 +81,10 @@ $$;
 
 CREATE FUNCTION pj_delta(compiled_calls int8, interpreted_calls int8,
                          boxed_evals int8, deopts int8, translations int8,
-                         elem_slow int8 DEFAULT NULL)
+                         elem_slow int8 DEFAULT NULL,
+                         sql_execs int8 DEFAULT NULL,
+                         sql_stale int8 DEFAULT NULL,
+                         sql_rewalks int8 DEFAULT NULL)
 RETURNS void
 LANGUAGE plpgsql AS $$
 DECLARE
@@ -106,7 +109,10 @@ BEGIN
                    ('boxed_evals', boxed_evals),
                    ('deopts', deopts),
                    ('translations', translations),
-                   ('elem_slow', elem_slow)) v(k, n)
+                   ('elem_slow', elem_slow),
+                   ('sql_execs', sql_execs),
+                   ('sql_stale', sql_stale),
+                   ('sql_rewalks', sql_rewalks)) v(k, n)
   LOOP
     CONTINUE WHEN want.n IS NULL;
     IF (cur->>want.k)::int8 - (mark->>want.k)::int8 <> want.n THEN

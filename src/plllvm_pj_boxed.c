@@ -54,7 +54,6 @@ static void level_free(PjLevel *lv);
 static void level_sample(PjLevel *lv);
 static void level_reset(PjLevel *lv);
 static void slot_build(PjLevel *lv, PjSlot *slot, const PjExpr *pe, PjCtx *ctx);
-static void key_recheck(PjCtx *ctx, const PjExpr *pe);
 
 /*
  * The parameters of the level, for the compiled code to fill
@@ -109,7 +108,7 @@ plllvm_pj_boxed_eval(PjCtx *ctx, int32 idx)
 		PopActiveSnapshot();
 	MemoryContextSwitchTo(oldcxt);
 
-	key_recheck(ctx, pe);
+	plllvm_pj_key_recheck(ctx, pe);
 
 	ctx->isnull = isnull;
 	return result;
@@ -319,7 +318,7 @@ void
 plllvm_pj_site_done(PjCtx *ctx, int32 idx, int32 flags)
 {
 	if (flags & PJ_DONE_RECHECK)
-		key_recheck(ctx, list_nth(ctx->harvest->exprs, idx));
+		plllvm_pj_key_recheck(ctx, list_nth(ctx->harvest->exprs, idx));
 	/* a call the expression did not reach made no level */
 	if ((flags & PJ_DONE_RESET) && ctx->lv != NULL)
 		level_reset(ctx->lv);
@@ -493,8 +492,8 @@ slot_build(PjLevel *lv, PjSlot *slot, const PjExpr *pe, PjCtx *ctx)
  * the privileges depend on is not what the call was checked for, check again.
  * No call can fall back now, so a function that is no longer allowed raises.
  */
-static void
-key_recheck(PjCtx *ctx, const PjExpr *pe)
+void
+plllvm_pj_key_recheck(PjCtx *ctx, const PjExpr *pe)
 {
 	uint64		epoch = plllvm_pj_exec_epoch();
 	Oid			user = GetUserId();

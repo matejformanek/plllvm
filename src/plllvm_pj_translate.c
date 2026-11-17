@@ -39,6 +39,7 @@
 #include "catalog/pg_cast.h"
 #include "catalog/pg_proc.h"
 #include "catalog/pg_type.h"
+#include "executor/spi.h"
 #include "lib/stringinfo.h"
 #include "nodes/makefuncs.h"
 #include "nodes/nodeFuncs.h"
@@ -146,6 +147,8 @@ static const char *var_reason(PLpgSQL_function *func, int dno);
 static void scope_pos(PjScopeWalk *w, PLpgSQL_stmt *stmt);
 static void scope_expr(PjScopeWalk *w, const void *owner, PLpgSQL_expr *expr,
 					   Oid dsttype, int32 dsttypmod);
+static const char *scope_sql(PjScopeWalk *w, PLpgSQL_expr *expr,
+							 PjSqlKind kind);
 static bool stmt_terminal(PLpgSQL_stmt *stmt);
 static bool raise_terminal(PLpgSQL_stmt_raise *stmt);
 static bool raise_bare(PLpgSQL_stmt_raise *stmt);
@@ -187,9 +190,13 @@ static void unbox(plllvm_ir *ir, const char *datum, const char *isnull,
 static PjPath expr_path(PjEmit *em, const PjExpr *pe);
 static void boxed_value(PjEmit *em, int index, const PjExpr *pe,
 						const char **datum, const char **isnull);
+static void spill_params(PjEmit *em, const char *params, const Bitmapset *set,
+						 int rw);
 static bool funcs_callback(Oid funcid, void *context);
 static const char *harvest_expr(PLpgSQL_function *func, PjHarvest *h,
 								PjEnv *env, PjExpr *pe, List **funcs);
+static const char *harvest_sql(PLpgSQL_function *func, PjHarvest *h,
+							   PjExpr *pe);
 static PLpgSQL_var *arg_var(PLpgSQL_function *func, int dno);
 static PLpgSQL_var *pj_var(PjHarvest *h, PLpgSQL_function *func, int dno);
 static const char *case_view(PLpgSQL_function *func, PjHarvest *h,
@@ -209,6 +216,8 @@ static void emit_assign(PjEmit *em, PLpgSQL_stmt_assign *stmt);
 static void emit_assign_expr(PjEmit *em, PLpgSQL_var *var, int dno,
 							 const void *owner);
 static void emit_execsql(PjEmit *em, PLpgSQL_stmt_execsql *stmt);
+static void emit_sql(PjEmit *em, PLpgSQL_expr *expr);
+static void emit_deopt(PjEmit *em, int index);
 static void emit_case(PjEmit *em, PLpgSQL_stmt_case *stmt);
 static void case_discard(PjEmit *em, PLpgSQL_var *var);
 static void emit_if(PjEmit *em, PLpgSQL_stmt_if *stmt);
@@ -479,18 +488,29 @@ walk_stmt(PjScopeWalk *w, PLpgSQL_stmt *stmt)
 				return walk_stmts(w, cs->else_stmts);
 			}
 
+		case PLPGSQL_STMT_PERFORM:
+			{
+				PLpgSQL_stmt_perform *perform = (PLpgSQL_stmt_perform *) stmt;
+
+				return scope_sql(w, perform->expr, PJ_SQL_PERFORM);
+			}
+
 		case PLPGSQL_STMT_EXECSQL:
 			{
 				PLpgSQL_stmt_execsql *sql = (PLpgSQL_stmt_execsql *) stmt;
 				PLpgSQL_row *row;
 				PLpgSQL_var *var;
 
+				/* a statement with no INTO is SPI's, as PERFORM is */
+				if (!sql->into)
+					return scope_sql(w, sql->sqlstmt, PJ_SQL_EXECSQL);
+
 				/*
-				 * Only what PL/pgSQL runs without SPI: a query into one
+				 * Else only what PL/pgSQL runs without SPI: a query into one
 				 * variable.  Whether the query is a simple expression is for
 				 * its plan to say.
 				 */
-				if (!sql->into || sql->target == NULL ||
+				if (sql->target == NULL ||
 					sql->target->dtype != PLPGSQL_DTYPE_ROW ||
 					((PLpgSQL_row *) sql->target)->nfields != 1)
 					return psprintf("statement:%s",
@@ -598,6 +618,22 @@ scope_expr(PjScopeWalk *w, const void *owner, PLpgSQL_expr *expr,
 	pe->case_var = -1;
 	pe->case_sel = -1;
 	w->scope->exprs = lappend(w->scope->exprs, pe);
+}
+
+/*
+ * A statement that SPI runs on the plan of PL/pgSQL.  Under use_column a
+ * re-analysis can bind a name to a variable that was a column (pl_comp.c), so
+ * the list of parameters we built could be one short.
+ */
+static const char *
+scope_sql(PjScopeWalk *w, PLpgSQL_expr *expr, PjSqlKind kind)
+{
+	if (w->func->resolve_option == PLPGSQL_RESOLVE_COLUMN)
+		return "variable_conflict";
+
+	scope_expr(w, expr, expr, InvalidOid, -1);
+	((PjExpr *) llast(w->scope->exprs))->sql_kind = kind;
+	return NULL;
 }
 
 /*
@@ -715,7 +751,20 @@ plllvm_pj_classify(PjScope *scope)
 			continue;
 		}
 
-		if (expr->plan == NULL)
+		if (pe->sql_kind != PJ_SQL_NONE)
+		{
+			/*
+			 * SPI analyses again by itself, but the trees of a plan that is
+			 * stale are not ours to read
+			 */
+			if (expr->plan == NULL ||
+				!((CachedPlanSource *)
+				  linitial(SPI_plan_get_plan_sources(expr->plan)))->is_valid)
+				pe->h1 = PJ_H1_UNPLANNED;
+			else
+				pe->h1 = PJ_H1_SQL;
+		}
+		else if (expr->plan == NULL)
 			pe->h1 = PJ_H1_UNPLANNED;
 		else if (expr->expr_simple_expr == NULL)
 			pe->h1 = PJ_H1_NOT_SIMPLE;
@@ -737,6 +786,7 @@ plllvm_pj_classify(PjScope *scope)
 		switch (pe->h1)
 		{
 			case PJ_H1_READY:
+			case PJ_H1_SQL:
 				scope->nready++;
 				break;
 			case PJ_H1_UNPLANNED:
@@ -913,6 +963,11 @@ plllvm_pj_harvest(PLpgSQL_function *func, const PjScope *scope, PjHarvest *h)
 				}
 			}
 		}
+		else if (pe->h1 == PJ_H1_SQL)
+		{
+			if (reason == NULL)
+				reason = harvest_sql(func, h, copy);
+		}
 		else
 			h->nunplanned++;
 
@@ -926,6 +981,31 @@ plllvm_pj_harvest(PLpgSQL_function *func, const PjScope *scope, PjHarvest *h)
 	MemoryContextSwitchTo(oldcxt);
 
 	return reason;
+}
+
+/*
+ * An SQL statement: the datums it names must be variables we keep in a slot, as
+ * a record cannot be a parameter yet
+ */
+static const char *
+harvest_sql(PLpgSQL_function *func, PjHarvest *h, PjExpr *pe)
+{
+	int			dno = -1;
+
+	while ((dno = bms_next_member(pe->expr->paramnos, dno)) >= 0)
+	{
+		PLpgSQL_datum *datum = func->datums[dno];
+
+		if (pj_var(h, func, dno) == NULL)
+		{
+			if (datum->dtype == PLPGSQL_DTYPE_VAR ||
+				datum->dtype == PLPGSQL_DTYPE_PROMISE)
+				return psprintf("datum:%s",
+								((PLpgSQL_var *) datum)->datatype->typname);
+			return "datum:record";
+		}
+	}
+	return plllvm_pj_sql_harvest(func, h, pe);
 }
 
 /*
@@ -1915,10 +1995,13 @@ plllvm_pj_emit(PLpgSQL_function *func, PjHarvest *h, PjVariant *v)
 	bool		has_compiled = false;
 	bool		has_calls = false;
 	bool		has_elem = false;
+	bool		has_sql = false;
 
 	em.all_boxed = v->codegen == PLLLVM_PJ_BOXED;
 	foreach_ptr(PjExpr, pe, h->exprs)
 	{
+		if (pe->h1 == PJ_H1_SQL)
+			has_sql = true;
 		if (pe->h1 != PJ_H1_READY)
 			continue;
 		if (expr_path(&em, pe) == PJ_PATH_BOXED)
@@ -1934,9 +2017,11 @@ plllvm_pj_emit(PLpgSQL_function *func, PjHarvest *h, PjVariant *v)
 	/*
 	 * Once the executor, any callee or a message has run, a call cannot start
 	 * again in the interpreter (a callee may send a message or run SQL,
-	 * whatever it is), so code that runs them has no deopt point.
+	 * whatever it is), so code that runs them has no deopt point.  A SQL
+	 * statement runs the executor, and whatever it calls.
 	 */
-	if ((has_boxed || has_calls || h->has_notice) && h->nunplanned > 0)
+	if ((has_boxed || has_calls || has_sql || h->has_notice) &&
+		h->nunplanned > 0)
 		return PJ_EMIT_WAITING;
 
 	plllvm_jit_session_ensure();
@@ -2068,7 +2153,7 @@ plllvm_pj_emit(PLpgSQL_function *func, PjHarvest *h, PjVariant *v)
 	v->code = (PjCode) result.mod->addr;
 	v->native = has_compiled;
 	v->boxed = has_boxed;
-	v->restartable = !has_boxed && !has_calls && !h->has_notice;
+	v->restartable = !has_boxed && !has_calls && !has_sql && !h->has_notice;
 	return PJ_EMIT_OK;
 }
 
@@ -2121,7 +2206,13 @@ emit_stmt(PjEmit *em, PLpgSQL_stmt *stmt)
 			emit_case(em, (PLpgSQL_stmt_case *) stmt);
 			break;
 		case PLPGSQL_STMT_EXECSQL:
-			emit_execsql(em, (PLpgSQL_stmt_execsql *) stmt);
+			if (((PLpgSQL_stmt_execsql *) stmt)->into)
+				emit_execsql(em, (PLpgSQL_stmt_execsql *) stmt);
+			else
+				emit_sql(em, ((PLpgSQL_stmt_execsql *) stmt)->sqlstmt);
+			break;
+		case PLPGSQL_STMT_PERFORM:
+			emit_sql(em, ((PLpgSQL_stmt_perform *) stmt)->expr);
 			break;
 		case PLPGSQL_STMT_LOOP:
 		case PLPGSQL_STMT_WHILE:
@@ -2254,6 +2345,62 @@ emit_execsql(PjEmit *em, PLpgSQL_stmt_execsql *stmt)
 	emit_assign_expr(em, (PLpgSQL_var *) em->func->datums[dno], dno,
 					 stmt->sqlstmt);
 	set_found(em, true);
+}
+
+/*
+ * A statement that SPI runs, PERFORM or one with no INTO: the variables it
+ * names go to its parameter list, and the helper runs it and says what FOUND
+ * becomes.  A statement not planned yet leaves the call to the interpreter.
+ */
+static void
+emit_sql(PjEmit *em, PLpgSQL_expr *expr)
+{
+	plllvm_ir  *ir = em->ir;
+	int			index = em->next_expr++;
+	const PjExpr *pe = list_nth(em->h->exprs, index);
+	int			found = em->func->found_varno;
+	const char *rc = plllvm_ir_tmp(ir);
+	const char *set = plllvm_ir_tmp(ir);
+	const char *wide = plllvm_ir_tmp(ir);
+	const char *cur = plllvm_ir_tmp(ir);
+	const char *next = plllvm_ir_tmp(ir);
+
+	if (pe->owner != expr)
+		elog(ERROR, "plpgsql_jit: expression %d out of order", index);
+	if (pe->h1 != PJ_H1_SQL)
+	{
+		emit_deopt(em, index);
+		return;
+	}
+
+	plllvm_ir_declare(ir, "declare ptr @plllvm_pj_sql_params(ptr, i32)");
+	plllvm_ir_declare(ir, "declare i32 @plllvm_pj_sql(ptr, i32)");
+	plllvm_ir_declare(ir, "declare void @plllvm_pj_sql_end(ptr, i32)");
+
+	if (!bms_is_empty(pe->sql->paramnos))
+	{
+		const char *params = plllvm_ir_tmp(ir);
+
+		plllvm_ir_emit(ir, "%s = call ptr @plllvm_pj_sql_params(ptr %%ctx, i32 %d)",
+					   params, index);
+		spill_params(em, params, pe->sql->paramnos, -1);
+	}
+
+	plllvm_ir_emit(ir, "%s = call i32 @plllvm_pj_sql(ptr %%ctx, i32 %d)", rc,
+				   index);
+
+	/* FOUND takes the answer unless it is "unchanged" */
+	plllvm_ir_emit(ir, "%s = icmp ne i32 %s, %d", set, rc, PJ_FOUND_UNCHANGED);
+	plllvm_ir_emit(ir, "%s = zext i32 %s to i64", wide, rc);
+	plllvm_ir_emit(ir, "%s = load i64, ptr %%v%d", cur, found);
+	plllvm_ir_emit(ir, "%s = select i1 %s, i64 %s, i64 %s", next, set, wide, cur);
+	store_var(em, found, next, "false");
+
+	plllvm_ir_emit(ir, "call void @plllvm_pj_sql_end(ptr %%ctx, i32 %d)", index);
+
+	/* the executor has run: a poll before the next statement */
+	em->nboxed++;
+	em->poll_pending = true;
 }
 
 /*
@@ -2785,12 +2932,7 @@ expr_value(PjEmit *em, const void *owner, const char **datum,
 
 	if (pe->h1 != PJ_H1_READY)
 	{
-		const char *at = field_ptr(ir, "%ctx", offsetof(PjCtx, deopt));
-
-		plllvm_ir_emit(ir, "store i32 %d, ptr %s", index + 1, at);
-		plllvm_ir_emit(ir, "ret i64 0");
-		em->open = false;
-		reopen(em);
+		emit_deopt(em, index);
 		*datum = "0";
 		*isnull = "true";
 		return;
@@ -2864,6 +3006,22 @@ expr_value(PjEmit *em, const void *owner, const char **datum,
 	}
 }
 
+/*
+ * An expression that is not planned yet: the call goes to the interpreter,
+ * which plans it, and the code goes on in a block nothing reaches
+ */
+static void
+emit_deopt(PjEmit *em, int index)
+{
+	plllvm_ir  *ir = em->ir;
+	const char *at = field_ptr(ir, "%ctx", offsetof(PjCtx, deopt));
+
+	plllvm_ir_emit(ir, "store i32 %d, ptr %s", index + 1, at);
+	plllvm_ir_emit(ir, "ret i64 0");
+	em->open = false;
+	reopen(em);
+}
+
 /* what the code does with an expression: path, but for pj_codegen = boxed */
 static PjPath
 expr_path(PjEmit *em, const PjExpr *pe)
@@ -2886,7 +3044,6 @@ boxed_value(PjEmit *em, int index, const PjExpr *pe, const char **datum,
 	const char *raw = plllvm_ir_tmp(ir);
 	const char *flag = plllvm_ir_tmp(ir);
 	const char *null = plllvm_ir_tmp(ir);
-	int			dno = -1;
 
 	plllvm_ir_declare(ir, "declare ptr @plllvm_pj_params(ptr)");
 	plllvm_ir_declare(ir, "declare i64 @plllvm_pj_boxed_eval(ptr, i32)");
@@ -2898,51 +3055,7 @@ boxed_value(PjEmit *em, int index, const PjExpr *pe, const char **datum,
 
 		plllvm_ir_emit(ir, "%s = call ptr @plllvm_pj_params(ptr %%ctx)",
 					   params);
-		while ((dno = bms_next_member(pe->params, dno)) >= 0)
-		{
-			const char *value = plllvm_ir_tmp(ir);
-			const char *n = plllvm_ir_tmp(ir);
-			const char *z = plllvm_ir_tmp(ir);
-			size_t		at = dno * sizeof(ParamExternData);
-
-			plllvm_ir_emit(ir, "%s = load i64, ptr %%v%d", value, dno);
-			plllvm_ir_emit(ir, "%s = load i1, ptr %%n%d", n, dno);
-			plllvm_ir_emit(ir, "%s = zext i1 %s to i8", z, n);
-			if (pj_var(em->h, em->func, dno)->datatype->typisarray)
-			{
-				const char *ro = plllvm_ir_tmp(ir);
-
-				plllvm_ir_declare(ir, "declare i64 @plllvm_pj_param_ro(i64, i1)");
-				plllvm_ir_emit(ir, "%s = call i64 @plllvm_pj_param_ro(i64 %s, i1 %s)",
-							   ro, value, n);
-				if (dno == pe->rw)
-				{
-					const char *own = plllvm_ir_tmp(ir);
-					const char *rw = plllvm_ir_tmp(ir);
-					size_t		twin = (em->func->ndatums + dno) *
-						sizeof(ParamExternData);
-
-					plllvm_ir_declare(ir, "declare i64 @plllvm_pj_param_rw(i64, i1, i1)");
-					plllvm_ir_emit(ir, "%s = load i1, ptr %%o%d", own, dno);
-					plllvm_ir_emit(ir,
-								   "%s = call i64 @plllvm_pj_param_rw(i64 %s, i1 %s, i1 %s)",
-								   rw, value, n, own);
-					plllvm_ir_emit(ir, "store i64 %s, ptr %s", rw,
-								   field_ptr(ir, params,
-											 twin + offsetof(ParamExternData, value)));
-					plllvm_ir_emit(ir, "store i8 %s, ptr %s", z,
-								   field_ptr(ir, params,
-											 twin + offsetof(ParamExternData, isnull)));
-				}
-				value = ro;
-			}
-			plllvm_ir_emit(ir, "store i64 %s, ptr %s", value,
-						   field_ptr(ir, params,
-									 at + offsetof(ParamExternData, value)));
-			plllvm_ir_emit(ir, "store i8 %s, ptr %s", z,
-						   field_ptr(ir, params,
-									 at + offsetof(ParamExternData, isnull)));
-		}
+		spill_params(em, params, pe->params, pe->rw);
 	}
 
 	plllvm_ir_emit(ir, "%s = call i64 @plllvm_pj_boxed_eval(ptr %%ctx, i32 %d)",
@@ -2961,6 +3074,64 @@ boxed_value(PjEmit *em, int index, const PjExpr *pe, const char **datum,
 
 	*datum = raw;
 	*isnull = null;
+}
+
+/*
+ * Store the variables of set into the parameters at params: the value and the
+ * null flag of each.  An array goes read-only, but the one that an assignment
+ * may change in place, rw, which has a twin that may be written.
+ */
+static void
+spill_params(PjEmit *em, const char *params, const Bitmapset *set, int rw)
+{
+	plllvm_ir  *ir = em->ir;
+	int			dno = -1;
+
+	while ((dno = bms_next_member(set, dno)) >= 0)
+	{
+		const char *value = plllvm_ir_tmp(ir);
+		const char *n = plllvm_ir_tmp(ir);
+		const char *z = plllvm_ir_tmp(ir);
+		size_t		at = dno * sizeof(ParamExternData);
+
+		plllvm_ir_emit(ir, "%s = load i64, ptr %%v%d", value, dno);
+		plllvm_ir_emit(ir, "%s = load i1, ptr %%n%d", n, dno);
+		plllvm_ir_emit(ir, "%s = zext i1 %s to i8", z, n);
+		if (pj_var(em->h, em->func, dno)->datatype->typisarray)
+		{
+			const char *ro = plllvm_ir_tmp(ir);
+
+			plllvm_ir_declare(ir, "declare i64 @plllvm_pj_param_ro(i64, i1)");
+			plllvm_ir_emit(ir, "%s = call i64 @plllvm_pj_param_ro(i64 %s, i1 %s)",
+						   ro, value, n);
+			if (dno == rw)
+			{
+				const char *own = plllvm_ir_tmp(ir);
+				const char *rwv = plllvm_ir_tmp(ir);
+				size_t		twin = (em->func->ndatums + dno) *
+					sizeof(ParamExternData);
+
+				plllvm_ir_declare(ir, "declare i64 @plllvm_pj_param_rw(i64, i1, i1)");
+				plllvm_ir_emit(ir, "%s = load i1, ptr %%o%d", own, dno);
+				plllvm_ir_emit(ir,
+							   "%s = call i64 @plllvm_pj_param_rw(i64 %s, i1 %s, i1 %s)",
+							   rwv, value, n, own);
+				plllvm_ir_emit(ir, "store i64 %s, ptr %s", rwv,
+							   field_ptr(ir, params,
+										 twin + offsetof(ParamExternData, value)));
+				plllvm_ir_emit(ir, "store i8 %s, ptr %s", z,
+							   field_ptr(ir, params,
+										 twin + offsetof(ParamExternData, isnull)));
+			}
+			value = ro;
+		}
+		plllvm_ir_emit(ir, "store i64 %s, ptr %s", value,
+					   field_ptr(ir, params,
+								 at + offsetof(ParamExternData, value)));
+		plllvm_ir_emit(ir, "store i8 %s, ptr %s", z,
+					   field_ptr(ir, params,
+								 at + offsetof(ParamExternData, isnull)));
+	}
 }
 
 /*

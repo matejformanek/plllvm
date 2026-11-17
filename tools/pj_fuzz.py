@@ -73,6 +73,17 @@ are arrays of the other lower bounds, with NULL elements, empty, two-dimensional
 or NULL; subscripts are NULL, raising, out of range, past either end or at the
 ends of int4.  The run fails if no program had a deopt, or if fewer than
 --floor-elem of the programs have a variant without a call of the executor.
+--mode sql writes functions of PERFORM and of statements with no INTO over a
+small table, that run through SPI in compiled code: parameters of every kind
+the statement may name, statements that raise, the plan of 1 / n over no rows
+that tells a custom plan from a generic one, a callee that says when it runs,
+branches, loops.  Between the calls the script truncates and refills the table,
+analyses it, creates and drops an index, discards the plans, changes
+plan_cache_mode, adds a column; a second argument that is NULL sends a call to
+the interpreter, so that the plans of the two paths are the same ones.  Equal
+output is also what a function gives that PL/pgSQL ran, so the run fails if
+fewer than --floor-sql of the programs ran a statement through SPI in compiled
+code (plllvm_pj_stats() sql_execs).
 --cx adds CASE statements, searched and simple (a selector of any type of the
 mode, a list of values in a WHEN, with and without ELSE), and SELECT
 expression INTO a variable to a flat or ref program.  The choices of these
@@ -90,8 +101,8 @@ schema name is normalised.  Every statement of a script is a step.
 
 Usage: pj_fuzz.py --psql <psql> --host <dir> --port <port> [--n N] [--start I]
                   [--seed S] [--opt-level 0|2|3] [--out dir] [--floor 0.5]
-                  [--mode flat|rec|ref|elem] [--cx] [--floor-cx 0.15]
-                  [--floor-elem 0.9]
+                  [--mode flat|rec|ref|elem|sql] [--cx] [--floor-cx 0.15]
+                  [--floor-elem 0.9] [--floor-sql 0.4]
 """
 import argparse
 import os
@@ -2040,6 +2051,195 @@ def main_elem(args):
     return 1 if failed else 0
 
 
+
+# ---- statements for SPI (--mode sql)
+
+SQL_BAD = 4                      # the n that makes 1 / (n - SQL_BAD) raise
+SQL_RARE = 9                     # the n of the branch no warm call takes
+
+
+class SqlGen:
+    """Statements over the table sq_t, the arguments n and t, the local
+    r that collects what each statement saw, the loop variable i."""
+
+    def __init__(self, rng):
+        self.r = rng
+
+    def cond(self):
+        r = self.r
+        return r.choice(["n > 2", "n % 2 = 0", "t = 'row3'", "n < %d" % SQL_BAD,
+                         "found", "n = %d" % r.randint(0, 6)])
+
+    def perform(self, loop):
+        r = self.r
+        x = r.random()
+        v = "i" if loop else "n"
+        if x < 0.2:
+            return "PERFORM 1 FROM sq_t WHERE a = %s;" % v
+        if x < 0.35:
+            return "PERFORM 1 FROM sq_t WHERE a < %s AND b <> t;" % v
+        if x < 0.45:
+            return "PERFORM count(*) FROM sq_t WHERE a > %s;" % v
+        if x < 0.55:
+            return "PERFORM 1 / (%s - %d) FROM sq_t WHERE a = %s;" % (v, SQL_BAD, v)
+        if x < 0.65:
+            return "PERFORM 1 / n FROM sq_t WHERE false;"
+        if x < 0.75:
+            return "PERFORM sq_noisy(%s) FROM sq_t WHERE a = 1;" % v
+        if x < 0.82:
+            return "PERFORM 1 WHERE found;"
+        if x < 0.9:
+            return "PERFORM %s;" % v
+        return "PERFORM 1 FROM sq_t WHERE b = t || %s::text;" % v
+
+    def stmt(self, d, loop):
+        r = self.r
+        x = r.random()
+        if x < 0.55 or d <= 0:
+            return self.perform(loop) + " r := r || found::text;"
+        if x < 0.75 and not loop:
+            body = " ".join(self.stmt(d - 1, True) for _ in range(r.randint(1, 3)))
+            return "FOR i IN 1..least(n, 5) LOOP %s END LOOP;" % body
+        then = " ".join(self.stmt(d - 1, loop) for _ in range(r.randint(1, 2)))
+        els = ""
+        if r.random() < 0.4:
+            els = " ELSE " + " ".join(self.stmt(d - 1, loop) for _ in range(r.randint(1, 2)))
+        return "IF %s THEN %s%s END IF;" % (self.cond(), then, els)
+
+
+class SqlProgram:
+    def __init__(self, seed, cat=None, cx=False):
+        r = random.Random(seed)
+        self.rng = r
+        self.seed = seed
+        g = SqlGen(r)
+        self.body = [g.stmt(2, False) for _ in range(r.randint(2, 5))]
+        # a statement no warm call reaches: planned by the call that takes it
+        self.body.insert(r.randint(0, len(self.body)),
+                         "IF n = %d THEN %s r := r || found::text; END IF;"
+                         % (SQL_RARE, g.perform(False)))
+        if r.random() < 0.15:
+            # SELECT with no INTO, which raises
+            self.body.append("IF n = %d THEN SELECT n; END IF;" % (SQL_RARE + 1))
+        self.priv = False
+        self.real = {}
+        self.status_cols = ("state, coalesce(reason, ''), compiled_calls, calls, deopts, "
+                            "(SELECT sql_execs FROM plllvm_pj_stats()), last_path")
+        self.steps = self.make_steps()
+
+    def sig(self):
+        return "(integer,integer,text)"
+
+    def function(self):
+        o = ("CREATE FUNCTION f(n integer, h integer, t text) RETURNS text "
+             "LANGUAGE :lang AS $f$\nDECLARE\n  r text := '';\n  i integer;\nBEGIN\n")
+        for st in self.body:
+            o += "  %s\n" % st
+        return o + "  RETURN r;\nEND\n$f$;\n"
+
+    def wrapper(self):
+        return ("CREATE FUNCTION w(n integer, h integer, t text) RETURNS text LANGUAGE plpgsql AS $w$\n"
+                "BEGIN RETURN f(n, h, t);\n"
+                "EXCEPTION WHEN OTHERS THEN RETURN SQLSTATE || ' ' || SQLERRM;\nEND $w$;\n")
+
+    def setup(self):
+        return ("CREATE TABLE sq_t (a int PRIMARY KEY, b text);\n"
+                "INSERT INTO sq_t SELECT i, 'row' || i FROM generate_series(1, 8) i;\n"
+                "ANALYZE sq_t;\n"
+                "CREATE FUNCTION sq_noisy(n int) RETURNS int LANGUAGE plpgsql STABLE AS "
+                "$q$ BEGIN RAISE NOTICE 'noisy %', n; RETURN n; END $q$;\n")
+
+    def call(self, kind, fn="f"):
+        r = self.rng
+        n = {"harmless": r.randint(0, 6), "rare": SQL_RARE,
+             "edge": r.choice([0, 1, SQL_BAD, SQL_BAD, SQL_RARE + 1, -1, 7])}[kind]
+        h = r.choice(["1", "1", "1", "NULL"])
+        t = r.choice(["'row3'", "'x'", "'row1'"])
+        return "SELECT %s(%d, %s, %s);" % (fn, n, h, t)
+
+    def between(self):
+        return self.rng.choice([
+            "TRUNCATE sq_t; INSERT INTO sq_t SELECT i, 'row' || i FROM generate_series(1, 8) i; ANALYZE sq_t;",
+            "ANALYZE sq_t;",
+            "CREATE INDEX IF NOT EXISTS sq_b ON sq_t (b);",
+            "DROP INDEX IF EXISTS sq_b;",
+            "DISCARD PLANS;",
+            "SET plan_cache_mode = force_custom_plan;",
+            "SET plan_cache_mode = force_generic_plan;",
+            "SET plan_cache_mode = auto;",
+            "DELETE FROM sq_t WHERE a > 5;",
+        ])
+
+    def make_steps(self):
+        r = self.rng
+        st = ["@setup", "@create", "@wrapper"]
+        # every n a condition tests, with each t, so that the branches are
+        # planned before the code is translated
+        for n in range(7):
+            st.append("SELECT f(%d, 1, '%s');" % (n, ["row3", "x", "row1"][n % 3]))
+        for _ in range(r.randint(5, 10)):
+            if r.random() < 0.4:
+                st.append(self.between())
+            st.append(self.call(r.choice(["harmless", "edge", "edge"]),
+                                r.choice(["f", "f", "w"])))
+        st.append(self.call("rare"))
+        for _ in range(3):
+            st.append(self.call("harmless"))
+        st.append(self.call("rare", "w"))
+        st.append(self.call("harmless"))
+        st.append(self.call("harmless"))
+        return st
+
+
+def main_sql(args):
+    tally = Counter()
+    reasons = Counter()
+    failed = False
+    for i in range(args.start, args.start + args.n):
+        seed = "%d:%d" % (args.seed, i)
+        prog = SqlProgram(seed)
+        a, b = run_pair(args, prog)
+        verdict, step = compare(args, prog, a, b, tally)
+        tally[verdict] += 1
+        m = re.search(r"@@ status\n(.*)", b, re.S)
+        st = m.group(1).strip().split("\n")[0].split("|") if m else []
+        ok = len(st) == 7
+        if ok and int(st[2]) > 0:
+            tally["compiled"] += 1
+        if ok and int(st[5]) > 0:
+            tally["ran-sql"] += 1
+            tally["sql-execs"] += int(st[5])
+        else:
+            reasons["%s %s, last path %s" % (st[0], st[1], st[6]) if ok else "no status"] += 1
+        if ok:
+            tally["deopts"] += int(st[4])
+        if args.v or verdict != "equal":
+            print("seed %s: %s%s" % (seed, verdict, "" if step is None else " at step %d" % step))
+        if verdict in ("MISMATCH", "PERMISSIVE"):
+            failed = True
+            f = os.path.join(args.out, "fuzz-%s.txt" % seed.replace(":", "-"))
+            with open(f, "w") as fh:
+                fh.write("-- %s at step %s, seed %s, opt level %s\n== plpgsql script\n%s"
+                         "== plpgsql_jit script\n%s== plpgsql output\n%s\n"
+                         "== plpgsql_jit output\n%s\n"
+                         % (verdict, step, seed, args.opt_level, script(prog, "plpgsql"),
+                            script(prog, "plpgsql_jit", True), a, b))
+            print("  program and outputs: %s" % f)
+    print("pj_fuzz sql: seed=%d programs=%d opt_level=%s equal=%d permissive=%d mismatch=%d "
+          "compiled=%d (%.1f%%) ran SQL compiled=%d (%.1f%%), %d statements, deopts=%d"
+          % (args.seed, args.n, args.opt_level, tally["equal"], tally["PERMISSIVE"],
+             tally["MISMATCH"], tally["compiled"], 100.0 * tally["compiled"] / max(args.n, 1),
+             tally["ran-sql"], 100.0 * tally["ran-sql"] / max(args.n, 1), tally["sql-execs"],
+             tally["deopts"]))
+    for k, v in reasons.most_common(8):
+        print("  no SQL compiled: %5d  %s" % (v, k))
+    if tally["ran-sql"] < args.floor_sql * args.n:
+        print("pj_fuzz: programs that ran SQL compiled below the floor of %.0f%%"
+              % (100 * args.floor_sql))
+        failed = True
+    return 1 if failed else 0
+
+
 # ---- running
 
 CLEAN = ("SET client_min_messages = warning;\n"
@@ -2065,6 +2265,8 @@ def script(prog, lang, status=False):
         o += "\\echo @@ %d\n" % i
         if s == "@create":
             o += prog.function()
+        elif s == "@setup":
+            o += prog.setup()
         elif s == "@wrapper":
             o += prog.wrapper()
         else:
@@ -2219,10 +2421,11 @@ def main():
     ap.add_argument("--opt-level", type=int, default=None)
     ap.add_argument("--out", default="results-fuzz")
     ap.add_argument("--floor", type=float, default=0.5)
-    ap.add_argument("--mode", choices=["flat", "rec", "ref", "elem"], default="flat")
+    ap.add_argument("--mode", choices=["flat", "rec", "ref", "elem", "sql"], default="flat")
     ap.add_argument("--cx", action="store_true", help="CASE and SELECT INTO (flat, ref)")
     ap.add_argument("--floor-cx", type=float, default=0.15, dest="floor_cx")
     ap.add_argument("--floor-elem", type=float, default=0.9, dest="floor_elem")
+    ap.add_argument("--floor-sql", type=float, default=0.4, dest="floor_sql")
     ap.add_argument("-v", action="store_true")
     ap.add_argument("--selftest", action="store_true", help="check frame_mix, no cluster")
     args = ap.parse_args()
@@ -2241,6 +2444,10 @@ def main():
         if args.cx:
             ap.error("--cx is for flat and ref programs")
         sys.exit(main_elem(args))
+    if args.mode == "sql":
+        if args.cx:
+            ap.error("--cx is for flat and ref programs")
+        sys.exit(main_sql(args))
     cat = load_catalog(lambda q: admin(args, q))
     if args.mode == "ref":
         universe = cat.universe

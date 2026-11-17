@@ -23,6 +23,7 @@ plpgsql_jit` (v0.3).
 | `src/plllvm_pj.c`, `src/plllvm_pj.h` | `LANGUAGE plpgsql_jit`: the call handler, the side entry of each PL/pgSQL function, translation in a subtransaction, guards, the error context, the counters of `plllvm_pj_stats()`; includes `plpgsql.h` |
 | `src/plllvm_pj_boxed.c` | `plpgsql_jit`: the expressions the compiler does not do, run by the executor on the translator's copy of the planned tree, and the per-transaction state they use; includes no `plpgsql.h` |
 | `src/plllvm_pj_sites.c` | `plpgsql_jit`: the sites, the calls compiled code makes through fmgr and the I/O functions, built per level and transaction; includes no `plpgsql.h` |
+| `src/plllvm_pj_sql.c` | `plpgsql_jit`: the SQL statements of a function, run by SPI on PL/pgSQL's plans: the shadow estate, the parameter lists, the execution and its result codes, the checks of a statement's plan; includes `plpgsql.h` |
 | `src/plllvm_pj_translate.c` | `plpgsql_jit`: scope of a function, the planned trees of its expressions, the casts to their targets, the IR of a function (statements, loops, labels, positions); includes `plpgsql.h` |
 | `src/plllvm_ir.c` | IR text builder: temporaries, blocks, declarations |
 | `src/plllvm_expr.c` | planned expression tree to IR: the check (whole tree or nothing) and the emitter; knows neither LLVM nor PL/pgSQL |
@@ -321,6 +322,67 @@ Only `plllvm_jit.c` and `plllvm_error.cpp` include LLVM headers.
   (`SQL statement "..."`, from the position of the expression and of the
   build); the conversion, the NOT NULL check and the copy come after
   PL/pgSQL has left the query, so they are positioned at the statement.
+* `PERFORM` and a statement with no `INTO` are run by SPI from compiled
+  code, on `expr->plan`, the plan the interpreter prepared. PL/pgSQL's
+  statement runners are `static` and its plugin hooks only observe, so the
+  code does what `exec_stmt_perform()` and `exec_stmt_execsql()` do around
+  `SPI_execute_plan_with_paramlist()` (`plllvm_pj_sql.c`). It never prepares a
+  plan and never writes a `PLpgSQL_expr`, so a call of either path counts
+  towards the same five custom plans of the plan source.
+  * A statement is harvested when its plan exists and is valid. A function
+    whose only unplanned statement is in a branch no call took waits, as one
+    with a call does, since a statement that has run cannot run twice.
+  * The parameter list is NULL exactly when `expr->paramnos` is empty
+    (`setup_param_list()`: a list makes the planner build custom plans), and
+    otherwise holds the variables of `paramnos` and "no such parameter" in
+    every other slot, without hooks, which a parallel worker needs. Compiled
+    code stores the variables into it as it does for the executor.
+  * An analysis of the statement inside the call runs the parser hooks of
+    PL/pgSQL, which read `func->cur_estate`, and compiled code has none. A
+    shadow estate, built once per harvest from copies of the variables and
+    records (`copy_plpgsql_datums()`; the function's own datums are never
+    handed out), stands in for it while SPI runs, and is taken away in
+    `PG_FINALLY`.
+  * SPI is connected, atomically, by the first statement of a call and
+    finished by `run()` after the result is copied out. FOUND takes the answer
+    of the command code as PL/pgSQL gives it; a SELECT with no `INTO` raises
+    its 42601 with PL/pgSQL's HINT; PERFORM has its two messages. The tuples
+    are freed after each statement.
+  * Admission: every query of the plan, rewritten, is a SELECT with no data-
+    modifying CTE, calls no VOLATILE function but the built-in ones that
+    change no input of a plan (`nextval`, `random`, the clocks, `pg_sleep`;
+    not `set_config`), and the function is not `#variable_conflict
+    use_column`, under which a new analysis could bind a name to a variable
+    the list does not have. The trigger, rule and constraint code of a table
+    that is written is code no walk of the query shows.
+  * A plan that is invalid is run, since SPI analyses it again by itself: it
+    is how a function whose table is truncated and analysed between calls
+    stays compiled. The entry check refuses (a guard miss) a changed
+    `search_path`, a role or `row_security` that the rewrite depends on,
+    other `paramnos`, and, when the plan is invalid, a callee whose
+    `provolatile` changed or a view among the relations. When it is valid it
+    compares `generation` of the plan source with the one last seen, which
+    moves with every plan built (an interpreted call may have rebuilt it):
+    then the admission walk is made again over the current query list. After
+    each execution the same comparison finds an analysis done inside the
+    call; the address of the new query list is no sign, since the old one is
+    deleted first and the new one can take its place. A new query list is
+    followed by a plan, and so by a new `generation`, unless that plan fails
+    to build (a custom plan that raises): the next call then runs the list once
+    unchecked, and the check after that execution finds it. A statement found no
+    longer admitted ends the call as it was and makes the next call
+    translate (`sql_stale`).
+  * `sql_stale` is exact for a statement found changed after an execution;
+    for a function replaced by code a statement ran it is counted only when
+    a function or privilege changed during the statement (`exec_epoch`), not
+    after every statement.
+  * Compiled SQL never runs under `debug_discard_caches`: every plan is stale
+    there, so the code translates nothing. The shadow estate under that setting
+    was tried by the spike only; `pj_sql_replan` is what the tests use.
+  * Differences: a function replaced by code a statement runs stales the plan
+    of a later expression of the call, which goes on with its tree where
+    PL/pgSQL plans it again; a privilege lost in a statement is raised at
+    once (`key_recheck`), as after an expression of the executor.
 * Statements are walked twice in the same order, skipping what a RETURN, EXIT,
   CONTINUE or RAISE that raises makes unreachable: the first walk collects the expressions and
   positions, the second emits code and takes the expressions back in that

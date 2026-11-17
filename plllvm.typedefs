@@ -50,6 +50,8 @@ Datum
 DatumTupleFields
 Dl_info
 DomainConstraintCache
+EOM_flatten_into_method
+EOM_get_flat_size_method
 EState
 EmitState
 ErrorContextCallback
@@ -61,6 +63,9 @@ ExecEvalBoolSubroutine
 ExecEvalSubroutine
 ExecProcNodeMtd
 ExecRowMark
+ExpandedObjectHeader
+ExpandedObjectMethods
+ExpandedRecordHeader
 Expr
 ExprBucket
 ExprContext
@@ -212,6 +217,7 @@ PLpgSQL_if_elsif
 PLpgSQL_nsitem_type
 PLpgSQL_plugin
 PLpgSQL_promise_type
+PLpgSQL_rec
 PLpgSQL_resolve_option
 PLpgSQL_row
 PLpgSQL_rwopt
@@ -224,6 +230,7 @@ PLpgSQL_stmt_exit
 PLpgSQL_stmt_fori
 PLpgSQL_stmt_if
 PLpgSQL_stmt_loop
+PLpgSQL_stmt_perform
 PLpgSQL_stmt_raise
 PLpgSQL_stmt_return
 PLpgSQL_stmt_type
@@ -283,11 +290,14 @@ PjPos
 PjSaved
 PjScope
 PjScopeWalk
+PjShadow
 PjSite
 PjSiteDesc
 PjSiteKind
 PjSiteSlot
 PjSlot
+PjSql
+PjSqlKind
 PjState
 PjVariant
 Plan
@@ -339,6 +349,7 @@ SetFunctionReturnMode
 Size
 Snapshot
 SnapshotType
+SqlFacts
 StringInfo
 StringInfoData
 SubLinkType

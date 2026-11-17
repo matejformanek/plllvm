@@ -48,6 +48,9 @@ typedef struct plllvm_pj_counters
 	int64		boxed_evals;
 	int64		peak_tuple_bytes;
 	int64		elem_slow;
+	int64		sql_execs;
+	int64		sql_stale;
+	int64		sql_rewalks;
 } plllvm_pj_counters;
 
 /* one side entry of a function, for plllvm_pj_status() */
@@ -88,6 +91,7 @@ typedef struct PjCtx
 	bool		evaluated;		/* the executor has run: no deopt any more; a
 								 * site needs none, its variant has no deopt
 								 * point */
+	bool		spi;			/* SPI is connected, for the SQL statements */
 	bool		isnull;			/* of the last boxed evaluation */
 	uint64		serial;			/* of the call; tells a level's next call */
 	Oid			user;			/* the user and the state of the catalogs the */
@@ -120,8 +124,34 @@ typedef enum PjH1
 {
 	PJ_H1_UNPLANNED,
 	PJ_H1_NOT_SIMPLE,
-	PJ_H1_READY
+	PJ_H1_READY,
+	PJ_H1_SQL					/* a statement SPI runs, on PL/pgSQL's plan */
 } PjH1;
+
+/* the statements that run through SPI */
+typedef enum PjSqlKind
+{
+	PJ_SQL_NONE,
+	PJ_SQL_PERFORM,
+	PJ_SQL_EXECSQL
+} PjSqlKind;
+
+/*
+ * What the code of an SQL statement depends on.  The plan stays PL/pgSQL's:
+ * expr->plan is read at each execution and never written.
+ */
+typedef struct PjSql
+{
+	struct PLpgSQL_expr *expr;
+	PjSqlKind	kind;
+	Bitmapset  *paramnos;		/* the datums its parameter list holds */
+	CachedPlanSource *plansource;
+	int			generation;		/* of the plansource when we last looked */
+	int			nfuncs;			/* the callees it was admitted with ... */
+	Oid		   *funcs;
+	char	   *volatility;		/* ... and their provolatile */
+	bool		has_view;		/* a view is among the relations */
+} PjSql;
 
 /* how to cast one type to another, as PL/pgSQL's cast_expr_hash */
 typedef struct PjCast
@@ -159,6 +189,8 @@ typedef struct PjExpr
 								 * selector, else -1 */
 	bool		into_sql;		/* true, when the expression is the query of a
 								 * SELECT INTO */
+	PjSqlKind	sql_kind;		/* not PJ_SQL_NONE: a statement for SPI */
+	PjSql	   *sql;			/* PJ_H1_SQL only, in the harvest context */
 	/* READY only, copies in the harvest context */
 	Expr	   *tree;
 	Oid			type;
@@ -241,6 +273,7 @@ typedef struct PjSlot
 	MemoryContext cxt;
 	Oid			user;			/* the state was checked for ... */
 	uint64		epoch;			/* ... at this state of the catalogs */
+	ParamListInfo sql_params;	/* of an SQL statement: its members only */
 } PjSlot;
 
 /*
@@ -284,6 +317,10 @@ typedef struct PjHarvest
 	int			npos;
 	int			nbase;			/* then one per expression */
 	bool		has_notice;		/* as in PjScope */
+	bool		sql_stale;		/* a statement changed what it was admitted
+								 * for during a call: the next one translates
+								 * again */
+	struct PjShadow *shadow;	/* the estate the parser hooks read */
 	List	   *fori;
 	int			ndatums;
 	int			nparams;		/* the datums, then a read/write twin of each */
@@ -306,12 +343,20 @@ extern char *plllvm_pj_ir_text(Oid fn);
 extern uint64 plllvm_pj_exec_epoch(void);
 extern bool plllvm_pj_execute_check(PjHarvest *h, Oid user, uint64 epoch,
 									Oid *denied);
+extern bool plllvm_pj_guards_ok(PjHarvest *h, bool sql);
+
+/* plllvm_pj_sql.c */
+extern const char *plllvm_pj_sql_harvest(struct PLpgSQL_function *func,
+										 PjHarvest *h, PjExpr *pe);
+extern bool plllvm_pj_sql_guard(PjSql *sql);
+extern void plllvm_pj_sql_finish(PjCtx *ctx);
 
 /* plllvm_pj_boxed.c */
 extern PjLevel *plllvm_pj_level(PjCtx *ctx);
 extern void plllvm_pj_levels_release(PjVariant *v);
 extern void plllvm_pj_level_abort(PjCtx *ctx);
 extern void plllvm_pj_datums_release(PjCtx *ctx);
+extern void plllvm_pj_key_recheck(PjCtx *ctx, const PjExpr *pe);
 extern void plllvm_pj_xact_callback(XactEvent event);
 
 /* plllvm_pj_translate.c */
