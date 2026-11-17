@@ -117,3 +117,4 @@ SELECT psc_other('ALTER TABLE psl_t2 ADD COLUMN z int');
 ROLLBACK;
 
 SELECT dblink_disconnect('other');
+DROP EXTENSION dblink;

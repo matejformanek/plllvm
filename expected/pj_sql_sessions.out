@@ -262,3 +262,4 @@ SELECT dblink_disconnect('other');
  OK
 (1 row)
 
+DROP EXTENSION dblink;
