@@ -237,9 +237,9 @@ typedef struct PjScope
 	int			nready;
 	int			nunplanned;
 	int			nnotsimple;
-	int			nstale;			/* of those unplanned, SQL statements whose plan
-								 * is stale and that the interpreter plans
-								 * again at its next run */
+	int			nstale;			/* of those unplanned, SQL statements whose
+								 * plan is stale and that the interpreter
+								 * plans again at its next run */
 	bool		has_notice;		/* a RAISE may have an effect a deopt would
 								 * repeat */
 } PjScope;
