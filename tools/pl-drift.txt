@@ -1,0 +1,19 @@
+# The functions of PostgreSQL that src/ re-implements, and the hash of each
+# body at the version of PG_PIN: see tools/pl-drift for what a row is and what
+# to do when one fails.  Columns: file (under the source tree), function, hash.
+
+# the result of a function with a composite type (src/plllvm_pj_records.c)
+src/pl/plpgsql/src/pl_exec.c plpgsql_exec_function 2d317690d1fff552  # the composite result
+src/pl/plpgsql/src/pl_exec.c coerce_function_result_tuple c212b74a33aaa995
+src/pl/plpgsql/src/pl_exec.c exec_stmt_return 5273fc7b76afaa7b  # the OUT row, the 42804 of a value that is no row
+src/pl/plpgsql/src/pl_exec.c exec_eval_datum 6448348fd3b403dc  # the row of the OUT parameters
+src/pl/plpgsql/src/pl_exec.c make_tuple_from_row 4f76b9d389d3f0b8
+src/pl/plpgsql/src/pl_exec.c deconstruct_composite_datum 52303ca8a9b7762f
+src/backend/executor/spi.c SPI_returntuple 4f4d4a41e2d9739b  # the typmod of a RECORD
+
+# the SQL statements (src/plllvm_pj_sql.c)
+src/pl/plpgsql/src/pl_exec.c exec_stmt_perform ac5cfe92ca891523
+src/pl/plpgsql/src/pl_exec.c exec_stmt_execsql c9fc8389d6e5a069
+src/pl/plpgsql/src/pl_exec.c exec_move_row_from_fields 27a54c7d7f0ac7ea  # the ROW branch, for SELECT INTO
+src/pl/plpgsql/src/pl_exec.c exec_cast_value 4271fc2490f90239
+src/pl/plpgsql/src/pl_exec.c do_cast_value a13d9dc3698a6e76

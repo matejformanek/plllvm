@@ -50,7 +50,7 @@ REGRESS = plllvm_setup $(REGRESS_FEATURES) $(REGRESS_KERNELS) expr_plugin \
 # variant only, REGRESS_PJ_OPT at opt level 3.
 REGRESS_PJ = pj_language pj_basic pj_errors pj_guards pj_execute pj_casts pj_sessions \
 		pj_control pj_kernels pj_ops pj_bounds pj_memory pj_boxed pj_abort pj_planfree pj_calls \
-		pj_byref pj_udf pj_typmod pj_raise pj_array pj_case pj_into pj_elements pj_sql pj_sql_into pj_sql_dml
+		pj_byref pj_udf pj_typmod pj_raise pj_array pj_case pj_into pj_elements pj_sql pj_sql_into pj_sql_dml pj_results
 REGRESS_PJ_ONCE = pj_states pj_discard pj_execute_diff pj_arms pj_ctxraw pj_sql_once pj_sql_sessions \
 		pj_sessions_midcall
 REGRESS_PJ_OPT = pj_kernels pj_ops
@@ -184,7 +184,7 @@ endif
 .PHONY: port-ok doctor stage cluster-init cluster-start cluster-stop pgindent \
 	installcheck-discard installcheck-opt installcheck-hazard installcheck-plpgsql \
 	installcheck-expr installcheck-pj installcheck-pj-once installcheck-pj-opt installcheck-pj-fdw \
-	installcheck-plpgsql-pj check-pj-ir check-pj-cmodule verify check-host-api kernels check-kernels
+	installcheck-plpgsql-pj check-pj-ir check-pj-cmodule pl-drift verify check-host-api kernels check-kernels
 
 # 5432, 5433 belong to pg-claude, 5444 to the perf cluster
 port-ok:
@@ -349,7 +349,7 @@ installcheck-pj:
 	$(call pj_run,$(PLPGSQL_LOAD) -c plllvm.pj_opt_level=2,$(PJ_FIXTURE) $(REGRESS_PJ) pj_stats)
 	$(call pj_run,$(PLPGSQL_LOAD) -c plllvm.pj_codegen=v1,$(PJ_FIXTURE) $(REGRESS_PJ) pj_stats)
 	$(call pj_run,$(EXPR_JIT) -c plllvm.expr_eager=on,$(PJ_FIXTURE) $(REGRESS_PJ) pj_stats)
-	$(call pj_run,$(PLPGSQL_LOAD) -c debug_discard_caches=1,$(PJ_FIXTURE) pj_guards pj_array pj_stats)
+	$(call pj_run,$(PLPGSQL_LOAD) -c debug_discard_caches=1,$(PJ_FIXTURE) pj_guards pj_array pj_results pj_stats)
 
 # expected from plllvm, so not against stock
 installcheck-pj-once:
@@ -462,6 +462,11 @@ check-pj-ir: port-ok
 check-pj-cmodule: port-ok
 	sh tools/pj_cmodule_pins.sh '$(bindir)' $(PLLLVM_PORT)
 
+# The functions of PostgreSQL that src/ re-implements still have the bodies
+# they had when it was written (tools/pl-drift.txt)
+pl-drift:
+	python3 -I tools/pl-drift '$(PG_SRC)' tools/pl-drift.txt
+
 # The differential fuzzer: N programs from SEED, as plpgsql and as plpgsql_jit
 # at opt level 0 and 2, NREC recursive ones, NREF over text and numeric and
 # NELEM of reads and stores of array elements, NSQL of PERFORM, SELECT INTO and
@@ -564,7 +569,7 @@ verify: port-ok
 	for t in installcheck installcheck-opt installcheck-discard installcheck-hazard \
 	  check-host-api pgindent doctor installcheck-expr installcheck-plpgsql \
 	  installcheck-pj installcheck-pj-once installcheck-pj-opt installcheck-pj-fdw installcheck-plpgsql-pj \
-	  check-pj-ir check-pj-cmodule check-pj-fuzz; do \
+	  check-pj-ir check-pj-cmodule check-pj-fuzz pl-drift; do \
 	  step $(MAKE) $$t; \
 	  [ $$t != pgindent ] || step git diff --exit-code; \
 	done; \
