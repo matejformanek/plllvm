@@ -397,13 +397,34 @@ Only `plllvm_jit.c` and `plllvm_error.cpp` include LLVM headers.
     that no call takes between two resets stays unplanned and keeps the
     function waiting; each of its calls then pays two walks of the function
     for the classification plus `plpgsql_compile()`.
-  * Admission: every query of the plan, rewritten, is a SELECT with no data-
-    modifying CTE, calls no VOLATILE function but the built-in ones that
+  * Admission: every query of the plan, rewritten, is a SELECT, INSERT, UPDATE
+    or DELETE (a data-modifying CTE is a query of its own, so the rule below
+    applies to its result relation too; MERGE and every other command are
+    PL/pgSQL's), calls no VOLATILE function but the built-in ones that
     change no input of a plan (`nextval`, `random`, the clocks, `pg_sleep`;
     not `set_config`), and the function is not `#variable_conflict
     use_column`, under which a new analysis could bind a name to a variable
     the list does not have. The trigger, rule and constraint code of a table
-    that is written is code no walk of the query shows.
+    that is written is code no walk of the query shows, so a table that is
+    written must be a plain table with no trigger of a user, no rule, no
+    foreign-key action that changes rows (cascade, SET NULL, SET DEFAULT), no
+    children, and not a partition root or a foreign table (reasons
+    `relation:trigger`, `rule`, `cascade`, `inheritance`, `partitioned`,
+    `foreign table`, `kind`). The checks of a foreign key (the insert side, NO
+    ACTION and RESTRICT) and of a deferrable unique constraint are internal
+    code that changes no row, so they pass. A view is written through its
+    rewrite, so its base table is the one tested (an INSTEAD OF trigger is
+    a trigger of the view, which has none in the plan: that case is declined
+    as `relation:kind`). The catalogs are read without a lock on the table;
+    what matters invalidates the plan. A command with INTO has a row limit
+    of two, as in PL/pgSQL, whose error for a second row is P0003.
+  * A statement that writes with an invalid plan is a guard miss, not a plan
+    SPI analyses again: a default, a generated column, a trigger or a rule is
+    new then and no walk of the old query shows it. The function goes to
+    PL/pgSQL for that call, which analyses the plan, and is translated after
+    it (`fall_back_retry()`), so a table that is truncated before each call
+    costs one interpreted call per truncation. A statement that a rule turned
+    into nothing has no query, and the command tag says that it writes.
   * A plan that is invalid is run, since SPI analyses it again by itself: it
     is how a function whose table is truncated and analysed between calls
     stays compiled. The entry check refuses (a guard miss) a changed
