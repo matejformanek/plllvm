@@ -134,5 +134,26 @@ SELECT psl_r(1);
 SELECT psc_other('ALTER TABLE psl_t2 ADD COLUMN z int');
 ROLLBACK;
 
+-- a write through a view: the view stays among the relations of the query and
+-- is locked by SPI inside the call, where what another session committed is
+-- delivered.  The base table is locked first, by a statement of the caller.
+CREATE TABLE psv_b (a int) WITH (autovacuum_enabled = false);
+CREATE VIEW psv_v AS SELECT a FROM psv_b;
+CREATE FUNCTION psv_fn() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN RAISE NOTICE 'instead of %', new.a; INSERT INTO psv_b VALUES (new.a + 100); RETURN new; END $$;
+CREATE FUNCTION psv_w(n int) RETURNS int LANGUAGE plpgsql_jit AS $$
+BEGIN
+  INSERT INTO psv_v VALUES (n);
+  RETURN n;
+END $$;
+SELECT psv_w(1), psv_w(2), psv_w(3);
+BEGIN;
+INSERT INTO psv_b VALUES (0);
+SELECT dblink_exec('other', 'CREATE TRIGGER psv_v_t INSTEAD OF INSERT ON psv_v FOR EACH ROW EXECUTE FUNCTION psv_fn()');
+SELECT psv_w(4);
+COMMIT;
+SELECT psv_w(5);
+SELECT * FROM psv_b ORDER BY a;
+
 SELECT dblink_disconnect('other');
 DROP EXTENSION dblink;

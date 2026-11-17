@@ -298,6 +298,22 @@ SELECT psd_viewi(4);
 SELECT * FROM psd_vb ORDER BY a;
 SELECT pj_expect('psd_viewi(integer)', 'declined:relation:kind') \gset
 
+-- a view with a rule: the action of the rule writes the base table, and the
+-- view stays among the relations of the query, locked for the write
+CREATE TABLE psd_vrb (a int PRIMARY KEY, b text) WITH (autovacuum_enabled = false);
+CREATE VIEW psd_vr AS SELECT a, b FROM psd_vrb;
+CREATE RULE psd_vr_i AS ON INSERT TO psd_vr DO INSTEAD INSERT INTO psd_vrb VALUES (new.a, new.b);
+CREATE FUNCTION psd_viewr(n int) RETURNS int LANGUAGE :pj_lang AS $$
+BEGIN
+  INSERT INTO psd_vr VALUES (n, 'r');
+  RETURN n;
+END $$;
+SELECT psd_viewr(1);
+SELECT psd_viewr(2);
+SELECT psd_viewr(3);
+SELECT psd_viewr(4);
+SELECT * FROM psd_vrb ORDER BY a;
+
 -- MERGE stays PL/pgSQL's
 CREATE TABLE psd_mg (a int PRIMARY KEY, b text);
 INSERT INTO psd_mg VALUES (1, 'one');
