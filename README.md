@@ -317,6 +317,10 @@ collation does. The prefix `plllvm.` is reserved.
   cursors, `MERGE`, other commands or dynamic SQL. "Plain SELECT" is checked
   at the top level only, so a VOLATILE function may run `FOR UPDATE` in a
   subquery (a STABLE one is refused by SPI's read-only check).
+* A write to a table whose CHECK or domain constraint calls a function that
+  is altered to VOLATILE later is not noticed until something else makes the
+  plan stale: the function is not a dependency of the plan. The same holds
+  for a domain constraint that runs inside an input function.
 * Arrays: one dimension, no NULL elements, `int4`, `int8` and `float8` only.
 * Status and counters are per backend.
 

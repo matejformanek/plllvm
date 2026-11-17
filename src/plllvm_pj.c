@@ -1033,6 +1033,7 @@ plllvm_pj_guards_ok(PjHarvest *h, bool sql)
 			if (pe->h1 == PJ_H1_SQL && pe->sql->writes &&
 				!pe->sql->plansource->is_valid)
 			{
+				pe->sql->rewalk = true;
 				h->replan_miss = true;
 				return false;
 			}

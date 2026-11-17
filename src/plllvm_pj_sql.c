@@ -253,8 +253,12 @@ sql_write_reason(Query *query)
  * wrapper of a foreign table.  Any of them is the interpreter's.  The checks
  * of a foreign key on the table written, and of a deferred unique constraint,
  * are not: they change no row and run no code of a user.  Read from the
- * catalogs with no lock on the table: a change that matters invalidates the
- * plan, which is looked at again.
+ * catalogs with no lock on the table: a change to the table that matters (a
+ * trigger, a rule, a default, a check, the children) invalidates the plan,
+ * which is looked at again.  A function that only a CHECK or a domain
+ * constraint calls is no dependency of the plan, so a change of its
+ * volatility is not seen until something else invalidates the plan: a stated
+ * gap.
  */
 static const char *
 sql_relation_reason(Oid relid)
@@ -727,6 +731,13 @@ plllvm_pj_sql_guard(PjSql *sql, bool *replan)
 		 */
 		if (sql->writes)
 		{
+			/*
+			 * The interpreter plans it again, and a planning that fails (a
+			 * custom plan that raises) leaves the new query list in a valid
+			 * plan source with the old generation: so the walk is for the
+			 * next valid plan, whatever the counter says
+			 */
+			sql->rewalk = true;
 			*replan = true;
 			return false;
 		}
@@ -749,12 +760,13 @@ plllvm_pj_sql_guard(PjSql *sql, bool *replan)
 		return true;
 	}
 
-	if (psrc->generation != sql->generation)
+	if (psrc->generation != sql->generation || sql->rewalk)
 	{
 		plllvm_pj_count.sql_rewalks++;
 		if (!sql_facts_ok(sql))
 			return false;
 		sql->generation = psrc->generation;
+		sql->rewalk = false;
 	}
 	return true;
 }

@@ -2067,6 +2067,7 @@ SELECT psd_ddc(1), psd_ddc(2), psd_ddc(3);
 (1 row)
 
 SELECT pj_expect('psd_ddt(integer)', 'compiled') \gset
+SELECT pj_expect('psd_ddc(integer)', 'compiled') \gset
 CREATE TRIGGER psd_dd_t BEFORE INSERT ON psd_dd
   FOR EACH ROW EXECUTE FUNCTION psd_dd_fn();
 ALTER TABLE psd_dc ADD CONSTRAINT psd_dc_c CHECK (psd_dd_v(b)) NOT VALID;
@@ -2151,6 +2152,7 @@ SELECT * FROM psd_dc ORDER BY a;
 (7 rows)
 
 SELECT pj_expect('psd_ddt(integer)', 'declined:relation:trigger') \gset
+SELECT pj_expect('psd_ddc(integer)', 'declined:relation:check') \gset
 -- a plan made again that fails in planning leaves a valid plan with the same
 -- generation: the code must not run on it before the facts are looked at
 CREATE TABLE psd_rz (a int) WITH (autovacuum_enabled = false);
@@ -2168,6 +2170,7 @@ SELECT psd_raise(1), psd_raise(2), psd_raise(3);
          1 |         2 |         3
 (1 row)
 
+SELECT pj_expect('psd_raise(integer)', 'compiled') \gset
 CREATE TRIGGER psd_rz_t BEFORE INSERT ON psd_rz
   FOR EACH ROW EXECUTE FUNCTION psd_rz_fn();
 SELECT psd_try('SELECT psd_raise(0)');
@@ -2188,6 +2191,12 @@ NOTICE:  trigger on 100
  psd_raise 
 -----------
          1
+(1 row)
+
+SELECT pj_delta(0, 1, NULL, 0, 0);
+ pj_delta 
+----------
+ 
 (1 row)
 
 SELECT psd_raise(2);
@@ -2211,6 +2220,7 @@ NOTICE:  trigger on 25
          4
 (1 row)
 
+SELECT pj_expect('psd_raise(integer)', 'declined:relation:trigger') \gset
 RESET plan_cache_mode;
 SELECT * FROM psd_rz ORDER BY a;
   a  

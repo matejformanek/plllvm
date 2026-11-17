@@ -669,6 +669,7 @@ INSERT INTO psd_dc SELECT i, i FROM generate_series(1, 7) i;
 SELECT psd_ddt(1), psd_ddt(2), psd_ddt(3);
 SELECT psd_ddc(1), psd_ddc(2), psd_ddc(3);
 SELECT pj_expect('psd_ddt(integer)', 'compiled') \gset
+SELECT pj_expect('psd_ddc(integer)', 'compiled') \gset
 CREATE TRIGGER psd_dd_t BEFORE INSERT ON psd_dd
   FOR EACH ROW EXECUTE FUNCTION psd_dd_fn();
 ALTER TABLE psd_dc ADD CONSTRAINT psd_dc_c CHECK (psd_dd_v(b)) NOT VALID;
@@ -683,6 +684,7 @@ SELECT psd_ddc(7);
 SELECT * FROM psd_dd ORDER BY a;
 SELECT * FROM psd_dc ORDER BY a;
 SELECT pj_expect('psd_ddt(integer)', 'declined:relation:trigger') \gset
+SELECT pj_expect('psd_ddc(integer)', 'declined:relation:check') \gset
 
 -- a plan made again that fails in planning leaves a valid plan with the same
 -- generation: the code must not run on it before the facts are looked at
@@ -696,14 +698,17 @@ BEGIN
 END $$;
 SET plan_cache_mode = force_custom_plan;
 SELECT psd_raise(1), psd_raise(2), psd_raise(3);
+SELECT pj_expect('psd_raise(integer)', 'compiled') \gset
 CREATE TRIGGER psd_rz_t BEFORE INSERT ON psd_rz
   FOR EACH ROW EXECUTE FUNCTION psd_rz_fn();
 SELECT psd_try('SELECT psd_raise(0)');
 SELECT pj_mark() \gset
 SELECT psd_raise(1);
+SELECT pj_delta(0, 1, NULL, 0, 0);
 SELECT psd_raise(2);
 SELECT psd_raise(3);
 SELECT psd_raise(4);
+SELECT pj_expect('psd_raise(integer)', 'declined:relation:trigger') \gset
 RESET plan_cache_mode;
 SELECT * FROM psd_rz ORDER BY a;
 
