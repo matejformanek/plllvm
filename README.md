@@ -224,7 +224,8 @@ declined), and `INSERT`, `UPDATE` and `DELETE`, with `RETURNING INTO` of scalar
 variables, run by SPI on PL/pgSQL's own plan (no VOLATILE function but the
 built-in ones that change no plan input, not under `#variable_conflict
 use_column` or `#print_strict_params on`, and a table that is written has no
-trigger, rule, cascading foreign-key action, VOLATILE check constraint,
+trigger, rule, cascading foreign-key action, VOLATILE check constraint that
+the query shows,
 children, partitions or foreign wrapper; `MERGE` is declined),
 with arguments and variables of a type passed by value that is no domain, or
 of a built-in base type passed by reference (`text`, `varchar`, `numeric`,
@@ -395,6 +396,7 @@ make stage cluster-start installcheck doctor cluster-stop
 | `installcheck-plpgsql PLLLVM_PORT=<port>` | PostgreSQL's PL/pgSQL tests without plllvm, then with it loaded and `plllvm.expr_jit` off, on, and on with `plllvm.expr_eager`; every output must match the first. `PG_SRC` and `PG_BUILD` are the server's source and build tree (the workspace's `code/` and `code/build-jit`) |
 | `installcheck-pj` | the `pj_` tests, written for stock PL/pgSQL's output and run with `LANGUAGE plpgsql_jit` (`PJ_LANG`): the handler off and on, with `plllvm.expr_jit` and `plllvm.expr_eager`, and `pj_guards`, `pj_array` and `pj_stats` under cache flushes |
 | `installcheck-pj-once`, `installcheck-pj-opt` | the `pj_` tests whose output comes from plllvm, in one variant, and at the highest opt level |
+| `installcheck-pj-fdw` | `pj_sql_fdw`, a foreign table of `postgres_fdw` written by a `plpgsql_jit` function, in the variants of `installcheck-pj`; skipped, with the reason, where contrib is not installed |
 | `check-pj-cmodule PLLLVM_PORT=<port>` | `tools/pj_cmodule_pins.sh`: pins that load a C module built on the spot, against `plpgsql` and `plpgsql_jit` (an output function with an effect in a `RAISE`; an object access hook that denies a function at the entry check, a stated difference). Skipped with a printed reason where no module can be built (only macOS and Linux have a recipe) |
 | `installcheck-plpgsql-pj PLLLVM_PORT=<port>` | the tests of `installcheck-plpgsql` without plllvm, then with `LANGUAGE plpgsql` changed to `plpgsql_jit` and the handler off and on; the results must match the first, but for the hunks of `tools/plpgsql_pj_allowed.diff` |
 | `fuzz-pj PLLLVM_PORT=<port> N=<n> NREC=<m> NELEM=<e> NSQL=<q> SEED=<s>` | `tools/pj_fuzz.py`: `N` generated functions, `NREC` recursive ones, `NELEM` of element reads and stores of arrays and `NSQL` of `PERFORM`, `SELECT INTO` and statements for SPI, `NDML` of statements that write, with DDL between the calls, run as `plpgsql` and as `plpgsql_jit` at opt level 0 and 2, values, SQLSTATEs, messages and CONTEXT compared, with role switches and `REVOKE` inside transactions; the classes of a difference are in the script's docstring; reported by seed with its program in `results-fuzz/`; not part of `verify` |

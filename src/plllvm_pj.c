@@ -750,20 +750,22 @@ run_compiled(PLpgSQL_function *func, FunctionCallInfo fcinfo, PjEntry *e)
 	{
 		plllvm_pj_count.guard_misses++;
 		e->guard_misses++;
-		if (e->since_translation >= PJ_MISS_FORGET)
-			e->misses = 0;
 
 		/*
-		 * A statement that writes has no plan that SPI may analyse again by
-		 * itself, so a table that is truncated or analysed costs the
-		 * interpreter one call, which plans it, and the next translates.  It
-		 * does not add up to a decline when the code has run since it was
-		 * translated: only a function that never runs between two of them
-		 * thrashes.
+		 * The plan of a statement that writes is stale: SPI must not analyse
+		 * it inside the call, since what the new plan shows (a trigger, a
+		 * check) would run before anybody looked at it.  The interpreter runs
+		 * this call and plans it again; the entry guard of the next call
+		 * finds a valid plan that is new, and the facts the code depends on
+		 * are checked on it (plllvm_pj_sql_guard()).  Nothing is translated,
+		 * so it is not a miss that adds up to a decline.
 		 */
-		if (e->harvest->replan_miss && e->since_translation > 0)
-			e->state = PJ_SEEN;
-		else if (++e->misses >= PJ_MAX_MISSES)
+		if (h->replan_miss)
+			return fall_back(fcinfo, e, "interpreted:stale plan");
+
+		if (e->since_translation >= PJ_MISS_FORGET)
+			e->misses = 0;
+		if (++e->misses >= PJ_MAX_MISSES)
 		{
 			if (func->cfunc.use_count == 0)
 				decline_idle(e, "thrash");
@@ -1011,10 +1013,12 @@ plllvm_pj_guards_ok(PjHarvest *h, bool sql)
 
 	/*
 	 * The checks of a statement read the catalogs and may take a lock, which
-	 * delivers invalidations; they come first, so that no plan that was found
-	 * valid before is stale when they are done.  A plan of a statement that
-	 * writes, found valid by its own check and stale after another's, is a
-	 * miss as well.
+	 * delivers invalidations; they come first, so that the plans of the
+	 * expressions are not found valid before them and stale after.  The
+	 * second pass catches a statement that writes whose plan went stale
+	 * during the check of another; one that does not write has SPI to analyse
+	 * it, and sql_recheck() after the execution is the backstop for the
+	 * facts.
 	 */
 	if (sql)
 	{

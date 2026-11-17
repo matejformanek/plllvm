@@ -100,6 +100,8 @@ static const char *sql_relation_reason(Oid relid);
 static const char *sql_trigger_reason(Oid relid);
 static bool sql_check_volatile(Oid conrelid, Oid typid);
 static bool sql_domain_volatile(Oid typid);
+static bool sql_expr_volatile(Node *expr);
+static bool sql_expr_volatile_walker(Node *node, void *context);
 static bool sql_scan_func(Oid funcid, void *context);
 static bool sql_func_pinned(Oid funcid);
 static bool sql_facts_ok(PjSql *sql);
@@ -316,11 +318,33 @@ sql_check_volatile(Oid conrelid, Oid typid)
 						   RelationGetDescr(conrel), &isnull);
 		if (isnull)
 			continue;
-		found = contain_volatile_functions(stringToNode(TextDatumGetCString(bin)));
+		found = sql_expr_volatile(stringToNode(TextDatumGetCString(bin)));
 	}
 	systable_endscan(scan);
 	table_close(conrel, AccessShareLock);
 	return found;
+}
+
+/*
+ * contain_volatile_functions() takes a coercion to a domain for immutable,
+ * though the constraints of the domain run: look at them too
+ */
+static bool
+sql_expr_volatile(Node *expr)
+{
+	return contain_volatile_functions(expr) ||
+		sql_expr_volatile_walker(expr, NULL);
+}
+
+static bool
+sql_expr_volatile_walker(Node *node, void *context)
+{
+	if (node == NULL)
+		return false;
+	if (IsA(node, CoerceToDomain) &&
+		sql_domain_volatile(((CoerceToDomain *) node)->resulttype))
+		return true;
+	return expression_tree_walker(node, sql_expr_volatile_walker, context);
 }
 
 /* the same for a domain and the domains it is made on */

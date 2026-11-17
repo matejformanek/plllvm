@@ -383,59 +383,68 @@ Only `plllvm_jit.c` and `plllvm_error.cpp` include LLVM headers.
     appear after admission (a table has none, and a result column of those
     types has no variable of its type to be admitted for), so this is stated
     and not pinned.
-  * A function whose tables are truncated and analysed before every call (a
+  * function whose tables are truncated and analysed before every call (a
     benchmark's reset) finds the plans of its statements stale at each call
     start, so no translation could see them valid. A call that finds only SQL
     statements stale, or unplanned, is translated after the interpreter has
     run it, which plans them again as it goes (`fall_back_retry()`; the flag
-    is read before the call, since a nested call of the function
-    overwrites it); the next call runs compiled, and SPI analyses the stale
-    plans inside the call, unless a statement reads a view or writes: the
-    entry check misses on a stale plan of either. A view with a reset before
-    every call alternates these translations with guard misses until the
-    function is declined as thrashing (about eight translations). A miss on a
-    statement that writes is not counted towards that when the code has run
-    since its translation, so a table that is truncated or analysed between
-    rounds of calls (autovacuum included) costs the interpreter one call per
-    round; only a reset before every call, with none between, is declined
-    (`psd_reset1`). A statement in a branch
-    that no call takes between two resets stays unplanned and keeps the
-    function waiting; each of its calls then pays two walks of the function
-    for the classification plus `plpgsql_compile()`.
-  * Admission: every query of the plan, rewritten, is a SELECT, INSERT, UPDATE
+    is read before the call, since a nested call of the function overwrites
+    it); the next call runs compiled, and SPI analyses the stale plans inside
+    the call, unless a statement reads a view or writes: the entry check
+    misses on a stale plan of either. A view with a reset before every call
+    alternates these translations with guard misses until the function is
+    declined as thrashing (about eight translations). A statement that writes
+    is not translated again for a stale plan: that call goes to the
+    interpreter (`interpreted:stale plan`, no translation, not counted towards
+    thrashing), which plans it, and the next call finds a valid plan with a
+    new `generation` and checks the facts on it. A table that is truncated or
+    analysed between rounds of calls (autovacuum included) therefore costs the
+    interpreter one call per round and no LLVM work; a reset before every
+    call, with none between, never runs compiled and is not declined
+    (`psd_reset1`). A statement in a branch that no call takes between two
+    resets stays unplanned and keeps the function waiting; each of its calls
+    then pays two walks of the function for the classification plus
+    `plpgsql_compile()`.
+  * mission: every query of the plan, rewritten, is a SELECT, INSERT, UPDATE
     or DELETE (a data-modifying CTE is a query of its own, so the rule below
     applies to its result relation too; MERGE and every other command are
-    PL/pgSQL's), calls no VOLATILE function but the built-in ones that
-    change no input of a plan (`nextval`, `random`, the clocks, `pg_sleep`;
-    not `set_config`), and the function is not `#variable_conflict
-    use_column`, under which a new analysis could bind a name to a variable
-    the list does not have. The trigger, rule and constraint code of a table
-    that is written is code no walk of the query shows, so a table that is
-    written must be a plain table with no trigger of a user, no rule, no
-    foreign-key action that changes rows (cascade, SET NULL, SET DEFAULT), no
-    children, no CHECK constraint or domain constraint that calls a VOLATILE
+    PL/pgSQL's), calls no VOLATILE function but the built-in ones that change
+    no input of a plan (`nextval`, `random`, the clocks, `pg_sleep`; not
+    `set_config`), and the function is not `#variable_conflict use_column`,
+    under which a new analysis could bind a name to a variable the list does
+    not have. The trigger, rule and constraint code of a table that is written
+    is code no walk of the query shows, so a table that is written must be a
+    plain table with no trigger of a user, no rule, no foreign-key action that
+    changes rows (cascade, SET NULL, SET DEFAULT), no children, no CHECK
+    constraint of the table, or domain constraint that the query shows (a
+    coercion to a domain, also inside a table's CHECK), that calls a VOLATILE
     function, and not a partition root or a foreign table (reasons
     `relation:trigger`, `rule`, `cascade`, `inheritance`, `partitioned`,
-    `foreign table`, `check`, `kind`). `pg_class` keeps `relhasrules` and
-    `relhassubclass` until a VACUUM, so a table whose last rule or child
-    was dropped is still declined until then. The checks of a foreign key (the insert side, NO
-    ACTION and RESTRICT) and of a deferrable unique constraint are internal
-    code that changes no row, so they pass. A view is written through its
-    rewrite, so its base table is the one tested (an INSTEAD OF trigger is
-    a trigger of the view, which has none in the plan: that case is declined
-    as `relation:kind`). The catalogs are read without a lock on the table;
-    what matters invalidates the plan. The walk is made again whenever a
-    plan was built since the last look, so a table with foreign-key
-    triggers pays a scan of `pg_trigger` for each custom plan the statement
-    builds; the cost is small beside the planning it follows. A command with INTO has a row limit
-    of two, as in PL/pgSQL, whose error for a second row is P0003.
-  * A statement that writes with an invalid plan is a guard miss, not a plan
-    SPI analyses again: a default, a generated column, a trigger or a rule is
-    new then and no walk of the old query shows it. The function goes to
-    PL/pgSQL for that call, which analyses the plan, and is translated after
-    it (`fall_back_retry()`), so a table that is truncated before each call
-    costs one interpreted call per truncation. A statement that a rule turned
-    into nothing has no query, and the command tag says that it writes.
+    `foreign table`, `check`, `kind`). A domain constraint that runs inside an
+    input function (`record_in`, `array_in`, `domain_in`,
+    `jsonb_populate_record`) is a stated gap: those functions are STABLE, so
+    the walk admits them. `pg_class` keeps `relhasrules` until a VACUUM and
+    `relhassubclass` until an ANALYZE, so a table whose last rule or child was
+    dropped is still declined until then. The checks of a foreign key (the
+    insert side, NO ACTION and RESTRICT) and of a deferrable unique constraint
+    are internal code that changes no row, so they pass. A view is written
+    through its rewrite, so its base table is the one tested (an INSTEAD OF
+    trigger is a trigger of the view, which has none in the plan: that case is
+    declined as `relation:kind`). The catalogs are read without a lock on the
+    table; what matters invalidates the plan. The walk is made again whenever
+    a plan was built since the last look, so a table with foreign-key triggers
+    pays a scan of `pg_trigger` for each custom plan the statement builds; the
+    cost is small beside the planning it follows. A command with INTO has a
+    row limit of two, as in PL/pgSQL, whose error for a second row is P0003.
+  * statement that writes with an invalid plan is a guard miss, not a plan SPI
+    analyses again: a default, a generated column, a trigger or a rule is new
+    then and no walk of the old query shows it. The function goes to PL/pgSQL
+    for that call, which analyses the plan; the next call re-walks the new
+    plan, and runs compiled if the facts hold and is translated (and declined)
+    if they do not. Nothing the code embeds depends on the plan but these
+    facts: the plan source, the targets, the result columns and the row limit
+    are the function's own or are checked by the walk. A statement that a rule
+    turned into nothing has no query, and the command tag says that it writes.
   * A plan that is invalid is run, since SPI analyses it again by itself: it
     is how a function whose table is truncated and analysed between calls
     stays compiled. The entry check refuses (a guard miss) a changed

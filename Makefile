@@ -361,7 +361,11 @@ installcheck-pj-once:
 installcheck-pj-fdw:
 	@if [ -f '$(pkglibdir)/postgres_fdw$(DLSUFFIX)' ] && \
 	    [ -f '$(datadir)/extension/postgres_fdw.control' ]; then \
-	  $(call pj_run,$(PLPGSQL_LOAD),$(PJ_FIXTURE) pj_sql_fdw); \
+	  $(call pj_run,$(PLPGSQL_LOAD) -c plllvm.plpgsql_jit=off,$(PJ_FIXTURE) pj_sql_fdw) && \
+	  $(call pj_run,$(PLPGSQL_LOAD) -c plllvm.pj_opt_level=0,$(PJ_FIXTURE) pj_sql_fdw) && \
+	  $(call pj_run,$(PLPGSQL_LOAD) -c plllvm.pj_opt_level=2,$(PJ_FIXTURE) pj_sql_fdw) && \
+	  $(call pj_run,$(PLPGSQL_LOAD) -c plllvm.pj_codegen=v1,$(PJ_FIXTURE) pj_sql_fdw) && \
+	  $(call pj_run,$(EXPR_JIT) -c plllvm.expr_eager=on,$(PJ_FIXTURE) pj_sql_fdw); \
 	else \
 	  echo 'installcheck-pj-fdw: skipped, postgres_fdw is not installed (contrib)'; \
 	fi

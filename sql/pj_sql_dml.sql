@@ -492,6 +492,7 @@ SELECT pj_mark() \gset
 SELECT psd_trunc(5);
 SELECT psd_trunc(6);
 -- one call by the interpreter, then compiled again, with no translation
+SELECT pj_delta(1, 1, NULL, 0, 0);
 SELECT psd_trunc(7);
 :dtt;
 SELECT pj_expect('psd_trunc(integer)', 'compiled') \gset
@@ -604,6 +605,7 @@ SELECT CASE s WHEN 1 THEN 'TRUNCATE psd_rs' WHEN 2 THEN 'ANALYZE psd_rs'
   FROM generate_series(1, 12) i, generate_series(1, 7) s ORDER BY i, s \gexec
 \o
 SELECT count(*), sum(a) FROM psd_rs;
+SELECT pj_delta(48, 12, NULL, 0, 0);
 SELECT pj_expect('psd_reset(integer)', 'compiled') \gset
 -- 20 rounds of ANALYZE alone and 2 calls
 SELECT pj_mark() \gset
@@ -612,6 +614,7 @@ SELECT CASE s WHEN 1 THEN 'ANALYZE psd_rs' ELSE format('SELECT psd_reset(%s)', 1
   FROM generate_series(1, 20) i, generate_series(1, 3) s ORDER BY i, s \gexec
 \o
 SELECT count(*), sum(a) FROM psd_rs;
+SELECT pj_delta(20, 20, NULL, 0, 0);
 -- 20 rounds of TRUNCATE and 2 calls: one translation per round, if the plan
 -- of a write were to demote the function
 SELECT pj_mark() \gset
@@ -620,6 +623,7 @@ SELECT CASE s WHEN 1 THEN 'TRUNCATE psd_rs' ELSE format('SELECT psd_reset(%s)', 
   FROM generate_series(1, 20) i, generate_series(1, 3) s ORDER BY i, s \gexec
 \o
 SELECT count(*), sum(a) FROM psd_rs;
+SELECT pj_delta(20, 20, NULL, 0, 0);
 SELECT pj_expect('psd_reset(integer)', 'compiled') \gset
 -- a call after each reset and none between: the interpreter runs each, the
 -- function is not translated again and not declined, and runs no compiled call
@@ -632,12 +636,15 @@ BEGIN
   RETURN c;
 END $$;
 SELECT psd_reset1(1), psd_reset1(2), psd_reset1(3);
+SELECT pj_expect('psd_reset1(integer)', 'compiled') \gset
 SELECT pj_mark() \gset
 \o /dev/null
 SELECT CASE s WHEN 1 THEN 'TRUNCATE psd_rs1' ELSE format('SELECT psd_reset1(%s)', 10 + i) END
   FROM generate_series(1, 40) i, generate_series(1, 2) s ORDER BY i, s \gexec
 \o
 SELECT count(*), sum(a) FROM psd_rs1;
+SELECT pj_delta(0, 40, NULL, 0, 0);
+SELECT pj_expect('psd_reset1(integer)', 'interpreted:stale plan') \gset
 
 -- what a plan made again shows is looked at before the code runs on it: a
 -- trigger, or a VOLATILE check, that came in since is code the function must
@@ -659,6 +666,8 @@ CREATE FUNCTION psd_dd_v(n int) RETURNS bool LANGUAGE plpgsql VOLATILE AS $$
 BEGIN RAISE NOTICE 'check %', n; RETURN true; END $$;
 SELECT psd_ddt(1), psd_ddt(2), psd_ddt(3);
 SELECT psd_ddc(1), psd_ddc(2), psd_ddc(3);
+SELECT pj_expect('psd_ddt(integer)', 'compiled') \gset
+SELECT pj_expect('psd_ddc(integer)', 'compiled') \gset
 CREATE TRIGGER psd_dd_t BEFORE INSERT ON psd_dd
   FOR EACH ROW EXECUTE FUNCTION psd_dd_fn();
 ALTER TABLE psd_dd ADD CONSTRAINT psd_dd_c CHECK (psd_dd_v(b)) NOT VALID;
@@ -671,6 +680,8 @@ SELECT psd_ddc(5);
 SELECT psd_ddc(6);
 SELECT psd_ddc(7);
 SELECT * FROM psd_dd ORDER BY a;
+SELECT pj_expect('psd_ddt(integer)', 'declined:relation:trigger') \gset
+SELECT pj_expect('psd_ddc(integer)', 'declined:relation:trigger') \gset
 
 -- a CHECK constraint or a domain with a VOLATILE function is code the plan
 -- does not show: the interpreter's.  A constraint of immutable and STABLE
@@ -735,6 +746,7 @@ SELECT pj_expect('psd_ckv(integer)', 'declined:relation:check') \gset
 SELECT pj_expect('psd_cd(integer)', 'compiled') \gset
 SELECT pj_expect('psd_cdv(integer)', 'declined:relation:check') \gset
 SELECT pj_expect('psd_cdd(integer)', 'declined:relation:check') \gset
+SELECT pj_expect('psd_ckd(integer)', 'declined:relation:check') \gset
 
 -- memory: 10^4 statements that write, read inside the loop
 CREATE TABLE psd_m (a int PRIMARY KEY, b int);
