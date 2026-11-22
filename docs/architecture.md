@@ -649,7 +649,12 @@ Only `plllvm_jit.c` and `plllvm_error.cpp` include LLVM headers.
   plan pointer null or refcounted: PL/pgSQL holds a refcount from its first
   use of the plan in a transaction, a compiled frame never does, so a mark
   forgets the plan pointer unless PL/pgSQL has one, and PL/pgSQL replans
-  instead of trusting a pointer whose plan SPI may have freed.
+  instead of trusting a pointer whose plan SPI may have freed. A refusal
+  (the stricter 42501) leaves its expression busy like any error, so a later
+  call in the transaction runs it through SPI with constant parameters, where
+  the planner folds strict `x + NULL` and drops the other operand with its
+  call; stock does the same after an ordinary error. The fuzzer files that
+  under history (a refused call replaced by an erroring one), not mismatch.
 * Differences from PL/pgSQL, kept: the check of `EXECUTE` at the entry of a
   call covers every function of the planned expressions, and runs the
   function execute hook for each, so a hook that raises for a function the
