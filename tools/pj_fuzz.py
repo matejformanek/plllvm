@@ -52,8 +52,9 @@ answer that one of the modes gives, with the effects (NOTICE and the like) of
 the custom plan as a prefix of them and they of the generic plan's, as
 frames that took the custom plan and frames that took the generic one give;
 the class is frame-mix.  Any other step is searched for a history: each call
-run by PL/pgSQL under auto, generic or custom, or not at all (only a call
-plpgsql_jit answered with that 42501).
+run by PL/pgSQL under auto, generic or custom, or not at all, or as a call
+that fails with an ordinary error (only a call plpgsql_jit answered with that
+42501): after an error SPI plans the expression, as it does after the refusal.
 One that is found is class "history" and printed.  Not found: PERMISSIVE if
 PL/pgSQL raised 42501, else MISMATCH, except that a step where PL/pgSQL raises
 42501 and plpgsql_jit returns without an error, in a SECURITY DEFINER program
@@ -1622,11 +1623,16 @@ def rec_split(out, schema):
 
 FATAL = ("XX000", "server closed the connection", "terminated abnormally",
          "unrecognized node type")
-MODES = ("auto", "generic", "custom", "drop")
+MODES = ("auto", "generic", "custom", "drop", "err0", "errmin")
 SETMODE = {"auto": "SET plan_cache_mode = auto; ",
            "generic": "SET plan_cache_mode = force_generic_plan; ",
            "custom": "SET plan_cache_mode = force_custom_plan; "}
 HISTORY_RUNS = 600
+# "err0" and "errmin" run a refused call with the same n and m = 0 or the
+# smallest int4, which fail in an expression of f with an ordinary error (the
+# division, or m - 1 and abs(m)); err_replaced checks that it did
+ERRM = {"err0": "0", "errmin": "-2147483648"}
+ERRCALL = re.compile(r"SELECT f\((\d+),\s*[^)]*\);")
 
 
 def denied_fn(prog, lines):
@@ -1640,7 +1646,9 @@ def denied_fn(prog, lines):
 def history(args, prog, want):
     """Does a history of PL/pgSQL explain the outputs of plpgsql_jit?  A
     history says for each call: run under auto, generic or custom, or not
-    run, which only a call that plpgsql_jit answered with its 42501 may be.
+    run, or run as a call that fails with an ordinary error (SPI plans the
+    expression after one, as after the refusal), the last two only for a
+    call that plpgsql_jit answered with its 42501.
     Depth first, a bounded number of replays.  Returns the non-auto choices
     or None."""
     base = list(prog.steps)
@@ -1652,6 +1660,11 @@ def history(args, prog, want):
         for i, s in enumerate(base):
             if i < len(hist) and hist[i] == "drop":
                 st.append("SELECT 'dropped';")
+            elif i < len(hist) and hist[i] in ERRM:
+                s, k = ERRCALL.subn(r"SELECT f(\1, %s);" % ERRM[hist[i]], s)
+                if k != 1:
+                    raise RuntimeError("pj_fuzz: no call to replace in %r" % s)
+                st.append(s)
             elif i < len(hist) and hist[i] is not None and s.startswith("SELECT f("):
                 st.append(SETMODE[hist[i]] + s)
             else:
@@ -1678,6 +1691,8 @@ def history(args, prog, want):
                 return None
             if md == "drop":
                 ok = denied_fn(prog, w)
+            elif md in ERRM:
+                ok = denied_fn(prog, w) and err_replaced(replay(hist + [md]).get(str(i), []), w)
             else:
                 ok = strip(replay(hist + [md]).get(str(i))) == w
             if ok:
@@ -1689,6 +1704,15 @@ def history(args, prog, want):
     r = dfs([])
     return None if r is None else [(i, base[i][:16], m) for i, m in enumerate(r)
                                    if m not in (None, "auto")]
+
+
+def err_replaced(got, w):
+    """Does got, the output of a call replaced by an erroring one, stand for
+    w, that of the call plpgsql_jit refused?  It raises an ordinary error,
+    neither the refusal nor a fatal one, after as many effects as w has."""
+    return (any(l.startswith("ERROR:") for l in got)
+            and not any(l.startswith(DENIED) or f in l for l in got for f in FATAL)
+            and len(effects(got)[0]) == len(effects(w)[0]))
 
 
 def stale_shape(prog, sb, bad):
@@ -1766,6 +1790,15 @@ def selftest():
     twice = (n(4, 3, 2, 4, 3) + ["N"], c, c, g + n(4, 3, 2, 1, 0))
     assert not frame_mix(*twice) and frame_mix(*twice, True), "frame-mix again"
     assert not any(frame_mix(*t, True) for t in bad[:5]), "frame-mix again accepted a mutant"
+    # a replaced call counts only if it fails ordinarily, after w's effects
+    w = ["WARNING:  01000: w 4", "ERROR:  42501: permission denied for function int4pl"]
+    assert err_replaced(["WARNING:  01000: w 4", "ERROR:  22003: integer out of range"], w)
+    assert not any(err_replaced(g, w) for g in (
+        ["WARNING:  01000: w 4", "5"],                          # no error
+        w,                                                     # the refusal again
+        ["WARNING:  01000: w 4", "ERROR:  XX000: x"],          # fatal
+        ["ERROR:  22003: integer out of range"],               # another depth
+        ["WARNING:  01000: w 4", "WARNING:  01000: w 3", "ERROR:  22012: x"])), "err_replaced"
     print("pj_fuzz: selftest ok")
 
 

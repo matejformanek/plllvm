@@ -539,6 +539,10 @@ check-pj-fuzz: port-ok
 	  rc=$$?; cat results-fuzz/unit.log >&2; [ $$rc = 0 ] && \
 	  grep -q 'frame-mix=1 history=0 stale-privilege=0 permissive=0' results-fuzz/unit.log
 	python3 -I tools/pj_fuzz.py --psql '$(bindir)/psql' --host /tmp --port $(PLLLVM_PORT) \
+	  --mode rec --seed 33 --start 129 --n 1 --opt-level 0 --out results-fuzz/unit > results-fuzz/unit.log; \
+	  rc=$$?; cat results-fuzz/unit.log >&2; [ $$rc = 0 ] && \
+	  grep -q 'mismatch=0 frame-mix=0 history=1 ' results-fuzz/unit.log
+	python3 -I tools/pj_fuzz.py --psql '$(bindir)/psql' --host /tmp --port $(PLLLVM_PORT) \
 	  --cx --floor 0.3 --floor-cx 0.15 --seed 41 --n 300 --opt-level 0 --out results-fuzz/cx-flat > results-fuzz/cx-flat.log; \
 	  rc=$$?; cat results-fuzz/cx-flat.log >&2; [ $$rc = 0 ]
 	python3 -I tools/pj_fuzz.py --psql '$(bindir)/psql' --host /tmp --port $(PLLLVM_PORT) \
