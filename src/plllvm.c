@@ -79,6 +79,7 @@ static const struct config_enum_entry debug_inject_options[] = {
 	{"pj_bad_signature", PLLLVM_INJECT_PJ_BAD_SIGNATURE, false},
 	{"pj_bad_cast_repr", PLLLVM_INJECT_PJ_BAD_CAST_REPR, false},
 	{"pj_sql_replan", PLLLVM_INJECT_PJ_SQL_REPLAN, false},
+	{"pj_verify_route", PLLLVM_INJECT_PJ_VERIFY_ROUTE, false},
 	{NULL, 0, false}
 };
 

@@ -789,6 +789,26 @@ signature_polymorphic(PLpgSQL_function *func)
 }
 
 /*
+ * Does funccache keep a struct per argument types of the function?  It does
+ * for a polymorphic one, and for RECORD arguments, which it replaces with the
+ * type of the actual argument (cfunc_resolve_polymorphic_argtypes).
+ */
+bool
+plllvm_pj_per_argtypes(PLpgSQL_function *func)
+{
+	Oid		   *argtypes;
+	int			nargs;
+	bool		per = IsPolymorphicType(get_func_signature(func->fn_oid,
+														   &argtypes, &nargs));
+
+	for (int i = 0; i < nargs; i++)
+		per |= IsPolymorphicType(argtypes[i]) || argtypes[i] == RECORDOID ||
+			argtypes[i] == RECORDARRAYOID;
+	pfree(argtypes);
+	return per;
+}
+
+/*
  * An expression whose cached plan is stale counts as not planned: no tree is
  * read, and the interpreter replans it at its next evaluation.  The variable
  * of a RETURN has no plan to wait for.

@@ -295,6 +295,8 @@ PjMay
 PjParams
 PjPath
 PjPos
+PjRoute
+PjRouteKey
 PjSaved
 PjScope
 PjScopeWalk
@@ -498,6 +500,7 @@ plpgsql_recognize_err_condition_t
 plpgsql_stmt_typename_t
 policy_t
 regproc
+route_hash
 sigjmp_buf
 size_t
 slist_node

@@ -22,6 +22,14 @@
  *    with no call running, marks the entry stale; the next lookup of that
  *    pointer starts a new one.
  *
+ * 3) A declined function is sent back to PL/pgSQL by a route, found from
+ *    the call by (function, collation, trigger) without a catalog lookup.  A
+ *    route is a hint with an always-correct miss path: it is used only for
+ *    the instance PL/pgSQL runs for this call, only while no PROCOID
+ *    invalidation has come since it was made, and only while no compiled
+ *    frame of the instance runs (the interpreter marks what those frames
+ *    are evaluating).
+ *
  * The rest is in docs/architecture.md.
  *
  */
@@ -30,6 +38,8 @@
 #include "access/xact.h"
 #include "catalog/objectaccess.h"
 #include "catalog/pg_proc.h"
+#include "commands/trigger.h"
+#include "common/hashfn.h"
 #include "fmgr.h"
 #include "miscadmin.h"
 #include "plpgsql.h"
@@ -50,6 +60,22 @@ static uint64 exec_epoch = 0;
 
 /* of the compiled calls, for the levels of boxed expressions */
 static uint64 call_serial = 0;
+
+/* of PROCOID invalidations; a route is valid within one value */
+static uint64 proc_epoch = 1;
+
+/* compiled frames running in this backend, of any function */
+static int	pj_frames_running = 0;
+
+/*
+ * The oracle, for builds with assertions: the suites that use it run on one.
+ * Elsewhere the hot path does not test the GUC.
+ */
+#ifdef USE_ASSERT_CHECKING
+#define PJ_ORACLE	unlikely(plllvm_debug_inject == PLLLVM_INJECT_PJ_VERIFY_ROUTE)
+#else
+#define PJ_ORACLE	false
+#endif
 
 /* guard misses before a function is declined as thrashing */
 #define PJ_MAX_MISSES		8
@@ -101,6 +127,9 @@ typedef struct PjEntry
 	PjHarvest  *harvest;
 	int			frames;			/* compiled calls running */
 	bool		waiting;		/* see translate_guarded() */
+	bool		per_argtypes;	/* funccache has a struct per argument types,
+								 * so a route proves the struct only through
+								 * fn_extra */
 	bool		retry;			/* translate again after this call, whose
 								 * statements the interpreter plans */
 	int			misses;			/* guard misses since the last reset */
@@ -127,9 +156,53 @@ typedef struct PjErrArg
 	PjCtx	   *ctx;
 } PjErrArg;
 
+/* where a call of a declined function is sent, see note 3 */
+typedef struct PjRouteKey
+{
+	Oid			fn_oid;
+	Oid			collation;
+	Oid			trigger;		/* of a DML trigger call, else 0 */
+} PjRouteKey;
+
+typedef struct PjRoute
+{
+	PjRouteKey	key;
+	char		status;
+	bool		fresh;			/* made from a call with no fn_extra */
+	uint64		epoch;			/* proc_epoch when made */
+	PjEntry    *e;
+} PjRoute;
+
+static inline uint32
+route_hash_key(PjRouteKey key)
+{
+	return hash_combine(murmurhash32(key.fn_oid),
+						murmurhash32(key.collation ^ key.trigger));
+}
+
+static inline bool
+route_equal_key(PjRouteKey a, PjRouteKey b)
+{
+	return a.fn_oid == b.fn_oid && a.collation == b.collation &&
+		a.trigger == b.trigger;
+}
+
+/* simplehash, not dynahash: the lookup is on the path of every call */
+#define SH_PREFIX		route
+#define SH_ELEMENT_TYPE	PjRoute
+#define SH_KEY_TYPE		PjRouteKey
+#define SH_KEY			key
+#define SH_HASH_KEY(tb, key)	route_hash_key(key)
+#define SH_EQUAL(tb, a, b)		route_equal_key(a, b)
+#define SH_SCOPE		static inline
+#define SH_DECLARE
+#define SH_DEFINE
+#include "lib/simplehash.h"
+
 plllvm_pj_counters plllvm_pj_count;
 
 static HTAB *entries = NULL;
+static route_hash *routes = NULL;
 static MemoryContext pj_cxt = NULL;
 static plpgsql_compile_t compile_p = NULL;
 static plpgsql_call_handler_t call_handler_p = NULL;
@@ -140,6 +213,14 @@ static plpgsql_build_datatype_t build_datatype_p = NULL;
 PG_FUNCTION_INFO_V1(plllvm_pj_call_handler);
 
 static void load_plpgsql(void);
+static pg_noinline Datum slow(FunctionCallInfo fcinfo);
+static inline Datum plain(FunctionCallInfo fcinfo);
+static pg_noinline Datum plain_frames(FunctionCallInfo fcinfo);
+static pg_noinline void plain_verify(FunctionCallInfo fcinfo);
+static pg_noinline void route_verify(FunctionCallInfo fcinfo, PjEntry *e);
+static inline PjRouteKey route_key(FunctionCallInfo fcinfo);
+static void route_fill(PLpgSQL_function *func, PjEntry *e, bool fresh);
+static bool decline_static(PLpgSQL_function *func, PjEntry *e);
 static PjEntry *entry_get(PLpgSQL_function *func);
 static void entry_reset_callback(void *arg);
 static Datum fall_back(FunctionCallInfo fcinfo, PjEntry *e, const char *path);
@@ -163,7 +244,8 @@ static void exec_error_callback(void *arg);
 static bool execute_allowed(PjEntry *e);
 static void pj_mark(PLpgSQL_expr *expr, LocalTransactionId lxid);
 static void pj_mark_busy(PjEntry *e);
-static Datum interp(FunctionCallInfo fcinfo, PjEntry *e);
+static inline Datum interp(FunctionCallInfo fcinfo, PjEntry *e);
+static pg_noinline Datum interp_marked(FunctionCallInfo fcinfo, PjEntry *e);
 static void pj_mark_running(PjCtx *ctx);
 static PLpgSQL_expr *pj_frame_expr(PjCtx *ctx);
 static bool pj_outer_runs(PjCtx *ctx, PLpgSQL_expr *expr);
@@ -175,40 +257,81 @@ static void release_harvest(PjEntry *e);
 static void pj_init(void);
 static void exec_inval_callback(Datum arg, int cacheid, uint32 hashvalue);
 
+/*
+ * May calls of the entry go to PL/pgSQL on a route?  Anything else changes
+ * what the entry is, and a frame running needs interp()'s marks.
+ */
+static inline bool
+routable(PjEntry *e)
+{
+	return e->state == PJ_DECLINED && !e->stale && e->top == NULL;
+}
+
 Datum
 plllvm_pj_call_handler(PG_FUNCTION_ARGS)
 {
-	PLpgSQL_function *func;
-	PjEntry    *e = NULL;
-
-	load_plpgsql();
+	if (unlikely(call_handler_p == NULL))
+		load_plpgsql();
 	plllvm_pj_count.calls++;
 
 	if (!plllvm_plpgsql_jit)
-		return fall_back(fcinfo, NULL, NULL);
+		return plain(fcinfo);
 
 	if (plllvm_plpgsql_foreign_plugin())
 	{
 		plllvm_pj_count.plugin_fallbacks++;
-		return fall_back(fcinfo, NULL, NULL);
+		return plain(fcinfo);
 	}
 
 	/*
 	 * A declined function skips our own plpgsql_compile(), which costs a
 	 * pg_proc lookup.  fn_extra is only compared here, never followed: it may
-	 * be a function that has been freed since.
+	 * be a function that has been freed since.  PL/pgSQL runs the function in
+	 * fn_extra if it is still valid, and else looks for the one funccache
+	 * holds for the key (cached_function_compile), so the route is taken only
+	 * when the function is in fn_extra, or there is none and the route was
+	 * made from a call with none.
 	 */
-	if (fcinfo->flinfo->fn_extra != NULL && entries != NULL)
+	if (routes != NULL)
 	{
-		void	   *key = fcinfo->flinfo->fn_extra;
+		PjRoute    *r = route_lookup(routes, route_key(fcinfo));
 
-		e = hash_search(entries, &key, HASH_FIND, NULL);
-		if (e != NULL && !e->stale && e->state == PJ_DECLINED)
+		if (r != NULL && r->epoch == proc_epoch)
 		{
-			plllvm_pj_count.declines++;
-			return fall_back(fcinfo, e, e->declined_path);
+			PjEntry    *e = r->e;
+			void	   *x = fcinfo->flinfo->fn_extra;
+
+			if (routable(e) &&
+				(x == e->func ||
+				 (x == NULL && r->fresh && !e->per_argtypes &&
+				  e->func->cfunc.fn_hashkey != NULL)))
+			{
+				if (PJ_ORACLE)
+					route_verify(fcinfo, e);
+
+				plllvm_pj_count.interpreted_calls++;
+				plllvm_pj_count.declines++;
+				plllvm_pj_count.routed++;
+				e->calls++;
+				return call_handler_p(fcinfo);
+			}
 		}
 	}
+
+	return slow(fcinfo);
+}
+
+/*
+ * The call that no route covers: PL/pgSQL's compile finds the function, and
+ * a declined one gets a route for the next call.
+ */
+static pg_noinline Datum
+slow(FunctionCallInfo fcinfo)
+{
+	PLpgSQL_function *func;
+	PjEntry    *e;
+
+	bool		fresh = fcinfo->flinfo->fn_extra == NULL;
 
 	check_stack_depth();
 	func = compile_p(fcinfo, false);
@@ -217,10 +340,17 @@ plllvm_pj_call_handler(PG_FUNCTION_ARGS)
 	switch (e->state)
 	{
 		case PJ_NEW:
+			if (decline_static(func, e))
+			{
+				plllvm_pj_count.declines++;
+				route_fill(func, e, fresh);
+				return fall_back(fcinfo, e, e->declined_path);
+			}
 			e->state = PJ_SEEN;
 			return fall_back(fcinfo, e, "interpreted:first call");
 		case PJ_DECLINED:
 			plllvm_pj_count.declines++;
+			route_fill(func, e, fresh);
 			return fall_back(fcinfo, e, e->declined_path);
 		case PJ_SEEN:
 			if (!seen_step(func, e))
@@ -234,6 +364,135 @@ plllvm_pj_call_handler(PG_FUNCTION_ARGS)
 }
 
 /*
+ * PL/pgSQL, for a call that the function's own handler does not look at: the
+ * switch is off, or another plugin is installed.  A compiled frame of the
+ * function may be running, though, and then its expressions are marked as for
+ * any other call from inside it.
+ */
+static inline Datum
+plain(FunctionCallInfo fcinfo)
+{
+	plllvm_pj_count.interpreted_calls++;
+	if (unlikely(pj_frames_running > 0))
+		return plain_frames(fcinfo);
+	if (PJ_ORACLE)
+		plain_verify(fcinfo);
+
+	return call_handler_p(fcinfo);
+}
+
+static pg_noinline Datum
+plain_frames(FunctionCallInfo fcinfo)
+{
+	PLpgSQL_function *func;
+
+	check_stack_depth();
+	func = compile_p(fcinfo, false);
+	return interp(fcinfo, entry_get(func));
+}
+
+/*
+ * The oracle of plain(): the function has no frame when plain() skips
+ * interp().  The compile leaves fn_extra as it was, so that the call site
+ * goes on to test the same arm.
+ */
+static pg_noinline void
+plain_verify(FunctionCallInfo fcinfo)
+{
+	void	   *saved = fcinfo->flinfo->fn_extra;
+	PLpgSQL_function *func = compile_p(fcinfo, false);
+	bool		framed = entry_get(func)->top != NULL;
+
+	fcinfo->flinfo->fn_extra = saved;
+	if (framed)
+		elog(ERROR, "plpgsql_jit: an interpreted call skipped the frames of its function");
+}
+
+/* the oracle of a route: PL/pgSQL's own compile must find the entry e */
+static pg_noinline void
+route_verify(FunctionCallInfo fcinfo, PjEntry *e)
+{
+	void	   *saved = fcinfo->flinfo->fn_extra;
+	PLpgSQL_function *func = compile_p(fcinfo, false);
+	PjEntry    *got = entry_get(func);
+
+	fcinfo->flinfo->fn_extra = saved;
+	/* not routable(): what is checked must not be what checks it */
+	if (got != e || got->state != PJ_DECLINED || got->stale || got->top != NULL)
+		elog(ERROR, "plpgsql_jit: a route led to another function than the one called");
+}
+
+static inline PjRouteKey
+route_key(FunctionCallInfo fcinfo)
+{
+	PjRouteKey	key;
+
+	key.fn_oid = fcinfo->flinfo->fn_oid;
+	key.collation = fcinfo->fncollation;
+	key.trigger = CALLED_AS_TRIGGER(fcinfo) ?
+		((TriggerData *) fcinfo->context)->tg_trigger->tgoid : InvalidOid;
+	return key;
+}
+
+/*
+ * Route the next calls of a declined function to PL/pgSQL, under the key its
+ * struct has in funccache.  Not one that funccache has dropped (it clears
+ * fn_hashkey) or that has a frame running.  A call with no fn_extra gets the
+ * struct funccache holds for the key, and only a route made from such a call
+ * may serve one (fresh): a struct that funccache rebuilt in place while an
+ * older call site kept it can show a key that the hash holds another struct
+ * for.  Every entry built (entry_get) or dropped (entry_reset_callback) moves
+ * proc_epoch, and a struct that may run a frame of ours has an entry, so a
+ * route is older than any rebuild of the struct it names.  Where several
+ * structs share the key (per_argtypes), the route names the last one filled,
+ * and a call of another one misses and fills it again.
+ */
+static void
+route_fill(PLpgSQL_function *func, PjEntry *e, bool fresh)
+{
+	CachedFunctionHashKey *hk = func->cfunc.fn_hashkey;
+	PjRouteKey	key;
+	PjRoute    *r;
+	bool		found;
+
+	if (!routable(e) || hk == NULL)
+		return;
+
+	key.fn_oid = hk->funcOid;
+	key.collation = hk->inputCollation;
+	key.trigger = hk->trigOid;
+	r = route_insert(routes, key, &found);
+	r->epoch = proc_epoch;
+	r->fresh = fresh;
+	r->e = e;
+}
+
+/*
+ * Decline at the first call a function that its parse tree puts out of scope
+ * (what the settings it was compiled under left in the tree included).  No
+ * plan changes that, so the second call need not tell.
+ */
+static bool
+decline_static(PLpgSQL_function *func, PjEntry *e)
+{
+	MemoryContext oldcxt = CurrentMemoryContext;
+	MemoryContext tmp = AllocSetContextCreate(oldcxt,
+											  "plllvm - pj static reason",
+											  ALLOCSET_SMALL_SIZES);
+	PjScope		scope;
+
+	MemoryContextSwitchTo(tmp);
+	plllvm_pj_scope(func, &scope);
+	MemoryContextSwitchTo(oldcxt);
+
+	if (scope.reason != NULL)
+		decline_idle(e, scope.reason);
+	MemoryContextDelete(tmp);
+
+	return scope.reason != NULL;
+}
+
+/*
  * plpgsql_compile() left the function in fn_extra, so the compile in
  * plpgsql_call_handler() finds it at once
  */
@@ -241,11 +500,8 @@ static Datum
 fall_back(FunctionCallInfo fcinfo, PjEntry *e, const char *path)
 {
 	plllvm_pj_count.interpreted_calls++;
-	if (e != NULL)
-	{
-		e->calls++;
-		e->last_path = path;
-	}
+	e->calls++;
+	e->last_path = path;
 
 	return interp(fcinfo, e);
 }
@@ -343,6 +599,7 @@ pj_init(void)
 	ctl.hcxt = pj_cxt;
 	entries = hash_create("plllvm plpgsql_jit entries", 64, &ctl,
 						  HASH_ELEM | HASH_BLOBS | HASH_CONTEXT);
+	routes = route_create(pj_cxt, 64, NULL);
 
 	CacheRegisterSyscacheCallback(PROCOID, exec_inval_callback, (Datum) 0);
 	CacheRegisterSyscacheCallback(AUTHMEMROLEMEM, exec_inval_callback,
@@ -355,6 +612,8 @@ static void
 exec_inval_callback(Datum arg, int cacheid, uint32 hashvalue)
 {
 	exec_epoch++;
+	if (cacheid == PROCOID)
+		proc_epoch++;
 }
 
 /*
@@ -383,6 +642,15 @@ entry_get(PLpgSQL_function *func)
 		release_harvest(e);
 
 	memset(e, 0, sizeof(PjEntry));
+	e->stale = true;			/* until it is complete and has its callback */
+
+	/*
+	 * An entry is built when PL/pgSQL has built or rebuilt a function: it may
+	 * be one that funccache rebuilt in place, which runs no callback of ours,
+	 * so that a route made before may name it by a key it no longer has.
+	 */
+	proc_epoch++;
+
 	e->func = func;
 	e->state = PJ_NEW;
 	e->deopt_expr = -1;
@@ -397,6 +665,10 @@ entry_get(PLpgSQL_function *func)
 	cb->arg = e;
 	MemoryContextRegisterResetCallback(func->fn_cxt, cb);
 
+	/* looks at pg_proc, and may fail */
+	e->per_argtypes = plllvm_pj_per_argtypes(func);
+	e->stale = false;
+
 	return e;
 }
 
@@ -404,6 +676,9 @@ static void
 entry_reset_callback(void *arg)
 {
 	((PjEntry *) arg)->stale = true;
+
+	/* the function is going, or funccache rebuilds it in place */
+	proc_epoch++;
 }
 
 /*
@@ -847,6 +1122,7 @@ run(PLpgSQL_function *func, FunctionCallInfo fcinfo, PjEntry *e, PjVariant *v)
 
 	func->cfunc.use_count++;
 	e->frames++;
+	pj_frames_running++;
 	ctx.outer = e->top;
 	e->top = &ctx;
 	ctx.level = func->cfunc.use_count - 1;
@@ -942,6 +1218,8 @@ activation_end(PLpgSQL_function *func, PjEntry *e, MemoryContext entry_cxt)
 	MemoryContextSwitchTo(entry_cxt);
 	func->cfunc.use_count--;
 	e->frames--;
+	pj_frames_running--;
+	Assert(pj_frames_running >= 0);
 
 	/* funccache forgot a running function: its last frame lets go of us */
 	if (func->cfunc.use_count == 0 && func->cfunc.fn_hashkey == NULL)
@@ -1218,16 +1496,13 @@ typedef struct PjSaved
  * running marked busy, as PL/pgSQL's own frames leave them while a nested call
  * runs.  They are given back afterwards, but only if no one has changed them.
  */
-static Datum
-interp(FunctionCallInfo fcinfo, PjEntry *e)
+static pg_noinline Datum
+interp_marked(FunctionCallInfo fcinfo, PjEntry *e)
 {
 	PjSaved    *saved;
 	volatile int n = 0;
 	volatile Datum result = (Datum) 0;
 	LocalTransactionId lxid = MyProc->vxid.lxid;
-
-	if (e == NULL || e->top == NULL)
-		return call_handler_p(fcinfo);
 
 	saved = palloc_array(PjSaved, e->frames);
 	for (PjCtx *c = e->top; c != NULL; c = c->outer)
@@ -1263,6 +1538,15 @@ interp(FunctionCallInfo fcinfo, PjEntry *e)
 	PG_END_TRY();
 
 	return result;
+}
+
+static inline Datum
+interp(FunctionCallInfo fcinfo, PjEntry *e)
+{
+	if (e == NULL || e->top == NULL)
+		return call_handler_p(fcinfo);
+
+	return interp_marked(fcinfo, e);
 }
 
 static PjVariant *

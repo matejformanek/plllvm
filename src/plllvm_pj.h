@@ -51,6 +51,7 @@ typedef struct plllvm_pj_counters
 	int64		sql_execs;
 	int64		sql_stale;
 	int64		sql_rewalks;
+	int64		routed;
 } plllvm_pj_counters;
 
 /* one side entry of a function, for plllvm_pj_status() */
@@ -386,6 +387,7 @@ extern void plllvm_pj_xact_callback(XactEvent event);
 
 /* plllvm_pj_translate.c */
 extern void plllvm_pj_scope(struct PLpgSQL_function *func, PjScope *scope);
+extern bool plllvm_pj_per_argtypes(struct PLpgSQL_function *func);
 extern void plllvm_pj_classify(PjScope *scope);
 extern const char *plllvm_pj_harvest(struct PLpgSQL_function *func,
 									 const PjScope *scope, PjHarvest *h);

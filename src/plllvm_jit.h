@@ -37,6 +37,7 @@ extern void plllvm_reset_after_error(void);
 #define PLLLVM_INJECT_PJ_BAD_SIGNATURE	5
 #define PLLLVM_INJECT_PJ_BAD_CAST_REPR	6
 #define PLLLVM_INJECT_PJ_SQL_REPLAN		7
+#define PLLLVM_INJECT_PJ_VERIFY_ROUTE	8
 
 extern void plllvm_inject_fault(int kind);
 

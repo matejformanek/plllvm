@@ -39,18 +39,18 @@ SELECT p.proname, s.state, s.reason, s.last_path
   FROM pg_proc p, LATERAL plllvm_pj_status(p.oid::regprocedure) s
  WHERE p.proname LIKE 'ps\_%' AND p.prolang = (SELECT oid FROM pg_language WHERE lanname = 'plpgsql_jit')
  ORDER BY 1;
- proname | state | reason |       last_path        
----------+-------+--------+------------------------
- ps_cast | seen  |        | interpreted:first call
- ps_decl | seen  |        | interpreted:first call
- ps_diag | seen  |        | interpreted:first call
- ps_exc  | seen  |        | interpreted:first call
- ps_inc  | seen  |        | interpreted:first call
- ps_poly | seen  |        | interpreted:first call
- ps_rnd  | seen  |        | interpreted:first call
- ps_sub  | seen  |        | interpreted:first call
- ps_text | seen  |        | interpreted:first call
- ps_user | seen  |        | interpreted:first call
+ proname |  state   |          reason           |             last_path              
+---------+----------+---------------------------+------------------------------------
+ ps_cast | seen     |                           | interpreted:first call
+ ps_decl | seen     |                           | interpreted:first call
+ ps_diag | declined | statement:GET DIAGNOSTICS | declined:statement:GET DIAGNOSTICS
+ ps_exc  | declined | exception block           | declined:exception block
+ ps_inc  | seen     |                           | interpreted:first call
+ ps_poly | declined | signature                 | declined:signature
+ ps_rnd  | seen     |                           | interpreted:first call
+ ps_sub  | seen     |                           | interpreted:first call
+ ps_text | seen     |                           | interpreted:first call
+ ps_user | seen     |                           | interpreted:first call
 (10 rows)
 
 SELECT ps_inc(1), ps_diag(1), ps_decl(1), ps_exc(1), ps_text('a'), ps_poly(1),
