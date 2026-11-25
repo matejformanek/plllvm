@@ -237,5 +237,26 @@ COMMIT;
 SELECT psy_w(5);
 SELECT * FROM psy_b ORDER BY id;
 
+-- a FOR over rows it locks: the first batch of 10 is locked when the loop
+-- leaves after 3, the rest is free, as in stock
+CREATE TABLE psf_t (id int PRIMARY KEY);
+INSERT INTO psf_t SELECT g FROM generate_series(1, 20) g;
+CREATE FUNCTION psf_lock(k int) RETURNS int LANGUAGE plpgsql_jit AS $$
+DECLARE a int; c int := 0;
+BEGIN
+  FOR a IN SELECT id FROM psf_t ORDER BY id FOR UPDATE LOOP
+    c := c + 1;
+    EXIT WHEN c = k;
+  END LOOP;
+  RETURN c;
+END $$;
+SELECT psf_lock(3), psf_lock(3), psf_lock(3);
+SELECT pj_expect('psf_lock(integer)', 'compiled') \gset
+BEGIN;
+SELECT psf_lock(3);
+SELECT psc_other('UPDATE psf_t SET id = id WHERE id = ' || i) FROM unnest(ARRAY[1, 5, 10, 11, 12, 20]) i;
+COMMIT;
+SELECT psc_other('UPDATE psf_t SET id = id WHERE id = 5');
+
 SELECT dblink_disconnect('other');
 DROP EXTENSION dblink;

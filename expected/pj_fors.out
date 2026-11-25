@@ -1,0 +1,517 @@
+--
+-- pj_fors: FOR over a query in a plpgsql_jit function, through a portal
+--
+-- The rows come in batches of 10, then 50, as in stock PL/pgSQL, and every
+-- value, FOUND, message and CONTEXT is stock's.  Rows that name a path
+-- (pj_expect) and counters (pj_delta) are silent on stock.  The loops run 0,
+-- 1, 10, 11, 60 and 61 rows: the edges of the batches.  pf_w runs a query
+-- three times so that the function is compiled for the one that is shown.
+--
+\getenv pj_lang PJ_LANG
+\if :{?pj_lang}
+\else
+  \set pj_lang plpgsql
+\endif
+\set ns 'ARRAY[0,1,10,11,60,61]'
+CREATE TABLE pf_t (id int PRIMARY KEY, v int, s text) WITH (autovacuum_enabled = false);
+INSERT INTO pf_t SELECT i, i * 3, 'r' || i FROM generate_series(1, 100) i;
+ANALYZE pf_t;
+CREATE FUNCTION pf_w(q text, n int DEFAULT 3) RETURNS void LANGUAGE plpgsql AS $$
+BEGIN
+  FOR i IN 1..n LOOP EXECUTE q; END LOOP;
+END $$;
+CREATE FUNCTION pf_try(q text) RETURNS text LANGUAGE plpgsql AS $$
+DECLARE st text; m text; c text;
+BEGIN
+  EXECUTE q; RETURN 'ok';
+  EXCEPTION WHEN others THEN GET STACKED DIAGNOSTICS st = RETURNED_SQLSTATE, m = MESSAGE_TEXT, c = PG_EXCEPTION_CONTEXT;
+  RETURN st || ' ' || m || E'\n' || c;
+END $$;
+-- no cursor is left behind
+CREATE FUNCTION pf_cursors() RETURNS bigint LANGUAGE sql AS 'SELECT count(*) FROM pg_cursors';
+-- A1: a list of scalars, and a single one (a text, by reference); the last row
+-- stays in the targets, FOUND is true after a loop that had rows
+CREATE FUNCTION pf_sum(n int) RETURNS text LANGUAGE :pj_lang AS $$
+DECLARE a int; b int; t text; s int := 0; f1 bool; f2 bool;
+BEGIN
+  FOR a, b IN SELECT g, g * 2 FROM generate_series(1, n) g LOOP s := s + a + b; END LOOP;
+  f1 := found; FOR t IN SELECT 'x' || g FROM generate_series(1, n) g LOOP s := s + 1;
+  END LOOP; f2 := found; RETURN concat_ws('/', s, a, b, t, f1, f2);
+END $$;
+-- A1b: a SELECT INTO in the body, which sets and frees the global tuple table
+CREATE FUNCTION pf_into(n int) RETURNS text LANGUAGE :pj_lang AS $$
+DECLARE a int; x int; s int := 0;
+BEGIN
+  FOR a IN SELECT g FROM generate_series(1, n) g LOOP SELECT v INTO x FROM pf_t WHERE id = a % 100 + 1;
+  s := s + x; END LOOP; RETURN s || '/' || a || '/' || x;
+END $$;
+SELECT pf_w('SELECT pf_sum(g), pf_into(g) FROM generate_series(0, 70) g') \gset
+SELECT string_agg(n || ':' || pf_sum(n) || ':' || pf_into(n), ' ' ORDER BY n) FROM unnest(:ns) n;
+                                                                        string_agg                                                                        
+----------------------------------------------------------------------------------------------------------------------------------------------------------
+ 1:4/1/2/x1/t/t:6/1/6 10:175/10/20/x10/t/t:195/10/33 11:209/11/22/x11/t/t:231/11/36 60:5550/60/120/x60/t/t:5670/60/183 61:5734/61/122/x61/t/t:5856/61/186
+(1 row)
+
+SELECT pj_expect('pf_sum(integer)', 'compiled') \gset
+SELECT pj_expect('pf_into(integer)', 'compiled') \gset
+-- A2: no rows leave NULLs, also in a target that has a value; a NOT NULL
+-- target raises at the FOR
+CREATE FUNCTION pf_none(a int) RETURNS text LANGUAGE :pj_lang AS $$
+DECLARE b text := 'old';
+BEGIN
+  FOR a, b IN SELECT 1, 'new' WHERE a > 0 LOOP NULL; END LOOP;
+  RETURN coalesce(a::text, '<null>') || '/' || coalesce(b, '<null>') || '/' || found;
+END $$;
+CREATE FUNCTION pf_nn(n int) RETURNS int LANGUAGE :pj_lang AS $$
+DECLARE x int NOT NULL := 0;
+BEGIN
+  FOR x IN SELECT g FROM generate_series(1, n) g WHERE g > 0 LOOP NULL; END LOOP; RETURN x;
+END $$;
+SELECT pf_w('SELECT pf_none(1), pf_none(0), pf_try(''SELECT pf_nn(3)''), pf_try(''SELECT pf_nn(0)'')') \gset
+SELECT pf_none(1), pf_none(0), pf_try('SELECT pf_nn(3)'), pf_try('SELECT pf_nn(0)');
+  pf_none   |       pf_none       | pf_try |                                pf_try                                 
+------------+---------------------+--------+-----------------------------------------------------------------------
+ 1/new/true | <null>/<null>/false | ok     | 22004 null value cannot be assigned to variable "x" declared NOT NULL+
+            |                     |        | PL/pgSQL function pf_nn(integer) line 4 at FOR over SELECT rows      +
+            |                     |        | SQL statement "SELECT pf_nn(0)"                                      +
+            |                     |        | PL/pgSQL function pf_try(text) line 4 at EXECUTE
+(1 row)
+
+SELECT pj_expect('pf_none(integer)', 'compiled') \gset
+SELECT pj_expect('pf_nn(integer)', 'compiled') \gset
+-- A3: FOUND in the body, after a statement that finds nothing, and after the
+-- loop; an inner loop with no rows; EXIT of a block across a loop sets it
+CREATE FUNCTION pf_found(n int) RETURNS text LANGUAGE :pj_lang AS $$
+DECLARE a int; b int; r text := '';
+BEGIN
+  FOR a IN SELECT g FROM generate_series(1, n) g LOOP r := r || found::int;
+  PERFORM 1 FROM pf_t WHERE id = a AND false; r := r || found::int;
+  FOR b IN SELECT g FROM generate_series(1, 0) g LOOP NULL; END LOOP; r := r || found::int;
+  PERFORM 1 FROM pf_t WHERE id = a; r := r || found::int; END LOOP; RETURN r || '/' || found;
+END $$;
+CREATE FUNCTION pf_blk(k int) RETURNS text LANGUAGE :pj_lang AS $$
+DECLARE a int; r text;
+BEGIN
+  PERFORM 1 WHERE false; r := found::text;
+  <<blk>> BEGIN FOR a IN SELECT g FROM generate_series(1, 20) g LOOP EXIT blk WHEN a = k;
+  END LOOP; END; RETURN r || found::text;
+END $$;
+SELECT pf_w('SELECT pf_found(g), pf_blk(g) FROM generate_series(0, 4) g') \gset
+SELECT string_agg(n || ':' || pf_found(n) || pf_blk(n * 4), ' ' ORDER BY n) FROM unnest(ARRAY[0,1,2,11]) n;
+                                                          string_agg                                                           
+-------------------------------------------------------------------------------------------------------------------------------
+ 0:/falsefalsetrue 1:0001/truefalsetrue 2:00011001/truefalsetrue 11:00011001100110011001100110011001100110011001/truefalsetrue
+(1 row)
+
+SELECT pj_expect('pf_found(integer)', 'compiled') \gset
+SELECT pj_expect('pf_blk(integer)', 'compiled') \gset
+-- A4: every edge out of a loop closes its portal; EXIT, CONTINUE across a
+-- loop, a labelled block and RETURN, then COMMIT
+CREATE FUNCTION pf_exit(n int, k int) RETURNS text LANGUAGE :pj_lang AS $$
+DECLARE a int; b int; s text := '';
+BEGIN
+  FOR a IN SELECT g FROM generate_series(1, n) g LOOP s := s || a; EXIT WHEN a = k; END LOOP;
+  s := s || '/' || found || '/';
+  <<outer>> FOR a IN SELECT g FROM generate_series(1, n) g LOOP FOR b IN SELECT g FROM generate_series(1, n) g LOOP CONTINUE outer WHEN b = 2 AND a < k;
+  EXIT outer WHEN a = k AND b = 3; s := s || a || b || ','; END LOOP; END LOOP;
+  s := s || found || '/';
+  <<blk>> BEGIN FOR a IN SELECT g FROM generate_series(1, n) g LOOP FOR b IN SELECT g FROM generate_series(1, n) g LOOP EXIT blk WHEN b = k;
+  END LOOP; END LOOP; s := s || 'unreached'; END; RETURN s || found;
+END $$;
+CREATE FUNCTION pf_ret(n int, k int) RETURNS text LANGUAGE :pj_lang AS $$
+DECLARE a int; b int;
+BEGIN
+  FOR a IN SELECT g FROM generate_series(1, n) g LOOP FOR b IN SELECT g FROM generate_series(1, n) g LOOP IF a = k AND b = k THEN RETURN 'row' || a || b;
+  END IF; END LOOP; END LOOP; RETURN 'end';
+END $$;
+BEGIN;
+SELECT pf_w('SELECT pf_exit(11, 5), pf_exit(11, 20), pf_exit(61, 3), pf_ret(11, 5), pf_ret(11, 20), pf_ret(61, 3)') \gset
+SELECT pf_exit(11, 5), pf_exit(11, 20), pf_exit(61, 3), pf_exit(2, 2), pf_ret(11, 5), pf_ret(11, 20), pf_ret(61, 3), pf_ret(3, 3), pf_cursors();
+                pf_exit                 |                                 pf_exit                                  |            pf_exit             |          pf_exit           | pf_ret | pf_ret | pf_ret | pf_ret | pf_cursors 
+----------------------------------------+--------------------------------------------------------------------------+--------------------------------+----------------------------+--------+--------+--------+--------+------------
+ 12345/true/11,21,31,41,51,52,true/true | 1234567891011/true/11,21,31,41,51,61,71,81,91,101,111,true/unreachedtrue | 123/true/11,21,31,32,true/true | 12/true/11,21,22,true/true | row55  | end    | row33  | row33  |          0
+(1 row)
+
+COMMIT;
+SELECT pj_expect('pf_exit(integer,integer)', 'compiled') \gset
+SELECT pj_expect('pf_ret(integer,integer)', 'compiled') \gset
+-- A4c: an error in the body, or in the portal's own fetch, caught by a caller
+-- that loops again; the aborted calls leave no portal and the transaction
+-- commits.  An error of a statement of the body leaves the rest of the
+-- transaction to PL/pgSQL, as for any statement (see pj_abort)
+CREATE FUNCTION pf_err(n int, mode int) RETURNS int LANGUAGE :pj_lang AS $$
+DECLARE a int; x int; s int := 0;
+BEGIN
+  FOR a IN SELECT CASE WHEN mode = 2 THEN 1 / (g - 12) ELSE g END FROM generate_series(1, n) g LOOP IF mode = 1 AND a = 12 THEN SELECT 1 / (a - 12) INTO x;
+  END IF; s := s + a; END LOOP; RETURN s;
+END $$;
+CREATE FUNCTION pf_caller(k int, m int) RETURNS text LANGUAGE plpgsql AS $$
+DECLARE c int := 0; s int := 0;
+BEGIN
+  FOR i IN 1..k LOOP BEGIN s := s + pf_err(20, CASE WHEN m = 3 THEN i % 3 ELSE m END);
+  EXCEPTION WHEN division_by_zero THEN c := c + 1; END; END LOOP; RETURN c || '/' || s;
+END $$;
+SELECT pf_w('SELECT pf_caller(6, 3)') \gset
+BEGIN;
+SELECT pj_mark() \gset
+SELECT pf_caller(30, 2), pf_cursors();
+ pf_caller | pf_cursors 
+-----------+------------
+ 30/0      |          0
+(1 row)
+
+SELECT pj_delta(30, 0, NULL, 0, 0);
+ pj_delta 
+----------
+ 
+(1 row)
+
+SELECT pj_expect('pf_err(integer,integer)', 'compiled') \gset
+SELECT pf_caller(3, 1), pf_err(11, 0), pf_cursors();
+ pf_caller | pf_err | pf_cursors 
+-----------+--------+------------
+ 3/0       |     66 |          0
+(1 row)
+
+COMMIT;
+-- A5: the loop runs for as many rows as the batches fetched before the query
+-- raises: 0, 10 (at 11 and at 40), 60 (at 61 and at 90) of them, counted by a
+-- sequence, which a rollback of the failed call does not undo
+CREATE SEQUENCE pf_seq;
+CREATE FUNCTION pf_batch(k int) RETURNS text LANGUAGE :pj_lang AS $$
+DECLARE x int;
+BEGIN
+  FOR x IN SELECT 1 / (k - g) FROM generate_series(1, 120) g LOOP PERFORM nextval('pf_seq');
+  END LOOP; RETURN 'done';
+END $$;
+CREATE FUNCTION pf_batches() RETURNS text LANGUAGE plpgsql AS $$
+DECLARE r text := ''; k int;
+BEGIN
+  FOR k IN SELECT unnest(ARRAY[200, 5, 11, 40, 61, 90]) LOOP PERFORM setval('pf_seq', 1, false);
+  r := r || left(pf_try(format('SELECT pf_batch(%s)', k)), 5) || '=';
+  r := r || (SELECT CASE WHEN is_called THEN last_value ELSE 0 END FROM pf_seq) || ' ';
+  END LOOP; RETURN r;
+END $$;
+SELECT pf_w('SELECT pf_batches()') \gset
+SELECT pf_batches();
+                     pf_batches                      
+-----------------------------------------------------
+ ok=120 22012=0 22012=10 22012=10 22012=60 22012=60 
+(1 row)
+
+SELECT pj_expect('pf_batch(integer)', 'compiled') \gset
+-- the error itself: CONTEXT is that of a fetch, with no SQL statement line
+SELECT pf_try('SELECT pf_batch(5)');
+                               pf_try                               
+--------------------------------------------------------------------
+ 22012 division by zero                                            +
+ PL/pgSQL function pf_batch(integer) line 4 at FOR over SELECT rows+
+ SQL statement "SELECT pf_batch(5)"                                +
+ PL/pgSQL function pf_try(text) line 4 at EXECUTE
+(1 row)
+
+-- A6: a body that writes the table it scans sees only the rows of the
+-- snapshot of the open
+CREATE TABLE pf_w1 (id int PRIMARY KEY) WITH (autovacuum_enabled = false);
+CREATE FUNCTION pf_write(n int) RETURNS text LANGUAGE :pj_lang AS $$
+DECLARE a int; c int := 0; t bigint;
+BEGIN
+  DELETE FROM pf_w1; INSERT INTO pf_w1 SELECT g FROM generate_series(1, n) g;
+  FOR a IN SELECT id FROM pf_w1 LOOP INSERT INTO pf_w1 VALUES (a + 1000);
+  UPDATE pf_w1 SET id = id WHERE id = a; c := c + 1; END LOOP;
+  SELECT count(*) INTO t FROM pf_w1; RETURN c || '/' || t;
+END $$;
+SELECT pf_w('SELECT pf_write(g) FROM generate_series(0, 12) g') \gset
+SELECT string_agg(n || ':' || pf_write(n), ' ' ORDER BY n) FROM unnest(ARRAY[0,1,10,11,61]) n;
+               string_agg                
+-----------------------------------------
+ 0:0/0 1:1/2 10:10/20 11:11/22 61:61/122
+(1 row)
+
+SELECT pj_expect('pf_write(integer)', 'compiled') \gset
+-- A9: the check for strict_multi_assignment reads each row; the others do
+-- not apply to a FOR (too_many_rows is for INTO)
+CREATE FUNCTION pf_multi(n int) RETURNS text LANGUAGE :pj_lang AS $$
+DECLARE a int; b int; s int := 0;
+BEGIN
+  FOR a, b IN SELECT g, g, g FROM generate_series(1, n) g LOOP s := s + a; END LOOP;
+  RETURN s::text;
+END $$;
+CREATE FUNCTION pf_two(n int) RETURNS text LANGUAGE :pj_lang AS $$
+DECLARE a int; b int; s int := 0;
+BEGIN
+  FOR a, b IN SELECT g, g FROM generate_series(1, n) g LOOP s := s + a; END LOOP;
+  RETURN s::text;
+END $$;
+SELECT pf_w('SELECT pf_try(''SELECT pf_multi(3)''), pf_two(11)') \gset
+SET plpgsql.extra_warnings = 'strict_multi_assignment';
+SELECT pf_try('SELECT pf_multi(2)');
+WARNING:  number of source and target fields in assignment does not match
+DETAIL:  strict_multi_assignment check of extra_warnings is active.
+HINT:  Make sure the query returns the exact list of columns.
+WARNING:  number of source and target fields in assignment does not match
+DETAIL:  strict_multi_assignment check of extra_warnings is active.
+HINT:  Make sure the query returns the exact list of columns.
+ pf_try 
+--------
+ ok
+(1 row)
+
+SET plpgsql.extra_errors = 'strict_multi_assignment';
+SELECT pf_try('SELECT pf_multi(3)'), pf_try('SELECT pf_multi(0)');
+                                pf_try                                 | pf_try 
+-----------------------------------------------------------------------+--------
+ 42804 number of source and target fields in assignment does not match+| ok
+ PL/pgSQL function pf_multi(integer) line 4 at FOR over SELECT rows   +| 
+ SQL statement "SELECT pf_multi(3)"                                   +| 
+ PL/pgSQL function pf_try(text) line 4 at EXECUTE                      | 
+(1 row)
+
+SELECT pj_expect('pf_multi(integer)', 'compiled') \gset
+-- A9b: with every check on, two columns into two targets are no error
+SET plpgsql.extra_errors = 'all';
+SET plpgsql.extra_warnings = 'all';
+SELECT pf_w('SELECT pf_two(11)') \gset
+SELECT pf_two(11);
+ pf_two 
+--------
+ 66
+(1 row)
+
+SELECT pj_expect('pf_two(integer)', 'compiled') \gset
+RESET plpgsql.extra_errors;
+RESET plpgsql.extra_warnings;
+-- A11: 100000 rows, the text of the row read in the loop at row 1000 and at
+-- the last (a by-reference value that is not in a batch that was freed), and
+-- the batches are freed: the memory of the backend, which a STABLE function
+-- reads, is the same before and after the loop; so it is after 3000 loops
+-- that each leave a last batch and a batch change behind them
+CREATE TABLE pf_bt (a int, b int) WITH (autovacuum_enabled = false);
+INSERT INTO pf_bt SELECT g, g FROM generate_series(1, 100000) g;
+ANALYZE pf_bt;
+CREATE FUNCTION pf_mem() RETURNS bigint LANGUAGE plpgsql STABLE AS
+  'BEGIN RETURN (SELECT sum(total_bytes) FROM pg_get_backend_memory_contexts()); END';
+CREATE FUNCTION pf_big(n int) RETURNS text LANGUAGE :pj_lang AS $$
+DECLARE t text; c int := 0; r text := ''; m0 bigint; m1 bigint;
+BEGIN
+  SELECT pf_mem() INTO m0;
+  FOR t IN SELECT repeat('x', 100) || b FROM pf_bt WHERE a <= n LOOP c := c + 1;
+  IF c = 1000 OR c = n THEN r := r || right(t, 6) || ','; END IF; END LOOP;
+  SELECT pf_mem() INTO m1; RETURN r || c || ',' || (m1 - m0 < 8388608);
+END $$;
+CREATE FUNCTION pf_reopen(n int) RETURNS text LANGUAGE :pj_lang AS $$
+DECLARE a int; t text; c int := 0; m0 bigint;
+BEGIN
+  SELECT pf_mem() INTO m0;
+  FOR a IN SELECT g FROM generate_series(1, n) g LOOP FOR t IN SELECT repeat('y', 200) FROM generate_series(1, 25) g LOOP c := c + 1;
+  END LOOP; END LOOP; RETURN c || ',' || (pf_mem() - m0 < 8388608);
+END $$;
+SELECT pf_w('SELECT pf_big(2000), pf_reopen(20)') \gset
+SELECT pf_big(100000), pf_reopen(3000);
+          pf_big           | pf_reopen  
+---------------------------+------------
+ xx1000,100000,100000,true | 75000,true
+(1 row)
+
+SELECT pj_expect('pf_big(integer)', 'compiled') \gset
+SELECT pj_expect('pf_reopen(integer)', 'compiled') \gset
+-- B2: the shapes that stay declined, with the reasons: a query that writes,
+-- also in a CTE, and a record (EXECUTE and cursors are declined as before)
+CREATE TABLE pf_log (n int);
+CREATE FUNCTION pf_wr(n int) RETURNS int LANGUAGE :pj_lang AS $$
+DECLARE a int; s int := 0;
+BEGIN
+  FOR a IN INSERT INTO pf_log SELECT g FROM generate_series(1, n) g RETURNING pf_log.n LOOP s := s + a;
+  END LOOP; RETURN s;
+END $$;
+CREATE FUNCTION pf_wr2(n int) RETURNS int LANGUAGE :pj_lang AS $$
+DECLARE a int; s int := 0;
+BEGIN
+  FOR a IN WITH d AS (INSERT INTO pf_log SELECT g FROM generate_series(1, n) g RETURNING pf_log.n) SELECT d.n FROM d LOOP s := s + a;
+  END LOOP; RETURN s;
+END $$;
+CREATE FUNCTION pf_rcd(n int) RETURNS int LANGUAGE :pj_lang AS $$
+DECLARE r record; s int := 0;
+BEGIN
+  FOR r IN SELECT g FROM generate_series(1, n) g LOOP s := s + 1; END LOOP; RETURN s;
+END $$;
+SELECT pf_w('SELECT pf_wr(3), pf_wr2(3), pf_rcd(3)') \gset
+SELECT pf_wr(3), pf_wr2(3), pf_rcd(3);
+ pf_wr | pf_wr2 | pf_rcd 
+-------+--------+--------
+     6 |      6 |      3
+(1 row)
+
+SELECT pj_expect('pf_wr(integer)', 'declined:fors:writes') \gset
+SELECT pj_expect('pf_wr2(integer)', 'declined:fors:writes') \gset
+SELECT pj_expect('pf_rcd(integer)', 'declined:datum:record') \gset
+-- B3: TRUNCATE and ANALYZE between calls: the plan of the loop is stale and
+-- runs; the function stays compiled, with no translation
+CREATE TABLE pf_s (a int) WITH (autovacuum_enabled = false);
+INSERT INTO pf_s SELECT g FROM generate_series(1, 30) g;
+ANALYZE pf_s;
+CREATE FUNCTION pf_stale() RETURNS int LANGUAGE :pj_lang AS $$
+DECLARE a int; s int := 0;
+BEGIN
+  FOR a IN SELECT pf_s.a FROM pf_s LOOP s := s + a; END LOOP; RETURN s;
+END $$;
+SELECT pf_w('SELECT pf_stale()') \gset
+SELECT pj_expect('pf_stale()', 'compiled') \gset
+SELECT pj_mark() \gset
+TRUNCATE pf_s;
+INSERT INTO pf_s SELECT g FROM generate_series(1, 5) g;
+ANALYZE pf_s;
+SELECT pf_stale();
+ pf_stale 
+----------
+       15
+(1 row)
+
+INSERT INTO pf_s SELECT g FROM generate_series(1, 5000) g;
+ANALYZE pf_s;
+CREATE INDEX ON pf_s (a);
+SELECT pf_stale();
+ pf_stale 
+----------
+ 12502515
+(1 row)
+
+SELECT pj_delta(2, 0, NULL, 0, 0, NULL, 2, 0);
+ pj_delta 
+----------
+ 
+(1 row)
+
+-- B5: a column whose type changes after the function was admitted is
+-- converted to the target for the call that finds the plan stale, which stays
+-- compiled, also when that call returns from inside the loop with a value
+-- made from a converted one; the next call finds that the result is not what
+-- it was admitted with and translates again, and the one after finds the
+-- function declined for the cast.  The same under pj_codegen boxed.
+CREATE TABLE pf_c (a int, b int) WITH (autovacuum_enabled = false);
+INSERT INTO pf_c SELECT g, g FROM generate_series(1, 12) g;
+CREATE FUNCTION pf_conv() RETURNS text LANGUAGE :pj_lang AS $$
+DECLARE x int; s int := 0;
+BEGIN
+  FOR x IN SELECT b FROM pf_c ORDER BY a LOOP s := s + x; END LOOP; RETURN s || '/' || x;
+END $$;
+CREATE FUNCTION pf_uaf(k int) RETURNS text LANGUAGE :pj_lang AS $$
+DECLARE x int;
+BEGIN
+  FOR x IN SELECT b FROM pf_c ORDER BY a LOOP IF x = k THEN RETURN repeat('ab', 40) || x::text || 'end';
+  END IF; END LOOP; RETURN 'none';
+END $$;
+SELECT pf_w('SELECT pf_conv(), pf_uaf(5), pf_uaf(100)') \gset
+SELECT pj_expect('pf_conv()', 'compiled') \gset
+ALTER TABLE pf_c ALTER COLUMN b TYPE text USING b::text;
+SELECT pj_mark() \gset
+SELECT pf_uaf(5);
+                                        pf_uaf                                        
+--------------------------------------------------------------------------------------
+ abababababababababababababababababababababababababababababababababababababababab5end
+(1 row)
+
+SELECT pf_conv();
+ pf_conv 
+---------
+ 78/12
+(1 row)
+
+SELECT pj_delta(2, 0, NULL, 0, 0);
+ pj_delta 
+----------
+ 
+(1 row)
+
+SELECT pf_uaf(5), pf_conv();
+                                        pf_uaf                                        | pf_conv 
+--------------------------------------------------------------------------------------+---------
+ abababababababababababababababababababababababababababababababababababababababab5end | 78/12
+(1 row)
+
+SELECT pj_expect('pf_conv()', 'interpreted:guard miss') \gset
+SELECT pf_uaf(5), pf_conv();
+                                        pf_uaf                                        | pf_conv 
+--------------------------------------------------------------------------------------+---------
+ abababababababababababababababababababababababababababababababababababababababab5end | 78/12
+(1 row)
+
+SELECT pj_expect('pf_conv()', 'declined:cast') \gset
+SET plllvm.pj_codegen = boxed;
+CREATE TABLE pf_e (a int, b int) WITH (autovacuum_enabled = false);
+INSERT INTO pf_e SELECT g, g FROM generate_series(1, 12) g;
+CREATE FUNCTION pf_uaf3(k int) RETURNS text LANGUAGE :pj_lang AS $$
+DECLARE x int;
+BEGIN
+  FOR x IN SELECT b FROM pf_e ORDER BY a LOOP IF x = k THEN RETURN repeat('ef', 40) || x::text || 'end';
+  END IF; END LOOP; RETURN 'none';
+END $$;
+SELECT pf_w('SELECT pf_uaf3(5), pf_uaf3(100)') \gset
+SELECT pj_expect('pf_uaf3(integer)', 'compiled') \gset
+ALTER TABLE pf_e ALTER COLUMN b TYPE text USING b::text;
+SELECT pj_mark() \gset
+SELECT pf_uaf3(5);
+                                       pf_uaf3                                        
+--------------------------------------------------------------------------------------
+ efefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefef5end
+(1 row)
+
+SELECT pj_delta(1, 0, NULL, 0, 0);
+ pj_delta 
+----------
+ 
+(1 row)
+
+RESET plllvm.pj_codegen;
+-- the memory that the conversions of a row allocate is released with the row
+-- (the table of A11, its column now a text)
+CREATE FUNCTION pf_conv3() RETURNS bigint LANGUAGE :pj_lang AS $$
+DECLARE x int; s bigint := 0;
+BEGIN
+  FOR x IN SELECT b FROM pf_bt LOOP s := s + x; END LOOP; RETURN s;
+END $$;
+CREATE FUNCTION pf_peak() RETURNS bigint LANGUAGE plpgsql AS $$
+DECLARE p bigint := 0;
+BEGIN
+  IF current_setting('plllvm.plpgsql_jit', true) IS NOT NULL AND current_setting('debug_discard_caches')::int = 0 THEN EXECUTE 'SELECT peak_tuple_bytes FROM plllvm_pj_stats()' INTO p;
+  END IF; RETURN p;
+END $$;
+SELECT pf_w('SELECT pf_conv3()') \gset
+ALTER TABLE pf_bt ALTER COLUMN b TYPE text USING b::text;
+SELECT pf_conv3();
+  pf_conv3  
+------------
+ 5000050000
+(1 row)
+
+SELECT pf_peak() < 1048576 AS flat;
+ flat 
+------
+ t
+(1 row)
+
+-- a FOR that no call has reached when the function is translated: the call
+-- that reaches it goes back to PL/pgSQL, which plans it, and the next ones run
+-- it compiled
+CREATE FUNCTION pf_deopt(n int) RETURNS int LANGUAGE :pj_lang AS $$
+DECLARE a int; s int := 0;
+BEGIN
+  IF n = 99 THEN FOR a IN SELECT g FROM generate_series(1, 5) g LOOP s := s + a; END LOOP;
+  END IF; RETURN s + n;
+END $$;
+SELECT pf_w('SELECT pf_deopt(1), pf_deopt(2)') \gset
+SELECT pj_expect('pf_deopt(integer)', 'compiled') \gset
+SELECT pf_deopt(99);
+ pf_deopt 
+----------
+      114
+(1 row)
+
+SELECT pj_expect('pf_deopt(integer)', 'deopt') \gset
+SELECT pf_deopt(99), pf_deopt(1);
+ pf_deopt | pf_deopt 
+----------+----------
+      114 |        1
+(1 row)
+
+SELECT pj_expect('pf_deopt(integer)', 'compiled') \gset

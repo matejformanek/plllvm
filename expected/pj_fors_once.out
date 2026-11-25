@@ -1,0 +1,101 @@
+--
+-- pj_fors_once: what a compiled FOR over a query does with the plan of its
+-- query, and what it counts
+--
+-- Expected from plllvm, not from stock PL/pgSQL, and run in one variant only.
+-- The query of a FOR is one execution of SPI however many rows it has.
+--
+SET plllvm.regress_test_mode = on;
+\set VERBOSITY terse
+CREATE FUNCTION pfo_try(q text) RETURNS text LANGUAGE plpgsql AS $$
+BEGIN EXECUTE q; RETURN 'ok';
+EXCEPTION WHEN others THEN RETURN SQLSTATE || ' ' || SQLERRM; END $$;
+CREATE TABLE pfo_one (k int);
+INSERT INTO pfo_one VALUES (1);
+ANALYZE pfo_one;
+-- the shadow estate: the open of the portal analyses the query again, and
+-- reads the variables through the hooks of PL/pgSQL (pj_sql_replan does it at
+-- every open, and resets every plan, so the function has no expression of
+-- its own that would miss)
+CREATE FUNCTION pfo_re(n int, t text) RETURNS int LANGUAGE plpgsql_jit AS $$
+DECLARE a int; x int;
+BEGIN
+  FOR a IN SELECT g FROM generate_series(1, n) g, pfo_one WHERE tag <> t LOOP
+    SELECT coalesce(x, 0) + a INTO x FROM pfo_one WHERE tag <> t;
+  END LOOP;
+  RETURN x;
+END $$;
+ALTER TABLE pfo_one ADD COLUMN tag text DEFAULT '1';
+SELECT pfo_re(11, 'x'), pfo_re(61, 'x'), pfo_re(0, 'x');
+ pfo_re | pfo_re | pfo_re 
+--------+--------+--------
+     66 |   1891 |       
+(1 row)
+
+SELECT pj_expect('pfo_re(integer,text)', 'compiled') \gset
+SET plllvm.debug_inject = pj_sql_replan;
+SELECT pj_mark() \gset
+SELECT pfo_re(11, 'x'), pfo_re(61, 'x'), pfo_re(0, 'x'), pfo_re(61, '1');
+ pfo_re | pfo_re | pfo_re | pfo_re 
+--------+--------+--------+--------
+     66 |   1891 |        |       
+(1 row)
+
+SELECT pj_delta(4, 0, NULL, 0, 0, NULL, 76, 0);
+ pj_delta 
+----------
+ 
+(1 row)
+
+RESET plllvm.debug_inject;
+-- a privilege lost inside the query: the next fetch, whether the open's or a
+-- later batch's, finds it and raises 42501 at once, as for a statement (see
+-- pj_sql_once); PL/pgSQL keeps the state it built and answers.  The callee
+-- revokes above 100: the first row for m = 1000, which the loop leaves at
+-- once, and the 11th, in the second batch, for m = 10
+CREATE ROLE regress_pfo_r1;
+CREATE FUNCTION pfo_rev(k int) RETURNS int LANGUAGE plpgsql VOLATILE SECURITY DEFINER AS $$
+BEGIN
+  IF k > 100 THEN EXECUTE 'REVOKE EXECUTE ON FUNCTION int4pl(int4, int4) FROM PUBLIC'; END IF;
+  RETURN k;
+END $$;
+CREATE FUNCTION pfo_revw(k int) RETURNS int LANGUAGE plpgsql STABLE AS $$
+BEGIN RETURN pfo_rev(k); END $$;
+CREATE FUNCTION pfo_t2(n int, m int) RETURNS int LANGUAGE plpgsql_jit AS $$
+DECLARE a int; s int := 0;
+BEGIN
+  FOR a IN SELECT pfo_revw(g * m) FROM generate_series(1, n) g LOOP
+    s := s + 1;
+    EXIT WHEN m > 100;
+  END LOOP;
+  RETURN s;
+END $$;
+GRANT EXECUTE ON FUNCTION pfo_t2(int, int) TO regress_pfo_r1;
+SELECT pfo_t2(5, 1), pfo_t2(5, 1), pfo_t2(5, 1);
+ pfo_t2 | pfo_t2 | pfo_t2 
+--------+--------+--------
+      5 |      5 |      5
+(1 row)
+
+SELECT pj_expect('pfo_t2(integer,integer)', 'compiled') \gset
+BEGIN;
+SET ROLE regress_pfo_r1;
+SELECT pfo_try('SELECT pfo_t2(5, 1000)');
+                   pfo_try                   
+---------------------------------------------
+ 42501 permission denied for function int4pl
+(1 row)
+
+ROLLBACK;
+BEGIN;
+SET ROLE regress_pfo_r1;
+SELECT pfo_try('SELECT pfo_t2(30, 10)');
+                   pfo_try                   
+---------------------------------------------
+ 42501 permission denied for function int4pl
+(1 row)
+
+ROLLBACK;
+GRANT EXECUTE ON FUNCTION int4pl(int4, int4) TO PUBLIC;
+DROP OWNED BY regress_pfo_r1;
+DROP ROLE regress_pfo_r1;
