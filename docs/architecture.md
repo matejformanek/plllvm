@@ -177,17 +177,41 @@ Only `plllvm_jit.c` and `plllvm_error.cpp` include LLVM headers.
   PL/pgSQL's.
 * An entry is stale when its function's `fn_cxt` has gone: a reset callback
   sets the flag, and the next lookup of the same pointer (funccache reuses a
-  struct in place) starts a new entry. A declined function is found by its
-  `fn_extra` without compiling again.
-* `plllvm.plpgsql_jit` off sends the call to PL/pgSQL before any entry is
-  looked at.
-* The first call of a function is PL/pgSQL's, which plans what it runs. The
-  second reads the planned trees (`expr_simple_expr`) of the expressions the
-  run can reach and translates the function if it is in scope; a function
-  out of scope is declined with the reason and stays in PL/pgSQL until its
-  entry is stale. The translation runs in a subtransaction with no frame of
-  the function on the stack: an ERROR declines the function, a cancel is
-  raised again.
+  struct in place) starts a new entry.
+* A declined function has a route: a record in an inline hash table
+  (simplehash) keyed by function, input collation and trigger, which lets the
+  handler send the call to `plpgsql_call_handler()` without our own
+  `plpgsql_compile()` and its `pg_proc` lookup. Where the optimiser makes the
+  call a tail call it is a branch (checked in the -O2 objdump). A route is
+  stamped with a counter that every `PROCOID` invalidation bumps, and is
+  ignored when the stamp differs. One made after an invalidation, before
+  PL/pgSQL has read `pg_proc` again, may name a struct that PL/pgSQL rebuilds
+  in the call itself: the call is PL/pgSQL's either way, and the entry goes
+  stale. A call takes a route only when it runs the struct the route was made
+  for: `fn_extra` is that struct; or `fn_extra` is NULL, the route was made
+  from a call with none too, and the struct still shows a funccache key. The
+  counter moves whenever an entry is built or its function goes, which is
+  also when funccache rebuilds a function in place that may run a compiled
+  frame. The entry must be declined and no compiled frame of it may run.
+  Where funccache has a struct per argument types (polymorphic functions,
+  RECORD arguments) only the first of the two applies, so a call site that
+  keeps its `fn_extra` is routed and a fresh one is not.
+  `plllvm_pj_stats().routed` counts the calls that took a route.
+* `plllvm.plpgsql_jit` off, or a foreign plugin, sends the call to PL/pgSQL
+  before any entry is looked at, unless a compiled frame runs in the backend:
+  then the entry is identified, and the expressions its frames are running are
+  marked busy, as for any call from inside them.
+* The first call of a function is PL/pgSQL's, which plans what it runs. A
+  function that its parse tree puts out of scope is declined at that call,
+  with the reason: the call counts as a decline, and `last_path` is
+  `declined:<reason>`, not `interpreted:first call`. This does not wait for
+  the conditions of a translation (no running frame, no parallel mode). For
+  another function, the second call reads the planned trees
+  (`expr_simple_expr`) of the expressions the run can reach and translates it
+  if it is in scope; one out of scope is declined with the reason. A declined
+  function stays in PL/pgSQL until its entry is stale. The translation runs
+  in a subtransaction with no frame of the function on the stack: an ERROR
+  declines the function, a cancel is raised again.
 * The code is `i64 (fcinfo, ctx)` with a slot (Datum and null flag) per
   variable. Before each step that can raise it stores an index of a position
   table in `ctx`, from which the handler writes the error context of
