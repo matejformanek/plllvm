@@ -393,7 +393,7 @@ Only `plllvm_jit.c` and `plllvm_error.cpp` include LLVM headers.
     shadow estate, built once per harvest from copies of the variables and
     records (`copy_plpgsql_datums()`; the function's own datums are never
     handed out), stands in for it while SPI runs, and is taken away in
-    `PG_FINALLY`.
+    `PG_FINALLY`, with what `func->cur_estate` held before.
   * SPI is connected, atomically, by the first statement of a call and
     finished by `run()` after the result is copied out. FOUND takes the answer
     of the command code as PL/pgSQL gives it; a SELECT with no `INTO` raises
@@ -433,6 +433,24 @@ Only `plllvm_jit.c` and `plllvm_error.cpp` include LLVM headers.
     appear after admission (a table has none, and a result column of those
     types has no variable of its type to be admitted for), so this is stated
     and not pinned.
+  * `FOR` over a query with scalar targets (a list of variables, or one) runs
+    on a portal that the code opens as `exec_run_select()` does, on
+    `expr->plan` with the same parameter list as any statement, and takes the
+    rows as `exec_for_query()` does: a batch of 10, then of 50 (a compiled call
+    is atomic, so there is no other way), so that a query that raises does so
+    after the same number of iterations as in PL/pgSQL. The batch is the
+    helper's own (`PjPortalState` in the slot); `SPI_tuptable` is not read
+    after a fetch, since a statement of the body replaces it. The row goes to
+    the targets as for an `INTO` (`sql_move_row()`), with none of its
+    cardinality checks, and with the NULLs of `exec_move_row()` and its NOT NULL
+    check for no row. The portal is pinned while the loop runs and closed by
+    every way out of it: the end, `EXIT`, a `CONTINUE` of a loop outside, and
+    `RETURN` (after its value), innermost first, and FOUND is set before the
+    close. An error leaves the portal to the abort, as in PL/pgSQL; a call
+    that returns with one open raises an internal error. A plan that is stale
+    at the entry is run, as for any read, and a column whose type changed is
+    converted per row. A query that writes (`fors:writes`), `FOR` over
+    `EXECUTE` or a cursor, and a record target are declined.
   * A function whose tables are truncated and analysed before every call (a
     benchmark's reset) finds the plans of its statements stale at each call
     start, so no translation could see them valid. A call that finds only SQL

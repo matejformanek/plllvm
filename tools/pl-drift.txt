@@ -17,3 +17,8 @@ src/pl/plpgsql/src/pl_exec.c exec_stmt_execsql c9fc8389d6e5a069
 src/pl/plpgsql/src/pl_exec.c exec_move_row_from_fields 27a54c7d7f0ac7ea  # the ROW branch, for SELECT INTO
 src/pl/plpgsql/src/pl_exec.c exec_cast_value 4271fc2490f90239
 src/pl/plpgsql/src/pl_exec.c do_cast_value a13d9dc3698a6e76
+
+# FOR over a query (src/plllvm_pj_sql.c)
+src/pl/plpgsql/src/pl_exec.c exec_stmt_fors 9ea7f42e1c096bdb  # the order: open, loop, close
+src/pl/plpgsql/src/pl_exec.c exec_run_select dc8e0d46017a3b65  # the open of the portal on the plan, readonly, no scroll
+src/pl/plpgsql/src/pl_exec.c exec_for_query eabf4ceb9a21665b  # batches of 10 and 50, the NULL move, unpin, FOUND last

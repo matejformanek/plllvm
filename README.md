@@ -224,7 +224,8 @@ with labels, `RETURN`, `RAISE` without `USING`, and `SELECT` *expression*
 `INTO` one variable, the form PL/pgSQL evaluates without SPI, `PERFORM`, a
 statement with no `INTO` and `SELECT INTO` of scalar variables (one or several,
 `STRICT` or not, the columns of the type of the variables; a record target is
-declined), and `INSERT`, `UPDATE` and `DELETE`, with `RETURNING INTO` of scalar
+declined), `FOR` over a query with scalar targets (the rows from a portal
+on PL/pgSQL's plan, in batches as PL/pgSQL takes them), and `INSERT`, `UPDATE` and `DELETE`, with `RETURNING INTO` of scalar
 variables, run by SPI on PL/pgSQL's own plan (no VOLATILE function but the
 built-in ones that change no plan input, not under `#variable_conflict
 use_column` or `#print_strict_params on`, and a table that is written has no
@@ -321,8 +322,8 @@ collation does. The prefix `plllvm.` is reserved.
   execute hook runs once per user and invalidation, not per query, and an
   fmgr hook's decision (`FmgrHookIsNeeded`, e.g. after `SECURITY LABEL`) is
   taken only when a site is rebuilt.
-* SQL: `PERFORM`, `SELECT INTO`, `INSERT`, `UPDATE` and `DELETE`; no
-  cursors, `MERGE`, other commands or dynamic SQL. "Plain SELECT" is checked
+* SQL: `PERFORM`, `SELECT INTO`, `FOR` over a query, `INSERT`, `UPDATE` and
+  `DELETE`; no cursors, no `FOR` over `EXECUTE` or with a record target, `MERGE`, other commands or dynamic SQL. "Plain SELECT" is checked
   at the top level only, so a VOLATILE function may run `FOR UPDATE` in a
   subquery (a STABLE one is refused by SPI's read-only check).
 * A compiled call locks the tables its `INSERT`, `UPDATE` and `DELETE`

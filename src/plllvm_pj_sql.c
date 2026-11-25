@@ -81,7 +81,18 @@ typedef struct PjShadow
 	int		   *recs;			/* dno of each copy of a record */
 } PjShadow;
 
+/* what shadow_enter() puts aside */
+typedef struct PjShadowSave
+{
+	PLpgSQL_execstate *cur_estate;
+	MemoryContext datum_cxt;
+} PjShadowSave;
+
 static PjShadow *shadow_build(PLpgSQL_function *func, MemoryContext cxt);
+static void shadow_enter(PjShadow *shadow, PjLevel *lv,
+						 PLpgSQL_function *func, PjShadowSave *save);
+static void shadow_leave(PjShadow *shadow, PLpgSQL_function *func,
+						 PjShadowSave *save);
 static void sql_connect(PjCtx *ctx);
 
 /* what the walk over the queries of a plan finds */
@@ -112,10 +123,38 @@ static bool sql_facts_ok(PjSql *sql);
 static bool sql_lock_writes(Node *node, void *context);
 static const char *sql_into_admit(PLpgSQL_function *func,
 								  CachedPlanSource *psrc,
-								  PLpgSQL_stmt_execsql *stmt);
+								  PLpgSQL_row *row);
 static bool sql_result_same(PjSql *sql, CachedPlanSource *psrc);
 static void sql_xchecks(PjCtx *ctx);
 static void sql_move(PjCtx *ctx, PjSql *sql, PjSlot *slot);
+static void sql_move_row(PjCtx *ctx, PjSql *sql, PjSlot *slot,
+						 SPITupleTable *tuptab, int row);
+
+/*
+ * The hooks of an analysis that an SPI call needs read cur_estate, and a
+ * record they instantiate is made in its datum_context.  The shadow is put
+ * there for the call, and taken out of it whatever happens, with what was
+ * there (the estate of an interpreted frame of the same function, below,
+ * that an error must not leave pointing at ours) and the records of the copy.
+ */
+static void
+shadow_enter(PjShadow *shadow, PjLevel *lv, PLpgSQL_function *func,
+			 PjShadowSave *save)
+{
+	save->cur_estate = func->cur_estate;
+	save->datum_cxt = shadow->estate->datum_context;
+	func->cur_estate = shadow->estate;
+	shadow->estate->datum_context = lv->datum_cxt;
+}
+
+static void
+shadow_leave(PjShadow *shadow, PLpgSQL_function *func, PjShadowSave *save)
+{
+	func->cur_estate = save->cur_estate;
+	shadow->estate->datum_context = save->datum_cxt;
+	for (int i = 0; i < shadow->nrecs; i++)
+		((PLpgSQL_rec *) shadow->estate->datums[shadow->recs[i]])->erh = NULL;
+}
 
 /*
  * The datums of a function as copy_plpgsql_datums() makes them for a call:
@@ -561,7 +600,7 @@ sql_facts_ok(PjSql *sql)
 
 	/* the lists are in the caller's context, which lasts as long as the call */
 	if (bms_equal(sql->expr->paramnos, sql->paramnos) &&
-		(!sql->into || sql_result_same(sql, psrc)) &&
+		(sql->ntargets == 0 || sql_result_same(sql, psrc)) &&
 		(!sql->writes || !psrc->dependsOnRLS) &&
 		!sql_scan_walker((Node *) psrc->query_list, &facts) &&
 		(!sql_cmd_writes(psrc) || facts.result) &&
@@ -641,8 +680,22 @@ plllvm_pj_sql_harvest(PLpgSQL_function *func, PjHarvest *h, PjExpr *pe)
 		return "relation:rls";
 	if (stmt != NULL && stmt->into)
 	{
-		const char *reason = sql_into_admit(func, psrc, stmt);
+		const char *reason;
 
+		if (func->print_strict_params)
+			return "print_strict_params";
+		reason = sql_into_admit(func, psrc, (PLpgSQL_row *) stmt->target);
+		if (reason != NULL)
+			return reason;
+	}
+	if (pe->fors_stmt != NULL)
+	{
+		const char *reason;
+
+		/* a portal that writes runs its command at the first fetch */
+		if (facts.writes || sql_cmd_writes(psrc))
+			return "fors:writes";
+		reason = sql_into_admit(func, psrc, (PLpgSQL_row *) pe->fors_stmt->var);
 		if (reason != NULL)
 			return reason;
 	}
@@ -651,14 +704,15 @@ plllvm_pj_sql_harvest(PLpgSQL_function *func, PjHarvest *h, PjExpr *pe)
 	sql = palloc0_object(PjSql);
 	sql->expr = expr;
 	sql->kind = pe->sql_kind;
-	if (stmt != NULL && stmt->into)
+	if ((stmt != NULL && stmt->into) || pe->fors_stmt != NULL)
 	{
-		PLpgSQL_row *row = (PLpgSQL_row *) stmt->target;
+		PLpgSQL_row *row = stmt != NULL ? (PLpgSQL_row *) stmt->target :
+			(PLpgSQL_row *) pe->fors_stmt->var;
 		TupleDesc	desc = psrc->resultDesc;
 
-		sql->into = true;
-		sql->strict = stmt->strict;
-		sql->mod = sql_cmd_writes(psrc);
+		sql->into = stmt != NULL;
+		sql->strict = stmt != NULL && stmt->strict;
+		sql->mod = stmt != NULL && sql_cmd_writes(psrc);
 		sql->ntargets = row->nfields;
 		sql->targets = palloc_array(int, row->nfields);
 		memcpy(sql->targets, row->varnos, sizeof(int) * row->nfields);
@@ -693,24 +747,21 @@ plllvm_pj_sql_harvest(PLpgSQL_function *func, PjHarvest *h, PjExpr *pe)
 }
 
 /*
- * What an INTO may be, as the code stores it: the columns that the variables
- * take come in their type, so that no value needs a cast, and the variables
+ * What the targets of an INTO or a FOR may be, as the code stores it: the
+ * columns that the variables take come in their type, so that no value needs a cast, and the variables
  * take a NULL without one.  A cast that the interpreter makes is its own:
  * the function is declined.  A zero-row result and a column that is missing
  * give a NULL of unknown type, which exec_cast_value() turns into the NULL of
  * the type by its input function; that is no work only if the function is
- * strict.  print_strict_params adds a DETAIL that is not ported.
+ * strict.
  */
 static const char *
 sql_into_admit(PLpgSQL_function *func, CachedPlanSource *psrc,
-			   PLpgSQL_stmt_execsql *stmt)
+			   PLpgSQL_row *row)
 {
-	PLpgSQL_row *row = (PLpgSQL_row *) stmt->target;
 	TupleDesc	desc = psrc->resultDesc;
 	int			anum = 0;
 
-	if (func->print_strict_params)
-		return "print_strict_params";
 	if (desc == NULL)
 		return "statement:SQL statement";
 
@@ -896,7 +947,8 @@ sql_connect(PjCtx *ctx)
 
 /*
  * The end of a call that ran statements.  The caller has copied the result
- * out of the memory SPI frees.
+ * out of the memory SPI frees.  A portal of a FOR that is still open is a
+ * path of the code that did not close it.
  */
 void
 plllvm_pj_sql_finish(PjCtx *ctx)
@@ -905,6 +957,10 @@ plllvm_pj_sql_finish(PjCtx *ctx)
 
 	if (!ctx->spi)
 		return;
+
+	/* every way out of a loop closes its portal; an error is the abort's */
+	if (ctx->fors_open != 0)
+		elog(ERROR, "plpgsql_jit: a FOR over a query was left open");
 	ctx->spi = false;
 	if (SPI_finish() != SPI_OK_FINISH)
 		elog(ERROR, "SPI_finish failed");
@@ -964,8 +1020,7 @@ plllvm_pj_sql(PjCtx *ctx, int32 idx)
 	PLpgSQL_function *func = expr->func;
 	PjLevel    *lv = plllvm_pj_level(ctx);
 	PjShadow   *shadow = h->shadow;
-	PLpgSQL_execstate *saved;
-	MemoryContext saved_datum_cxt;
+	PjShadowSave save;
 	MemoryContext oldcxt = CurrentMemoryContext;
 	ParamListInfo li = NULL;
 	long		tcount = 0;
@@ -995,27 +1050,15 @@ plllvm_pj_sql(PjCtx *ctx, int32 idx)
 	if (!bms_is_empty(sql->paramnos))
 		li = lv->slots[idx].sql_params;
 
-	/*
-	 * The hooks of an analysis that this execution needs read cur_estate, and
-	 * a record they instantiate is made in its datum_context.  Restored
-	 * whatever happens, the records of the copy with it: a frame of the same
-	 * function below may be running.
-	 */
-	saved = func->cur_estate;
-	saved_datum_cxt = shadow->estate->datum_context;
+	shadow_enter(shadow, lv, func, &save);
 	PG_TRY();
 	{
-		func->cur_estate = shadow->estate;
-		shadow->estate->datum_context = lv->datum_cxt;
 		rc = SPI_execute_plan_with_paramlist(expr->plan, li, func->fn_readonly,
 											 tcount);
 	}
 	PG_FINALLY();
 	{
-		func->cur_estate = saved;
-		shadow->estate->datum_context = saved_datum_cxt;
-		for (int i = 0; i < shadow->nrecs; i++)
-			((PLpgSQL_rec *) shadow->estate->datums[shadow->recs[i]])->erh = NULL;
+		shadow_leave(shadow, func, &save);
 	}
 	PG_END_TRY();
 	MemoryContextSwitchTo(oldcxt);
@@ -1215,15 +1258,7 @@ sql_xchecks(PjCtx *ctx)
 static void
 sql_move(PjCtx *ctx, PjSql *sql, PjSlot *slot)
 {
-	PjSqlOut   *out = slot->sql_out;
 	SPITupleTable *tuptab = SPI_tuptable;
-	PLpgSQL_function *func = sql->expr->func;
-	TupleDesc	tupdesc = NULL;
-	Datum		values_local[64];
-	bool		nulls_local[64];
-	Datum	   *values = values_local;
-	bool	   *nulls = nulls_local;
-	int			anum = 0;
 
 	if (tuptab == NULL)
 		ereport(ERROR,
@@ -1237,21 +1272,38 @@ sql_move(PjCtx *ctx, PjSql *sql, PjSlot *slot)
 					(errcode(ERRCODE_NO_DATA_FOUND),
 					 errmsg("query returned no rows")));
 	}
-	else
-	{
-		if (SPI_processed > 1 && (sql->strict || sql->mod || ctx->xrows != 0))
-			ereport((sql->strict || sql->mod) ? ERROR : ctx->xrows,
-					(errcode(ERRCODE_TOO_MANY_ROWS),
-					 errmsg("query returned more than one row"),
-					 errhint("Make sure the query returns a single row, or use LIMIT 1.")));
+	else if (SPI_processed > 1 && (sql->strict || sql->mod || ctx->xrows != 0))
+		ereport((sql->strict || sql->mod) ? ERROR : ctx->xrows,
+				(errcode(ERRCODE_TOO_MANY_ROWS),
+				 errmsg("query returned more than one row"),
+				 errhint("Make sure the query returns a single row, or use LIMIT 1.")));
 
+	sql_move_row(ctx, sql, slot, tuptab, SPI_processed == 0 ? -1 : 0);
+}
+
+/* row of tuptab into the targets; -1: no row, NULLs */
+static void
+sql_move_row(PjCtx *ctx, PjSql *sql, PjSlot *slot, SPITupleTable *tuptab,
+			 int row)
+{
+	PjSqlOut   *out = slot->sql_out;
+	PLpgSQL_function *func = sql->expr->func;
+	TupleDesc	tupdesc = NULL;
+	Datum		values_local[64];
+	bool		nulls_local[64];
+	Datum	   *values = values_local;
+	bool	   *nulls = nulls_local;
+	int			anum = 0;
+
+	if (row >= 0)
+	{
 		tupdesc = tuptab->tupdesc;
 		if (tupdesc->natts > lengthof(values_local))
 		{
 			values = palloc_array(Datum, tupdesc->natts);
 			nulls = palloc_array(bool, tupdesc->natts);
 		}
-		heap_deform_tuple(tuptab->vals[0], tupdesc, values, nulls);
+		heap_deform_tuple(tuptab->vals[row], tupdesc, values, nulls);
 	}
 
 	for (int i = 0; i < sql->ntargets; i++)
@@ -1350,4 +1402,166 @@ plllvm_pj_convert(PjCtx *ctx, Datum value, bool *isnull, Oid srctype,
 	MemoryContextSwitchTo(oldcxt);
 
 	return value;
+}
+
+
+/*
+ * A FOR over a query: the portal, opened on the plan PL/pgSQL prepared as
+ * exec_run_select() does, and the rows of it in batches, as exec_for_query()
+ * takes them.  A compiled call is atomic (a procedure is declined), so that
+ * is a batch of 10, then of 50, and a query that raises does so after as many
+ * iterations of the body as there.  The batch is the helper's own;
+ * SPI_tuptable is not read after a fetch, since a statement of the body
+ * replaces it.
+ */
+#define PJ_FORS_FIRST_BATCH 10
+#define PJ_FORS_BATCH 50
+
+static void
+fors_fetch(PjPortalState *ps, long count)
+{
+	SPI_cursor_fetch(ps->portal, true, count);
+	ps->tuptab = SPI_tuptable;
+	ps->n = SPI_processed;
+	ps->i = 0;
+	SPI_tuptable = NULL;
+}
+
+/* the row i of the batch, or NULLs for no row, to the targets */
+static void
+fors_move(PjCtx *ctx, PjSql *sql, PjSlot *slot, PjPortalState *ps)
+{
+	if (ps->n > 0)
+		sql_move_row(ctx, sql, slot, ps->tuptab, (int) ps->i);
+	else
+		sql_move_row(ctx, sql, slot, NULL, -1);
+}
+
+/*
+ * The batch.  What the conversions of its row allocated stays in the
+ * per-tuple memory: the value of a RETURN of the loop may be in it, and the
+ * next row, or the end of the call, frees it.
+ */
+static void
+fors_release(PjPortalState *ps)
+{
+	if (ps->tuptab != NULL)
+		SPI_freetuptable(ps->tuptab);
+	ps->tuptab = NULL;
+}
+
+/*
+ * Open the portal of statement idx and move its first row; the answer is
+ * whether there was one.
+ */
+int32
+plllvm_pj_fors_open(PjCtx *ctx, int32 idx)
+{
+	PjHarvest  *h = ctx->harvest;
+	const PjExpr *pe = list_nth(h->exprs, idx);
+	PjSql	   *sql = pe->sql;
+	PLpgSQL_expr *expr = sql->expr;
+	PLpgSQL_function *func = expr->func;
+	PjLevel    *lv = plllvm_pj_level(ctx);
+	PjSlot	   *slot = &lv->slots[idx];
+	PjShadow   *shadow = h->shadow;
+	PjShadowSave save;
+	PjPortalState *ps;
+	MemoryContext oldcxt = CurrentMemoryContext;
+	ParamListInfo li = NULL;
+	Portal		portal = NULL;
+
+	sql_connect(ctx);
+	ctx->evaluated = true;
+	plllvm_pj_count.sql_execs++;
+	sql_xchecks(ctx);
+
+	/* for the tests: every execution analyses its statement again */
+	if (plllvm_debug_inject == PLLLVM_INJECT_PJ_SQL_REPLAN)
+		ResetPlanCache();
+
+	/* NULL, not an empty list, without parameters: the plan stays generic */
+	if (!bms_is_empty(sql->paramnos))
+		li = slot->sql_params;
+
+	if (slot->portal == NULL)
+	{
+		MemoryContext cxt = MemoryContextSwitchTo(lv->cxt);
+
+		slot->portal = palloc0_object(PjPortalState);
+		slot->sql_out = palloc_array(PjSqlOut, sql->ntargets);
+		MemoryContextSwitchTo(cxt);
+	}
+	ps = slot->portal;
+	ps->tuptab = NULL;
+
+	/* only the open can analyse the query again */
+	shadow_enter(shadow, lv, func, &save);
+	PG_TRY();
+	{
+		portal = SPI_cursor_open_with_paramlist(NULL, expr->plan, li,
+												func->fn_readonly);
+	}
+	PG_FINALLY();
+	{
+		shadow_leave(shadow, func, &save);
+	}
+	PG_END_TRY();
+	MemoryContextSwitchTo(oldcxt);
+
+	/* as exec_for_query(): pinned, so that nothing in the body closes it */
+	PinPortal(portal);
+	ctx->fors_open++;
+	ps->portal = portal;
+
+	fors_fetch(ps, PJ_FORS_FIRST_BATCH);
+	plllvm_pj_key_recheck(ctx, pe);
+	fors_move(ctx, sql, slot, ps);
+	return ps->n > 0;
+}
+
+/* the next row, or none: 0 */
+int32
+plllvm_pj_fors_next(PjCtx *ctx, int32 idx)
+{
+	PjHarvest  *h = ctx->harvest;
+	const PjExpr *pe = list_nth(h->exprs, idx);
+	PjSlot	   *slot = &plllvm_pj_level(ctx)->slots[idx];
+	PjPortalState *ps = slot->portal;
+
+	if (slot->sql_converted)
+	{
+		plllvm_pj_boxed_reset(ctx);
+		slot->sql_converted = false;
+	}
+
+	if (++ps->i >= ps->n)
+	{
+		fors_release(ps);
+		fors_fetch(ps, PJ_FORS_BATCH);
+		plllvm_pj_key_recheck(ctx, pe);
+		if (ps->n == 0)
+			return 0;
+	}
+	fors_move(ctx, pe->sql, slot, ps);
+	return 1;
+}
+
+/*
+ * The loop is left, by its end or by an EXIT, a CONTINUE of a loop outside
+ * or a RETURN.  An error leaves the portal to the abort of the transaction,
+ * as in PL/pgSQL.  Unpinned before it is closed, so that a close that fails
+ * leaves nothing pinned.
+ */
+void
+plllvm_pj_fors_close(PjCtx *ctx, int32 idx)
+{
+	PjSlot	   *slot = &plllvm_pj_level(ctx)->slots[idx];
+	PjPortalState *ps = slot->portal;
+
+	fors_release(ps);
+	UnpinPortal(ps->portal);
+	SPI_cursor_close(ps->portal);
+	ps->portal = NULL;
+	ctx->fors_open--;
 }

@@ -103,6 +103,8 @@ typedef struct PjFrame
 	const char *label;
 	bool		loop;
 	bool		fori;
+	bool		fors;			/* a FOR over a query, emit only ... */
+	int			fors_idx;		/* ... and its expression */
 	const char *exit_to;		/* emit only */
 	const char *cont_to;
 } PjFrame;
@@ -143,6 +145,8 @@ static HTAB *casts = NULL;
 
 static const char *walk_stmts(PjScopeWalk *w, List *stmts);
 static const char *walk_stmt(PjScopeWalk *w, PLpgSQL_stmt *stmt);
+static const char *row_targets_reason(PjScopeWalk *w, PLpgSQL_function *func,
+									  PLpgSQL_row *row);
 static const char *walk_block(PjScopeWalk *w, PLpgSQL_stmt_block *block);
 static const char *var_reason(PLpgSQL_function *func, int dno);
 static const char *out_row_reason(PLpgSQL_function *func, int dno);
@@ -224,6 +228,9 @@ static void case_discard(PjEmit *em, PLpgSQL_var *var);
 static void emit_if(PjEmit *em, PLpgSQL_stmt_if *stmt);
 static void emit_loop(PjEmit *em, PLpgSQL_stmt *stmt);
 static void emit_fori(PjEmit *em, PLpgSQL_stmt_fori *stmt);
+static void emit_fors(PjEmit *em, PLpgSQL_stmt_fors *stmt);
+static void emit_into_store(PjEmit *em, PLpgSQL_row *row, int index);
+static void fors_close_crossed(PjEmit *em, PjFrame *target);
 static void emit_exit(PjEmit *em, PLpgSQL_stmt_exit *stmt);
 static void emit_return(PjEmit *em, PLpgSQL_stmt_return *stmt);
 static void return_row(PjEmit *em, const char **datum);
@@ -258,6 +265,23 @@ static void branch_if(PjEmit *em, const char *cond, const char *yes,
 					  const char *no);
 static void reopen(PjEmit *em);
 static const char *field_ptr(plllvm_ir *ir, const char *base, size_t offset);
+
+
+/* the variables of an INTO or a FOR are scalars we keep in a slot */
+static const char *
+row_targets_reason(PjScopeWalk *w, PLpgSQL_function *func, PLpgSQL_row *row)
+{
+	for (int i = 0; i < row->nfields; i++)
+	{
+		const char *reason = var_reason(func, row->varnos[i]);
+
+		if (reason != NULL)
+			return reason;
+		if (bms_is_member(row->varnos[i], w->case_vars))
+			return "datum:case variable";
+	}
+	return NULL;
+}
 
 /*
  * What the function does, as far as this translator goes
@@ -412,6 +436,27 @@ walk_stmt(PjScopeWalk *w, PLpgSQL_stmt *stmt)
 				return reason;
 			}
 
+		case PLPGSQL_STMT_FORS:
+			{
+				PLpgSQL_stmt_fors *fs = (PLpgSQL_stmt_fors *) stmt;
+				PLpgSQL_row *row;
+
+				if (fs->var->dtype != PLPGSQL_DTYPE_ROW)
+					return "datum:record";
+				row = (PLpgSQL_row *) fs->var;
+				reason = row_targets_reason(w, func, row);
+				if (reason != NULL)
+					return reason;
+				reason = scope_sql(w, fs->query, PJ_SQL_FORS);
+				if (reason != NULL)
+					return reason;
+				((PjExpr *) llast(w->scope->exprs))->fors_stmt = fs;
+				frame_push(&w->frames, fs->label, true, false)->fors = true;
+				reason = walk_stmts(w, fs->body);
+				frame_pop(&w->frames);
+				return reason;
+			}
+
 		case PLPGSQL_STMT_EXIT:
 			{
 				PLpgSQL_stmt_exit *ex = (PLpgSQL_stmt_exit *) stmt;
@@ -531,14 +576,9 @@ walk_stmt(PjScopeWalk *w, PLpgSQL_stmt *stmt)
 					sql->target->dtype != PLPGSQL_DTYPE_ROW)
 					return "datum:record";
 				row = (PLpgSQL_row *) sql->target;
-				for (int i = 0; i < row->nfields; i++)
-				{
-					reason = var_reason(func, row->varnos[i]);
-					if (reason != NULL)
-						return reason;
-					if (bms_is_member(row->varnos[i], w->case_vars))
-						return "datum:case variable";
-				}
+				reason = row_targets_reason(w, func, row);
+				if (reason != NULL)
+					return reason;
 
 				/*
 				 * A query into one variable that PL/pgSQL evaluates as an
@@ -760,7 +800,7 @@ frame_find(List *frames, const char *label, bool loop_only, bool *crossed_for)
 			(frame->label != NULL && strcmp(frame->label, label) == 0 &&
 			 (frame->loop || !loop_only)))
 			return frame;
-		if (frame->fori && crossed_for != NULL)
+		if ((frame->fori || frame->fors) && crossed_for != NULL)
 			*crossed_for = true;
 	}
 
@@ -2349,6 +2389,9 @@ emit_stmt(PjEmit *em, PLpgSQL_stmt *stmt)
 		case PLPGSQL_STMT_FORI:
 			emit_fori(em, (PLpgSQL_stmt_fori *) stmt);
 			break;
+		case PLPGSQL_STMT_FORS:
+			emit_fors(em, (PLpgSQL_stmt_fors *) stmt);
+			break;
 		case PLPGSQL_STMT_EXIT:
 			emit_exit(em, (PLpgSQL_stmt_exit *) stmt);
 			break;
@@ -2531,32 +2574,7 @@ emit_sql(PjEmit *em, PLpgSQL_expr *expr, PLpgSQL_stmt_execsql *stmt)
 	 * converted
 	 */
 	if (stmt != NULL && stmt->into)
-	{
-		PLpgSQL_row *row = (PLpgSQL_row *) stmt->target;
-		const char *out = plllvm_ir_tmp(ir);
-
-		plllvm_ir_declare(ir, "declare ptr @plllvm_pj_sql_out(ptr, i32)");
-		plllvm_ir_emit(ir, "%s = call ptr @plllvm_pj_sql_out(ptr %%ctx, i32 %d)",
-					   out, index);
-		for (int i = 0; i < row->nfields; i++)
-		{
-			PLpgSQL_var *var = (PLpgSQL_var *) em->func->datums[row->varnos[i]];
-			const char *value = plllvm_ir_tmp(ir);
-			const char *flag = plllvm_ir_tmp(ir);
-			const char *isnull = plllvm_ir_tmp(ir);
-			size_t		at = i * sizeof(PjSqlOut);
-
-			plllvm_ir_emit(ir, "%s = load i64, ptr %s", value,
-						   field_ptr(ir, out, at + offsetof(PjSqlOut, value)));
-			plllvm_ir_emit(ir, "%s = load i8, ptr %s", flag,
-						   field_ptr(ir, out, at + offsetof(PjSqlOut, isnull)));
-			plllvm_ir_emit(ir, "%s = trunc i8 %s to i1", isnull, flag);
-			if (var->datatype->typbyval)
-				store_var(em, var->dno, value, isnull);
-			else
-				assign_var(em, var, value, isnull, false);
-		}
-	}
+		emit_into_store(em, (PLpgSQL_row *) stmt->target, index);
 
 	plllvm_ir_emit(ir, "call void @plllvm_pj_sql_end(ptr %%ctx, i32 %d)", index);
 
@@ -2890,6 +2908,156 @@ emit_fori(PjEmit *em, PLpgSQL_stmt_fori *stmt)
 	poll_if_boxed(em, boxed0);
 }
 
+/* the values the helper left for the targets of statement index */
+static void
+emit_into_store(PjEmit *em, PLpgSQL_row *row, int index)
+{
+	plllvm_ir  *ir = em->ir;
+	const char *out = plllvm_ir_tmp(ir);
+
+	plllvm_ir_declare(ir, "declare ptr @plllvm_pj_sql_out(ptr, i32)");
+	plllvm_ir_emit(ir, "%s = call ptr @plllvm_pj_sql_out(ptr %%ctx, i32 %d)",
+				   out, index);
+	for (int i = 0; i < row->nfields; i++)
+	{
+		PLpgSQL_var *var = (PLpgSQL_var *) em->func->datums[row->varnos[i]];
+		const char *value = plllvm_ir_tmp(ir);
+		const char *flag = plllvm_ir_tmp(ir);
+		const char *isnull = plllvm_ir_tmp(ir);
+		size_t		at = i * sizeof(PjSqlOut);
+
+		plllvm_ir_emit(ir, "%s = load i64, ptr %s", value,
+					   field_ptr(ir, out, at + offsetof(PjSqlOut, value)));
+		plllvm_ir_emit(ir, "%s = load i8, ptr %s", flag,
+					   field_ptr(ir, out, at + offsetof(PjSqlOut, isnull)));
+		plllvm_ir_emit(ir, "%s = trunc i8 %s to i1", isnull, flag);
+		if (var->datatype->typbyval)
+			store_var(em, var->dno, value, isnull);
+		else
+			assign_var(em, var, value, isnull, false);
+	}
+}
+
+/*
+ * exec_stmt_fors() with scalar targets.  plllvm_pj_fors_open() opens the portal
+ * and moves the first row, _next() the next ones, and every edge out of the
+ * loop calls _close().  FOUND is set before the close: the close of a portal
+ * of a query that does not write cannot change it.
+ */
+static void
+emit_fors(PjEmit *em, PLpgSQL_stmt_fors *stmt)
+{
+	plllvm_ir  *ir = em->ir;
+	int			index = em->next_expr++;
+	const PjExpr *pe = list_nth(em->h->exprs, index);
+	PLpgSQL_row *row = (PLpgSQL_row *) stmt->var;
+	const char *body = plllvm_ir_label(ir);
+	const char *next = plllvm_ir_label(ir);
+	const char *more = plllvm_ir_label(ir);
+	const char *zero = plllvm_ir_label(ir);
+	const char *done_true = plllvm_ir_label(ir);
+	const char *done = plllvm_ir_label(ir);
+	const char *rc = plllvm_ir_tmp(ir);
+	const char *taken = plllvm_ir_tmp(ir);
+	int			boxed0 = em->nboxed;
+	PjFrame    *frame;
+
+	if (pe->owner != stmt->query)
+		elog(ERROR, "plpgsql_jit: expression %d out of order", index);
+
+	if (pe->h1 != PJ_H1_SQL)
+	{
+		emit_deopt(em, index);
+		frame = frame_push(&em->frames, stmt->label, true, false);
+		frame->exit_to = done;
+		frame->cont_to = done;
+		emit_stmts(em, stmt->body);
+		frame_pop(&em->frames);
+		if (em->open)
+			branch(em, done);
+		begin_block(em, done);
+		return;
+	}
+
+	plllvm_ir_declare(ir, "declare ptr @plllvm_pj_sql_params(ptr, i32)");
+	plllvm_ir_declare(ir, "declare i32 @plllvm_pj_fors_open(ptr, i32)");
+	plllvm_ir_declare(ir, "declare i32 @plllvm_pj_fors_next(ptr, i32)");
+	plllvm_ir_declare(ir, "declare void @plllvm_pj_fors_close(ptr, i32)");
+
+	if (!bms_is_empty(pe->sql->paramnos))
+	{
+		const char *params = plllvm_ir_tmp(ir);
+
+		plllvm_ir_emit(ir, "%s = call ptr @plllvm_pj_sql_params(ptr %%ctx, i32 %d)",
+					   params, index);
+		spill_params(em, params, pe->sql->paramnos, -1);
+	}
+
+	plllvm_ir_emit(ir, "%s = call i32 @plllvm_pj_fors_open(ptr %%ctx, i32 %d)",
+				   rc, index);
+	em->nboxed++;
+	/* the targets: the first row, or NULLs for none */
+	emit_into_store(em, row, index);
+	plllvm_ir_emit(ir, "%s = icmp ne i32 %s, 0", taken, rc);
+	branch_if(em, taken, body, zero);
+
+	frame = frame_push(&em->frames, stmt->label, true, false);
+	frame->fors = true;
+	frame->fors_idx = index;
+	frame->exit_to = done_true;
+	frame->cont_to = next;
+
+	begin_block(em, body);
+	emit_body(em, stmt->body, stmt->stmtid);
+	if (em->open)
+		branch(em, next);
+	frame_pop(&em->frames);
+
+	begin_block(em, next);
+	{
+		const char *rc2 = plllvm_ir_tmp(ir);
+		const char *taken2 = plllvm_ir_tmp(ir);
+
+		set_pos(em, stmt->stmtid);
+		plllvm_ir_emit(ir, "%s = call i32 @plllvm_pj_fors_next(ptr %%ctx, i32 %d)",
+					   rc2, index);
+		plllvm_ir_emit(ir, "%s = icmp ne i32 %s, 0", taken2, rc2);
+		branch_if(em, taken2, more, done_true);
+	}
+	begin_block(em, more);
+	emit_into_store(em, row, index);
+	branch(em, body);
+
+	begin_block(em, zero);
+	set_found(em, false);
+	plllvm_ir_emit(ir, "call void @plllvm_pj_fors_close(ptr %%ctx, i32 %d)", index);
+	branch(em, done);
+	begin_block(em, done_true);
+	set_found(em, true);
+	plllvm_ir_emit(ir, "call void @plllvm_pj_fors_close(ptr %%ctx, i32 %d)", index);
+	branch(em, done);
+	begin_block(em, done);
+	em->poll_pending = true;
+	poll_if_boxed(em, boxed0);
+}
+
+/*
+ * Close the portals of the FORs over a query between here and target (all of
+ * them for a RETURN), innermost first.  The value of a RETURN is out before.
+ */
+static void
+fors_close_crossed(PjEmit *em, PjFrame *target)
+{
+	foreach_ptr(PjFrame, f, em->frames)
+	{
+		if (f == target)
+			break;
+		if (f->fors)
+			plllvm_ir_emit(em->ir, "call void @plllvm_pj_fors_close(ptr %%ctx, i32 %d)",
+						   f->fors_idx);
+	}
+}
+
 static void
 emit_exit(PjEmit *em, PLpgSQL_stmt_exit *stmt)
 {
@@ -2910,9 +3078,10 @@ emit_exit(PjEmit *em, PLpgSQL_stmt_exit *stmt)
 	target = frame_find(em->frames, stmt->label, !stmt->is_exit, &crossed);
 	Assert(target != NULL);
 
-	/* a FOR that is left sets FOUND (exec_stmt_fori) */
+	/* a FOR that is left sets FOUND (exec_stmt_fori), and closes its portal */
 	if (crossed)
 		set_found(em, true);
+	fors_close_crossed(em, target);
 	branch(em, stmt->is_exit ? target->exit_to : target->cont_to);
 
 	if (skip != NULL)
@@ -2949,6 +3118,7 @@ emit_return(PjEmit *em, PLpgSQL_stmt_return *stmt)
 	else if (em->func->fn_rettype != VOIDOID)
 		isnull = "true";
 	em->in_return = false;
+	fors_close_crossed(em, NULL);
 
 	at = field_ptr(ir, "%fcinfo", offsetof(FunctionCallInfoBaseData, isnull));
 	z = plllvm_ir_tmp(ir);
