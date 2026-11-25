@@ -52,7 +52,7 @@ REGRESS_PJ = pj_language pj_basic pj_errors pj_guards pj_execute pj_casts pj_ses
 		pj_control pj_kernels pj_ops pj_bounds pj_memory pj_boxed pj_abort pj_planfree pj_calls \
 		pj_byref pj_udf pj_typmod pj_raise pj_array pj_case pj_into pj_elements pj_sql pj_sql_into pj_sql_dml pj_results
 REGRESS_PJ_ONCE = pj_states pj_discard pj_execute_diff pj_arms pj_ctxraw pj_sql_once pj_sql_sessions \
-		pj_sessions_midcall
+		pj_sessions_midcall pj_route
 REGRESS_PJ_OPT = pj_kernels pj_ops
 
 REGRESS_OPTS = --dbname=$(PL_TESTDB)
@@ -343,18 +343,20 @@ PJ_FIXTURE = plllvm_setup pj_setup
 # $(call pj_run,PGOPTIONS,files)
 pj_run = PJ_LANG=plpgsql_jit $(MAKE) installcheck REGRESS='$(2)' PGOPTIONS='$(1)'
 
-installcheck-pj:
+installcheck-pj: check-oracle
 	$(call pj_run,$(PLPGSQL_LOAD) -c plllvm.plpgsql_jit=off,$(PJ_FIXTURE) $(REGRESS_PJ) pj_stats)
 	$(call pj_run,$(PLPGSQL_LOAD) -c plllvm.pj_opt_level=0,$(PJ_FIXTURE) $(REGRESS_PJ) pj_stats)
 	$(call pj_run,$(PLPGSQL_LOAD) -c plllvm.pj_opt_level=2,$(PJ_FIXTURE) $(REGRESS_PJ) pj_stats)
 	$(call pj_run,$(PLPGSQL_LOAD) -c plllvm.pj_codegen=v1,$(PJ_FIXTURE) $(REGRESS_PJ) pj_stats)
 	$(call pj_run,$(EXPR_JIT) -c plllvm.expr_eager=on,$(PJ_FIXTURE) $(REGRESS_PJ) pj_stats)
 	$(call pj_run,$(PLPGSQL_LOAD) -c debug_discard_caches=1,$(PJ_FIXTURE) pj_guards pj_array pj_results pj_stats)
+	$(call pj_run,$(PLPGSQL_LOAD) -c plllvm.debug_inject=pj_verify_route,$(PJ_FIXTURE) $(REGRESS_PJ) pj_stats)
 
 # expected from plllvm, so not against stock
-installcheck-pj-once:
+installcheck-pj-once: check-oracle
 	@[ -z '$(REGRESS_PJ_ONCE)' ] || \
-	  $(call pj_run,$(PLPGSQL_LOAD),$(PJ_FIXTURE) $(REGRESS_PJ_ONCE))
+	  $(call pj_run,$(PLPGSQL_LOAD),$(PJ_FIXTURE) $(REGRESS_PJ_ONCE)) && \
+	  $(call pj_run,$(PLPGSQL_LOAD) -c plllvm.debug_inject=pj_verify_route,$(PJ_FIXTURE) pj_route)
 
 # A foreign table of postgres_fdw (contrib), on a loopback server: skipped, with
 # the reason, on an installation without it
@@ -485,9 +487,16 @@ NDML ?= 500
 NROW ?= 500
 SEED ?= 1
 
-.PHONY: fuzz-pj check-pj-fuzz
+.PHONY: fuzz-pj check-pj-fuzz check-oracle
 
-fuzz-pj: port-ok
+# plllvm.debug_inject = pj_verify_route acts only on a server with assertions
+# (debug_assertions on); without them the oracle runs of the suites would pass
+# without checking anything
+check-oracle: port-ok
+	@[ "`'$(bindir)/psql' -X -At -h /tmp -p $(PLLLVM_PORT) -d postgres -c 'SHOW debug_assertions'`" = on ] || \
+	  { echo "check-oracle: the server has no assertions, so pj_verify_route checks nothing" >&2; exit 1; }
+
+fuzz-pj: port-ok check-oracle
 	@case "$(origin PLLLVM_PORT):$(PLLLVM_PORT)" in file:*|*:|*:544[2-5]) \
 	  echo "fuzz-pj needs the PLLLVM_PORT of a throwaway cluster" >&2; \
 	  exit 1;; esac
@@ -511,7 +520,10 @@ fuzz-pj: port-ok
 	    --mode dml --n $(NDML) --seed $(SEED) --opt-level $$o --out results-fuzz/dml-O$$o || rc=1; \
 	  python3 -I tools/pj_fuzz.py --psql '$(bindir)/psql' --host /tmp --port $(PLLLVM_PORT) \
 	    --mode row --n $(NROW) --seed $(SEED) --opt-level $$o --out results-fuzz/row-O$$o || rc=1; \
-	done; exit $$rc
+	done; \
+	python3 -I tools/pj_fuzz.py --psql '$(bindir)/psql' --host /tmp --port $(PLLLVM_PORT) \
+	  --n $(N) --seed $(SEED) --debug-inject pj_verify_route --out results-fuzz/route || rc=1; \
+	exit $$rc
 
 # The classes of the fuzzer on programs of known shape, and 300 programs with
 # CASE and SELECT INTO, flat and ref, of which 15% of those that have the
@@ -578,7 +590,7 @@ verify: port-ok
 	[ -d '$(PLLLVM_DATA)' ] || step $(MAKE) cluster-init; \
 	'$(bindir)/pg_ctl' -D '$(PLLLVM_DATA)' status > /dev/null || step $(MAKE) cluster-start; \
 	for t in installcheck installcheck-opt installcheck-discard installcheck-hazard \
-	  check-host-api pgindent doctor installcheck-expr installcheck-plpgsql \
+	  check-host-api pgindent doctor check-oracle installcheck-expr installcheck-plpgsql \
 	  installcheck-pj installcheck-pj-once installcheck-pj-opt installcheck-pj-fdw installcheck-plpgsql-pj \
 	  check-pj-ir check-pj-cmodule check-pj-fuzz pl-drift; do \
 	  step $(MAKE) $$t; \

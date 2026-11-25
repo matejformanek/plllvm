@@ -110,7 +110,9 @@ REVOKE ALL ON FUNCTION plllvm_jit_test(text, int4, bool) FROM PUBLIC;
 -- out of range.  sql_execs counts the SQL statements compiled code ran
 -- through SPI; sql_rewalks the statements whose plan was walked at the entry
 -- of a compiled call; sql_stale the walks that found a statement no longer
--- what it was admitted as, after which the function translates again
+-- what it was admitted as, after which the function translates again.
+-- routed counts the declined calls that went to PL/pgSQL without a compile of
+-- ours, and is among the declines
 CREATE FUNCTION plllvm_pj_stats(OUT calls int8, OUT compiled_calls int8,
                                 OUT deopts int8, OUT interpreted_calls int8,
                                 OUT declines int8, OUT guard_misses int8,
@@ -120,7 +122,8 @@ CREATE FUNCTION plllvm_pj_stats(OUT calls int8, OUT compiled_calls int8,
                                 OUT boxed_evals int8, OUT resident int8,
                                 OUT peak_tuple_bytes int8,
                                 OUT elem_slow int8, OUT sql_execs int8,
-                                OUT sql_stale int8, OUT sql_rewalks int8)
+                                OUT sql_stale int8, OUT sql_rewalks int8,
+                                OUT routed int8)
   RETURNS record
   VOLATILE LANGUAGE c AS 'MODULE_PATHNAME';
 

@@ -2782,6 +2782,8 @@ def run_psql(args, sql, opt=None, extra=""):
     env["PGOPTIONS"] = "-c session_preload_libraries=plllvm" + extra
     if opt is not None:
         env["PGOPTIONS"] += " -c plllvm.pj_opt_level=%d" % opt
+    if args.debug_inject:
+        env["PGOPTIONS"] += " -c plllvm.debug_inject=%s" % args.debug_inject
     p = subprocess.run([args.psql, "-X", "-q", "-At", "-h", args.host, "-p", str(args.port),
                         "-d", DB, "-v", "ON_ERROR_STOP=0", "-f", "-"],
                        input=sql, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
@@ -2929,6 +2931,8 @@ def main():
     ap.add_argument("--floor-dml", type=float, default=0.25, dest="floor_dml")
     ap.add_argument("--floor-row", type=float, default=0.6, dest="floor_row")
     ap.add_argument("--floor-recover", type=float, default=0.9, dest="floor_recover")
+    ap.add_argument("--debug-inject", dest="debug_inject", default=None,
+                    help="value of plllvm.debug_inject for the sessions")
     ap.add_argument("-v", action="store_true")
     ap.add_argument("--selftest", action="store_true", help="check frame_mix, no cluster")
     args = ap.parse_args()

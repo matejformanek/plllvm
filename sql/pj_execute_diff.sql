@@ -383,10 +383,11 @@ DROP OWNED BY regress_pj_r3;
 DROP ROLE regress_pj_r3;
 
 -- the switch of the language turned off in the middle of a compiled call: the
--- inner frames go to PL/pgSQL without a lookup, and nothing marks the
--- expression the outer frame runs, so a nested SECURITY DEFINER frame whose
--- owner lacks int4pl reaches the state that the interpreted call built before
--- it.  PL/pgSQL: 42501, its outer frame being busy in the expression.
+-- inner frames go to PL/pgSQL, which has no frame of its own here, so the
+-- handler marks the expression the outer frame runs as busy, and a nested
+-- SECURITY DEFINER frame whose owner lacks int4pl raises 42501 as PL/pgSQL
+-- does.  Unmarked, it reached the state that the interpreted call built before
+-- it and returned 5.
 CREATE ROLE regress_pj_own;
 CREATE FUNCTION pdd_ks(n int) RETURNS int LANGUAGE plpgsql STABLE SECURITY DEFINER AS $$
 BEGIN

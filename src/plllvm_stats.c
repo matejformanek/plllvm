@@ -372,8 +372,8 @@ plllvm_pj_stats(PG_FUNCTION_ARGS)
 {
 	const plllvm_pj_counters *c = &plllvm_pj_count;
 	TupleDesc	tupdesc;
-	Datum		values[19];
-	bool		nulls[19] = {0};
+	Datum		values[20];
+	bool		nulls[20] = {0};
 
 	if (get_call_result_type(fcinfo, NULL, &tupdesc) != TYPEFUNC_COMPOSITE)
 		elog(ERROR, "return type must be a row type");
@@ -397,6 +397,7 @@ plllvm_pj_stats(PG_FUNCTION_ARGS)
 	values[16] = Int64GetDatum(c->sql_execs);
 	values[17] = Int64GetDatum(c->sql_stale);
 	values[18] = Int64GetDatum(c->sql_rewalks);
+	values[19] = Int64GetDatum(c->routed);
 
 	PG_RETURN_DATUM(HeapTupleGetDatum(heap_form_tuple(tupdesc, values, nulls)));
 }

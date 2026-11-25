@@ -32,7 +32,7 @@ SELECT calls = 4 AS calls_ok,
          resident = translations AS translated_ok,
        declines + guard_misses + null_args + plugin_fallbacks + capped +
        failures + deopts + boxed_evals + peak_tuple_bytes + elem_slow +
-       sql_execs + sql_stale + sql_rewalks = 0 AS rest_ok
+       sql_execs + sql_stale + sql_rewalks + routed = 0 AS rest_ok
   FROM plllvm_pj_stats(),
        (SELECT current_setting('plllvm.plpgsql_jit')::bool AND
                current_setting('debug_discard_caches')::int = 0 AS compiles) s;
