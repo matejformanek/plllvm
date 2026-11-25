@@ -1,0 +1,216 @@
+--
+-- pj_route: a call of a declined function goes straight to PL/pgSQL
+--
+-- Expected from plllvm, in one variant, and again under
+-- plllvm.debug_inject = pj_verify_route, which checks every shortcut against
+-- the slow identification of the entry (in a build with assertions).  Each
+-- answer is a boolean, so both runs print the same.  pr_run() runs a
+-- statement and compares the change of the counters of plllvm_pj_stats()
+-- with "name=value ..." (name>value for a lower bound).
+--
+SET client_min_messages = warning;
+CREATE EXTENSION IF NOT EXISTS dblink;
+RESET client_min_messages;
+\pset format unaligned
+\pset tuples_only on
+SELECT format('host=%s port=%s dbname=%s user=%s',
+              current_setting('unix_socket_directories'),
+              current_setting('port'), current_database(), current_user) AS conn \gset
+SELECT dblink_connect('other', :'conn');
+
+CREATE FUNCTION pr_run(q text, want text) RETURNS bool LANGUAGE plpgsql AS $$
+DECLARE b jsonb; c jsonb; w text; k text; v int8; d int8; ok bool := true;
+BEGIN
+  SELECT row_to_json(s)::jsonb INTO b FROM plllvm_pj_stats() s;
+  EXECUTE q;
+  SELECT row_to_json(s)::jsonb INTO c FROM plllvm_pj_stats() s;
+  FOREACH w IN ARRAY string_to_array(want, ' ') LOOP
+    k := substring(w from '^[a-z_]+');
+    v := substring(w from '[0-9]+$')::int8;
+    d := (c->>k)::int8 - (b->>k)::int8;
+    ok := ok AND CASE WHEN w ~ '>' THEN d > v ELSE d = v END;
+  END LOOP;
+  RETURN ok;
+END $$;
+-- k calls of fn(n), each at a fresh call site
+CREATE FUNCTION pr_fresh(fn text, k int) RETURNS int8 LANGUAGE plpgsql AS $$
+DECLARE s int8 := 0; v int;
+BEGIN
+  FOR i IN 1..k LOOP
+    EXECUTE format('SELECT %s(%s)', fn, i - 2) INTO v;
+    s := s + coalesce(v, 0);
+  END LOOP;
+  RETURN s;
+END $$;
+
+-- a declined function: declined by its first call, routed from the second,
+-- at a call site that keeps its FmgrInfo and at fresh ones; the compiled one
+-- is not routed
+CREATE FUNCTION pr_one(n int) RETURNS int LANGUAGE plpgsql_jit AS $$
+BEGIN RETURN n; EXCEPTION WHEN others THEN RETURN 0; END $$;
+CREATE FUNCTION pr_inc(n int) RETURNS int LANGUAGE plpgsql_jit AS $$
+BEGIN RETURN n + 1; END $$;
+SELECT pr_run('SELECT pr_one(1)', 'calls=1 declines=1 routed=0');
+SELECT state = 'declined' AND last_path = 'declined:exception block'
+  FROM plllvm_pj_status('pr_one(int)');
+SELECT pr_run('SELECT sum(pr_one(g)) FROM generate_series(1, 10) g',
+              'calls=10 declines=10 interpreted_calls=10 routed=10') AND
+       pr_run($$SELECT pr_fresh('pr_one', 10)$$, 'calls=10 declines=10 routed=10');
+SELECT calls = 21 FROM plllvm_pj_status('pr_one(int)');
+SELECT pr_inc(1) + pr_inc(2) + pr_inc(3) = 9 AND
+       pr_run('SELECT sum(pr_inc(g)) FROM generate_series(1, 10) g', 'declines=0 routed=0') AND
+       (SELECT calls = compiled_calls + deopts + interpreted_calls AND
+               routed <= declines AND declines <= interpreted_calls
+          FROM plllvm_pj_stats());
+-- cold: the first call declines at once, so every later one is routed, in
+-- the function itself too (a frame of it runs)
+CREATE FUNCTION pr_rec(n int) RETURNS int LANGUAGE plpgsql_jit AS $$
+BEGIN
+  IF n <= 0 THEN RETURN 0; END IF;
+  RETURN pr_rec(n - 1) + n;
+EXCEPTION WHEN OTHERS THEN RETURN -1;
+END $$;
+SELECT pr_run('SELECT pr_rec(5)', 'calls=6 declines=6 routed=5');
+
+-- one struct per argument types: routed only where fn_extra names it
+CREATE FUNCTION pr_poly(a anyelement) RETURNS int LANGUAGE plpgsql_jit AS $$
+BEGIN RETURN 1; END $$;
+CREATE TABLE pr_t1 (a int);
+CREATE TABLE pr_t2 (b text);
+INSERT INTO pr_t1 VALUES (1);
+INSERT INTO pr_t2 VALUES ('x');
+CREATE FUNCTION pr_row(r record) RETURNS int LANGUAGE plpgsql_jit AS $$
+BEGIN RETURN 1; END $$;
+SELECT pr_run('SELECT sum(pr_poly(g)) FROM generate_series(1, 10) g', 'declines=10 routed=9') AND
+       pr_run($$SELECT pr_fresh('pr_poly', 5)$$, 'declines=5 routed=0') AND
+       pr_run('SELECT sum(pr_row(t1)) + sum(pr_row(t2)) FROM pr_t1 t1, pr_t2 t2,
+                      generate_series(1, 5)', 'declines=10 routed=0');
+
+-- one function, two triggers: each has its struct and its route (a new entry
+-- moves the epoch, so the route of the other one is made again once)
+CREATE TABLE pr_ta (a int);
+CREATE TABLE pr_tb (a int);
+CREATE FUNCTION pr_trg() RETURNS trigger LANGUAGE plpgsql_jit AS $$
+BEGIN RETURN NEW; END $$;
+CREATE TRIGGER pr_trg_a BEFORE INSERT ON pr_ta FOR EACH ROW EXECUTE FUNCTION pr_trg();
+CREATE TRIGGER pr_trg_b BEFORE INSERT ON pr_tb FOR EACH ROW EXECUTE FUNCTION pr_trg();
+SELECT pr_run($$INSERT INTO pr_ta SELECT g FROM generate_series(1, 5) g;
+                INSERT INTO pr_tb SELECT g FROM generate_series(1, 5) g;
+                INSERT INTO pr_ta SELECT g FROM generate_series(1, 5) g;
+                INSERT INTO pr_tb SELECT g FROM generate_series(1, 5) g$$,
+              'declines=20 routed=17');
+
+-- one function, two input collations
+CREATE FUNCTION pr_coll(t text) RETURNS int LANGUAGE plpgsql_jit AS $$
+BEGIN RETURN length(t); EXCEPTION WHEN others THEN RETURN 0; END $$;
+SELECT pr_run($$SELECT sum(pr_coll('x' COLLATE "C")), sum(pr_coll('y' COLLATE "POSIX"))
+                  FROM generate_series(1, 10)$$, 'declines=20 routed=17');
+
+-- replaced by a compilable body: compiled by the second call at a fresh site;
+-- replaced in another session: the same
+CREATE FUNCTION pr_flip(n int) RETURNS int LANGUAGE plpgsql_jit AS $$
+BEGIN RETURN n + 1; EXCEPTION WHEN others THEN RETURN 0; END $$;
+SELECT pr_run($$SELECT pr_fresh('pr_flip', 6)$$, 'declines=6');
+CREATE OR REPLACE FUNCTION pr_flip(n int) RETURNS int LANGUAGE plpgsql_jit AS $$
+BEGIN RETURN n + 2; END $$;
+SELECT pr_run($$SELECT pr_fresh('pr_flip', 2)$$, 'compiled_calls=1');
+CREATE FUNCTION pr_oth(n int) RETURNS int LANGUAGE plpgsql_jit AS $$
+BEGIN RETURN n + 1; EXCEPTION WHEN others THEN RETURN 0; END $$;
+SELECT (SELECT sum(pr_oth(g)) FROM generate_series(1, 5) g) = 20;
+SELECT dblink_exec('other', $$CREATE OR REPLACE FUNCTION pr_oth(n int) RETURNS int
+  LANGUAGE plpgsql_jit AS 'BEGIN RETURN n + 10; END'$$);
+SELECT pr_run($$SELECT pr_fresh('pr_oth', 2)$$, 'compiled_calls=1');
+SELECT sum(pr_oth(g)) = 65 FROM generate_series(1, 5) g;
+SELECT dblink_exec('other', $$CREATE OR REPLACE FUNCTION pr_oth(n int) RETURNS int
+  LANGUAGE plpgsql_jit AS 'BEGIN RETURN n + 20; EXCEPTION WHEN others THEN RETURN 0; END'$$);
+SELECT (SELECT sum(pr_oth(g)) FROM generate_series(1, 5) g) = 115;
+
+-- a compiled function calls one that the switch plpgsql_jit = off turns to
+-- PL/pgSQL, which calls the first again while its compiled frame runs
+CREATE FUNCTION pr_g(n int) RETURNS int LANGUAGE plpgsql_jit STABLE
+  SET plllvm.plpgsql_jit = off AS $$
+BEGIN IF n <= 0 THEN RETURN 0; END IF; RETURN pr_f(n - 1) + 1; END $$;
+CREATE FUNCTION pr_f(n int) RETURNS int LANGUAGE plpgsql_jit STABLE AS $$
+BEGIN IF n <= 0 THEN RETURN 0; END IF; RETURN pr_g(n - 1) + 1; END $$;
+SELECT pr_f(9) = 9 AND pr_f(9) = 9 AND pr_f(10) = 10 AND
+       (SELECT sum(pr_f(g)) FROM generate_series(1, 12) g) = 78;
+SELECT compiled_calls > 0 FROM plllvm_pj_status('pr_f(int)');
+
+-- declined as thrashing while a compiled frame of it runs: the calls nested in
+-- that frame, a second one of the same level included, are PL/pgSQL's and
+-- unrouted; the later ones are routed.  The plans are discarded at the top of
+-- the call that nests, so that the guards of the inner call miss; it takes
+-- eight misses
+CREATE FUNCTION pr_flush_v(f int) RETURNS int LANGUAGE plpgsql AS $$
+BEGIN IF f > 0 THEN EXECUTE 'DISCARD PLANS'; END IF; RETURN 0; END $$;
+CREATE FUNCTION pr_flush(f int) RETURNS int LANGUAGE plpgsql STABLE AS $$
+BEGIN RETURN pr_flush_v(f); END $$;
+CREATE FUNCTION pr_t(n int, f int) RETURNS int LANGUAGE plpgsql_jit STABLE AS $$
+DECLARE x int := n * 2;
+BEGIN
+  IF n <= 0 THEN RETURN 0; END IF;
+  x := x + pr_flush((n = f)::int);
+  RETURN x + pr_t(n - 1, f) + pr_t(n - 1, f);
+END $$;
+SELECT pr_t(3, 0) = 22 AND pr_t(3, 0) = 22 AND pr_t(3, 0) = 22;
+SELECT (SELECT sum(pr_t(3, 3)) FROM generate_series(1, 20)) = 20 * 22;
+SELECT state = 'declined' AND reason = 'thrash' FROM plllvm_pj_status('pr_t(int,int)');
+SELECT pr_run('SELECT sum(pr_t(3, 3)) FROM generate_series(1, 20)', 'routed>0');
+
+-- two structs of one key, one of them running compiled: its FmgrInfo (a call
+-- site of a compiled frame) names it, while the route knows the declined one.
+-- The replace is rolled back, which makes the running struct valid again, and
+-- the struct funccache holds is compiled again under
+-- plpgsql.variable_conflict = use_column, which declines it
+CREATE FUNCTION pr_dance(d int) RETURNS int LANGUAGE plpgsql AS $$
+DECLARE v int;
+BEGIN
+  IF d = 0 THEN RETURN 0; END IF;
+  BEGIN
+    EXECUTE $q$CREATE OR REPLACE FUNCTION pr_i(n int, d int) RETURNS int
+      LANGUAGE plpgsql_jit STABLE AS 'BEGIN RETURN n + 1000; END'$q$;
+    EXECUTE 'SELECT pr_i(0, 0)' INTO v;
+    RAISE EXCEPTION 'undo';
+  EXCEPTION WHEN raise_exception THEN NULL;
+  END;
+  SET LOCAL plpgsql.variable_conflict = use_column;
+  EXECUTE 'SELECT pr_i(0, 0)' INTO v;
+  RETURN 0;
+END $$;
+CREATE FUNCTION pr_dance_s(d int) RETURNS int LANGUAGE plpgsql STABLE AS $$
+BEGIN RETURN pr_dance(d); END $$;
+CREATE FUNCTION pr_i(n int, d int) RETURNS int LANGUAGE plpgsql_jit STABLE AS $$
+DECLARE x int := 0;
+BEGIN
+  IF n <= 0 THEN PERFORM n; RETURN n + pr_dance_s(d); END IF;
+  FOR i IN 1..2 LOOP
+    x := x + pr_i(n - 1, CASE WHEN i = 1 THEN d ELSE 0 END);
+  END LOOP;
+  RETURN x + n;
+END $$;
+SELECT pr_i(1, 0) = 1 AND pr_i(1, 0) = 1 AND pr_i(1, 0) = 1;
+SELECT compiled_calls > 0 FROM plllvm_pj_status('pr_i(int,int)');
+SELECT pr_i(1, 1) = 1 AND pr_i(1, 0) = 1;
+
+-- a function replaces itself during a call, and an older call site keeps the
+-- struct funccache rebuilds in place: a later site must not take the route
+-- made for the shared key (PL/pgSQL warns of the second insert)
+CREATE FUNCTION pr_self(n int, d int) RETURNS int LANGUAGE plpgsql_jit AS $$
+BEGIN
+  IF d = 1 THEN
+    EXECUTE $q$CREATE OR REPLACE FUNCTION pr_self(n int, d int) RETURNS int
+      LANGUAGE plpgsql_jit AS 'BEGIN RETURN n; EXCEPTION WHEN others THEN RETURN 0; END'$q$;
+    PERFORM pr_self(0, 0);
+  END IF;
+  RETURN n;
+EXCEPTION WHEN others THEN RETURN 0;
+END $$;
+SET client_min_messages = error;
+BEGIN;
+SELECT sum(pr_self(g, CASE WHEN g = 1 THEN 1 ELSE 0 END) + pr_self(g + 100, 0)) = 312
+  FROM generate_series(1, 3) g;
+SELECT pr_self(5, 0) = 5;
+COMMIT;
+RESET client_min_messages;
+
+SELECT dblink_disconnect('other');

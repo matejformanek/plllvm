@@ -56,8 +56,9 @@ SELECT pa_peak() < 65536 AS peak_small_arg;
 -- an element store changes the array in place, it is not copied: 4000 stores
 -- in an array of 32 MB cost less than 100 copies of it, where a copy of each
 -- would cost 4000.  Both are timed in the same call, so a slow host moves
--- them together.  (A volatile callee would keep the function interpreted, so
--- the clock is labelled STABLE.)
+-- them together; the margin is thin under debug_discard_caches, where a stall
+-- of the host between the two timings can fail it.  (A volatile callee would
+-- keep the function interpreted, so the clock is labelled STABLE.)
 CREATE FUNCTION pa_clock() RETURNS timestamptz LANGUAGE plpgsql STABLE AS $$
 BEGIN RETURN clock_timestamp(); END $$;
 CREATE FUNCTION pa_store(n int, copies int) RETURNS bool LANGUAGE :pj_lang AS $$
