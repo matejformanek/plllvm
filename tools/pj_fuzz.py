@@ -97,6 +97,14 @@ from compiled to PL/pgSQL's and back), and a table that is truncated and
 refilled.  The table is printed after every call, so a write that differs is
 a difference.  The run fails if fewer than --floor-dml of the programs ran a
 statement that writes through SPI in compiled code.
+--mode fors writes the programs of sql with FOR loops over a query: scalar
+targets, row counts around the batches of 10 and 50, a query that raises
+at a row, labelled EXIT and CONTINUE across loops, RETURN in a body, statements
+of the body, and FOR UPDATE.  The run fails if fewer than --floor-fors of the
+programs with such a loop ran SQL compiled, and --floor-fors-pure of the
+programs of loops alone, whose only SQL is the loops' queries, ran one
+(sql_execs counts the query of a loop once).  The programs have a
+statement_timeout of a minute, which a loaded machine does not reach.
 --mode row writes functions with OUT parameters (one, several, INOUT) and
 with a composite result: RETURN ROW(...), a cast to the row type of a table,
 a call of a function that returns it, NULL, RECORD, and the row type of a table
@@ -125,9 +133,9 @@ schema name is normalised.  Every statement of a script is a step.
 
 Usage: pj_fuzz.py --psql <psql> --host <dir> --port <port> [--n N] [--start I]
                   [--seed S] [--opt-level 0|2|3] [--out dir] [--floor 0.5]
-                  [--mode flat|rec|ref|elem|sql|dml|row] [--cx] [--floor-cx 0.15]
+                  [--mode flat|rec|ref|elem|sql|dml|fors|row] [--cx] [--floor-cx 0.15]
                   [--floor-elem 0.9] [--floor-sql 0.4] [--floor-into 0.3]
-                  [--floor-dml 0.25] [--floor-row 0.6] [--floor-recover 0.9]
+                  [--floor-dml 0.25] [--floor-fors 0.4] [--floor-fors-pure 0.4] [--floor-row 0.6] [--floor-recover 0.9]
 """
 import argparse
 import os
@@ -2121,10 +2129,14 @@ class SqlGen:
     targets of an INTO are tx, ty (text), ix, iy (integer), big (bigint) and
     nn (integer NOT NULL), which a statement's collect() appends to r."""
 
-    def __init__(self, rng, into=False, writes=False):
+    def __init__(self, rng, into=False, writes=False, fors=False):
         self.r = rng
         self.into = into
         self.writes = writes
+        self.fors = fors            # loops over a query among the statements
+        self.pure = False           # no statement but the loops' queries
+        self.labels = []            # of the loops around the statement
+        self.nfors = 0
 
     def collect(self):
         return " r := r || found::text || coalesce(tx, '-') || coalesce(ix::text, '-') || coalesce(big::text, '-');"
@@ -2243,10 +2255,75 @@ class SqlGen:
             return "PERFORM %s;" % v
         return "PERFORM 1 FROM sq_t WHERE b = t || %s::text;" % v
 
+    def fors_loop(self, d, raising=False):
+        """A FOR over a query with integer and text targets (i, tx), or one
+        integer (i), and a body of statements and of ways out of the loop."""
+        r = self.r
+        self.nfors += 1
+        cnt = r.choice(["1", "10", "11", "60", "61", "n * 11", "n * 11", "3 + n"])
+        if self.labels:
+            # inside a loop the rows multiply: the program must stay short
+            cnt = r.choice(["1", "3", "3 + n"])
+        kind = r.random() if not raising else 0.65
+        if kind < 0.3:
+            targets, q = "i, tx", "SELECT g, 'v' || g FROM generate_series(1, %s) g" % cnt
+        elif kind < 0.45:
+            targets, q = "i, tx", "SELECT a, b FROM sq_t WHERE a > n - 3 ORDER BY a"
+        elif kind < 0.5:
+            targets, q = "i, tx", "SELECT a, b FROM sq_w ORDER BY a"
+        elif kind < 0.6:
+            targets, q = "i", "SELECT g FROM generate_series(1, %s) g WHERE g <> n" % cnt
+        elif kind < 0.72 and raising:
+            targets, q = "i", ("SELECT 1 / (%d - g) FROM generate_series(1, 70) g"
+                               % r.choice([5, 11, 40, 61, 90]))
+        elif kind < 0.8 or kind < 0.72:
+            targets, q = "i", "SELECT a FROM sq_t WHERE b <> t ORDER BY a FOR UPDATE"
+        elif kind < 0.9:
+            targets, q = "i, ix", "SELECT g, g %% 3, g FROM generate_series(1, %s) g" % cnt \
+                if r.random() < 0.3 else "SELECT g, g %% 3 FROM generate_series(1, %s) g" % cnt
+        else:
+            targets, q = "i", "SELECT g FROM generate_series(1, %s) g WHERE t <> 'x'" % cnt
+        label = "l%d" % self.nfors
+        self.labels.append(label)
+        body = []
+        for _ in range(r.randint(1, 3)):
+            x = r.random()
+            if x < 0.2:
+                body.append("EXIT WHEN i %% %d = 0;" % r.randint(2, 12))
+            elif x < 0.35:
+                body.append("CONTINUE WHEN i %% %d = 0;" % r.randint(2, 5))
+            elif x < 0.45 and len(self.labels) > 1:
+                body.append("%s %s WHEN i %% %d = 0;" % (r.choice(["EXIT", "CONTINUE"]),
+                            r.choice(self.labels[:-1]), r.randint(2, 7)))
+            elif x < 0.52:
+                # only one of the warm calls takes it out of the function; of
+                # a variable, for the value of an expression it would be
+                # unplanned until it is taken
+                body.append("IF n = 3 AND i %% %d = 0 THEN RETURN r; END IF;"
+                            % r.randint(2, 15))
+            elif x < 0.6:
+                body.append("RAISE NOTICE 'i=%', i;")
+            elif x < 0.68 and not self.pure:
+                body.append(self.dml(True) + self.collect())
+            elif x < 0.75 and not self.pure:
+                body.append(self.stmt(0, True))
+            else:
+                body.append("r := r || coalesce(i::text, '-') || ',';")
+        if r.random() < 0.3:
+            # FOUND as the loop found it, before any statement of the body
+            body.insert(0, "r := r || found::text || ';';")
+        self.labels.pop()
+        # what follows a loop that raises is never planned
+        after = "" if raising else (" r := r || '/' || found::text || coalesce(i::text, '-') "
+                                    "|| coalesce(tx, '-');")
+        return "<<%s>> FOR %s IN %s LOOP %s END LOOP;%s" % (label, targets, q, " ".join(body), after)
+
     def stmt(self, d, loop):
         r = self.r
         x = r.random()
         if x < 0.55 or d <= 0:
+            if self.fors and r.random() < 0.6:
+                return self.fors_loop(d)
             if self.writes:
                 return self.dml(loop) + self.collect()
             if self.into or r.random() < 0.35:
@@ -2263,32 +2340,48 @@ class SqlGen:
 
 
 class SqlProgram:
-    def __init__(self, seed, cat=None, cx=False, dml=False):
+    def __init__(self, seed, cat=None, cx=False, dml=False, fors=False):
         r = random.Random(seed)
         self.rng = r
         self.seed = seed
+        self.fors = fors
+        # the programs with loops also write, to see what a body did to sq_w
+        dml = dml or fors
         self.dml = dml
         # a part of the programs has no PERFORM at all, to count them
         self.into = r.random() < 0.4
-        g = SqlGen(r, self.into, dml)
+        g = SqlGen(r, self.into, dml and not fors, fors)
         # (a loop in a branch that a call does not take leaves its statements
         # unplanned and the function waiting, so the programs of writes are shallow)
-        self.body = [g.stmt(1 if dml else 2, False) for _ in range(r.randint(2, 5))]
+        self.pure = fors and r.random() < 0.3
+        g.pure = self.pure
+        if self.pure:
+            self.body = [g.fors_loop(0) for _ in range(r.randint(1, 3))]
+        else:
+            self.body = [g.stmt(1 if dml or fors else 2, False) for _ in range(r.randint(2, 5))]
+        if fors and not g.nfors:
+            self.body.append(g.fors_loop(1))
+        self.has_fors = g.nfors > 0
+        self.timeout = "60s" if fors else "10s"
+        if fors and r.random() < 0.6:
+            # a query that raises at a row, which only an edge call reaches
+            self.body.append("IF n = %d THEN %s END IF;" % (SQL_RARE + 1, g.fors_loop(0, True)))
         # a statement no warm call reaches: planned by the call that takes it
-        if dml:
+        if dml and not fors:
             rare = g.dml(False) + g.collect()
         else:
             rare = g.select_into(False) + g.collect() if self.into else \
                 g.perform(False) + " r := r || found::text;"
-        self.body.insert(r.randint(0, len(self.body)),
-                         "IF n = %d THEN %s END IF;" % (SQL_RARE, rare))
-        if r.random() < 0.15:
+        if not self.pure:
+            self.body.insert(r.randint(0, len(self.body)),
+                             "IF n = %d THEN %s END IF;" % (SQL_RARE, rare))
+        if not self.pure and r.random() < 0.15:
             # SELECT with no INTO, which raises
             self.body.append("IF n = %d THEN SELECT n; END IF;" % (SQL_RARE + 1))
-        if dml and r.random() < 0.5:
+        if dml and not fors and r.random() < 0.5:
             self.body.append("IF n = %d THEN %s END IF;"
                              % (SQL_RARE + 1, g.dml(False, True) + g.collect()))
-        elif self.into and not dml and r.random() < 0.5:
+        elif self.into and not dml and not self.pure and r.random() < 0.5:
             # an INTO that raises, which only an edge call reaches
             self.body.append("IF n = %d THEN %s END IF;"
                              % (SQL_RARE + 1, g.select_into(False, True) + g.collect()))
@@ -2417,7 +2510,7 @@ def main_sql(args):
     failed = False
     for i in range(args.start, args.start + args.n):
         seed = "%d:%d" % (args.seed, i)
-        prog = SqlProgram(seed, dml=args.mode == "dml")
+        prog = SqlProgram(seed, dml=args.mode == "dml", fors=args.mode == "fors")
         a, b = run_pair(args, prog)
         verdict, step = compare(args, prog, a, b, tally)
         tally[verdict] += 1
@@ -2428,11 +2521,17 @@ def main_sql(args):
             tally["compiled"] += 1
         if prog.into:
             tally["into-programs"] += 1
+        if prog.fors and prog.has_fors:
+            tally["fors-programs"] += 1
+            tally["fors-pure-programs"] += prog.pure
         if ok and int(st[5]) > 0:
             tally["ran-sql"] += 1
             tally["sql-execs"] += int(st[5])
             if prog.into:
                 tally["into-ran-sql"] += 1
+            if prog.fors and prog.has_fors:
+                tally["fors-ran-sql"] += 1
+                tally["fors-pure-ran-sql"] += prog.pure
         else:
             reasons["%s %s, last path %s" % (st[0], st[1], st[6]) if ok else "no status"] += 1
         if ok:
@@ -2458,7 +2557,20 @@ def main_sql(args):
              tally["deopts"], tally["into-programs"], tally["into-ran-sql"]))
     for k, v in reasons.most_common(8):
         print("  no SQL compiled: %5d  %s" % (v, k))
-    floor = args.floor_dml if args.mode == "dml" else args.floor_sql
+    floor = args.floor_dml if args.mode in ("dml", "fors") else args.floor_sql
+    if args.mode == "fors":
+        floor = args.floor_sql
+        print("  programs with a FOR over a query: %d, ran SQL compiled: %d; of loops alone: %d, %d"
+              % (tally["fors-programs"], tally["fors-ran-sql"],
+                 tally["fors-pure-programs"], tally["fors-pure-ran-sql"]))
+        if tally["fors-pure-ran-sql"] < args.floor_fors_pure * tally["fors-pure-programs"]:
+            print("pj_fuzz: programs of loops alone that ran their queries compiled below the "
+                  "floor of %.0f%%" % (100 * args.floor_fors_pure))
+            failed = True
+        if tally["fors-ran-sql"] < args.floor_fors * tally["fors-programs"]:
+            print("pj_fuzz: programs with a FOR that ran SQL compiled below the floor of %.0f%%"
+                  % (100 * args.floor_fors))
+            failed = True
     if tally["ran-sql"] < floor * args.n:
         print("pj_fuzz: programs that ran SQL compiled below the floor of %.0f%%"
               % (100 * floor))
@@ -2755,8 +2867,8 @@ LEAK = ("SELECT (SELECT count(*) FROM pg_proc WHERE proacl IS NOT NULL"
 def script(prog, lang, status=False):
     sch = SCHEMAS[lang]
     o = CLEAN + ("\\set VERBOSITY verbose\n\\set SHOW_CONTEXT always\n"
-                 "SET search_path = %s, public;\nSET statement_timeout = '10s';\n"
-                 "\\set lang %s\n" % (sch, lang))
+                 "SET search_path = %s, public;\nSET statement_timeout = '%s';\n"
+                 "\\set lang %s\n" % (sch, getattr(prog, "timeout", "10s"), lang))
     for i, s in enumerate(prog.steps):
         o += "\\echo @@ %d\n" % i
         if s == "@create":
@@ -2922,13 +3034,15 @@ def main():
     ap.add_argument("--opt-level", type=int, default=None)
     ap.add_argument("--out", default="results-fuzz")
     ap.add_argument("--floor", type=float, default=0.5)
-    ap.add_argument("--mode", choices=["flat", "rec", "ref", "elem", "sql", "dml", "row"], default="flat")
+    ap.add_argument("--mode", choices=["flat", "rec", "ref", "elem", "sql", "dml", "fors", "row"], default="flat")
     ap.add_argument("--cx", action="store_true", help="CASE and SELECT INTO (flat, ref)")
     ap.add_argument("--floor-cx", type=float, default=0.15, dest="floor_cx")
     ap.add_argument("--floor-elem", type=float, default=0.9, dest="floor_elem")
     ap.add_argument("--floor-sql", type=float, default=0.4, dest="floor_sql")
     ap.add_argument("--floor-into", type=float, default=0.3, dest="floor_into")
     ap.add_argument("--floor-dml", type=float, default=0.25, dest="floor_dml")
+    ap.add_argument("--floor-fors", type=float, default=0.4, dest="floor_fors")
+    ap.add_argument("--floor-fors-pure", type=float, default=0.4, dest="floor_fors_pure")
     ap.add_argument("--floor-row", type=float, default=0.6, dest="floor_row")
     ap.add_argument("--floor-recover", type=float, default=0.9, dest="floor_recover")
     ap.add_argument("--debug-inject", dest="debug_inject", default=None,
@@ -2951,7 +3065,7 @@ def main():
         if args.cx:
             ap.error("--cx is for flat and ref programs")
         sys.exit(main_elem(args))
-    if args.mode in ("sql", "dml"):
+    if args.mode in ("sql", "dml", "fors"):
         if args.cx:
             ap.error("--cx is for flat and ref programs")
         sys.exit(main_sql(args))

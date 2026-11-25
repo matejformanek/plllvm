@@ -472,7 +472,8 @@ pl-drift:
 # The differential fuzzer: N programs from SEED, as plpgsql and as plpgsql_jit
 # at opt level 0 and 2, NREC recursive ones, NREF over text and numeric and
 # NELEM of reads and stores of array elements, NSQL of PERFORM, SELECT INTO and
-# statements for SPI, NDML of the same with INSERT, UPDATE and DELETE, NROW of
+# statements for SPI, NDML of the same with INSERT, UPDATE and DELETE, NFORS of
+# the same with FOR loops over a query, NROW of
 # OUT parameters and composite results, in the throwaway database pj_fuzz.  A
 # difference is reported by seed, with the program and both outputs in
 # results-fuzz/.  Not part of installcheck or verify.  NCX programs of each of
@@ -485,6 +486,7 @@ NELEM ?= 500
 NSQL ?= 500
 NDML ?= 500
 NROW ?= 500
+NFORS ?= 500
 SEED ?= 1
 
 .PHONY: fuzz-pj check-pj-fuzz check-oracle
@@ -519,6 +521,8 @@ fuzz-pj: port-ok check-oracle
 	  python3 -I tools/pj_fuzz.py --psql '$(bindir)/psql' --host /tmp --port $(PLLLVM_PORT) \
 	    --mode dml --n $(NDML) --seed $(SEED) --opt-level $$o --out results-fuzz/dml-O$$o || rc=1; \
 	  python3 -I tools/pj_fuzz.py --psql '$(bindir)/psql' --host /tmp --port $(PLLLVM_PORT) \
+	    --mode fors --n $(NFORS) --seed $(SEED) --opt-level $$o --out results-fuzz/fors-O$$o || rc=1; \
+	  python3 -I tools/pj_fuzz.py --psql '$(bindir)/psql' --host /tmp --port $(PLLLVM_PORT) \
 	    --mode row --n $(NROW) --seed $(SEED) --opt-level $$o --out results-fuzz/row-O$$o || rc=1; \
 	done; \
 	python3 -I tools/pj_fuzz.py --psql '$(bindir)/psql' --host /tmp --port $(PLLLVM_PORT) \
@@ -533,7 +537,10 @@ fuzz-pj: port-ok check-oracle
 # of the executor in 90% of them, and deopt.  150 programs of statements for
 # SPI must have run one in compiled code in 40% of them, and 30% of those that
 # have SELECT INTO alone, and 150 programs of statements that write must have
-# run one in 25% of them, and 150 programs of OUT parameters and composite
+# run one in 25% of them, and 150 programs with FOR loops over a query must
+# have run SQL compiled in 40% of those that have one, and in 40% of those
+# that have nothing but such loops, and 150 programs
+# of OUT parameters and composite
 # results must have compiled in 60% and deopted.  setup() drops and recreates
 # the fuzz database, so the cluster must be a throwaway
 check-pj-fuzz: port-ok
@@ -572,6 +579,9 @@ check-pj-fuzz: port-ok
 	python3 -I tools/pj_fuzz.py --psql '$(bindir)/psql' --host /tmp --port $(PLLLVM_PORT) \
 	  --mode dml --seed 21 --n 150 --opt-level 0 --floor-dml 0.25 --out results-fuzz/dml-O0 > results-fuzz/dml-O0.log; \
 	  rc=$$?; cat results-fuzz/dml-O0.log >&2; [ $$rc = 0 ]
+	python3 -I tools/pj_fuzz.py --psql '$(bindir)/psql' --host /tmp --port $(PLLLVM_PORT) \
+	  --mode fors --seed 21 --n 150 --opt-level 0 --out results-fuzz/fors-O0 > results-fuzz/fors-O0.log; \
+	  rc=$$?; cat results-fuzz/fors-O0.log >&2; [ $$rc = 0 ]
 	python3 -I tools/pj_fuzz.py --psql '$(bindir)/psql' --host /tmp --port $(PLLLVM_PORT) \
 	  --mode row --seed 21 --n 150 --opt-level 0 --out results-fuzz/row-O0 > results-fuzz/row-O0.log; \
 	  rc=$$?; cat results-fuzz/row-O0.log >&2; [ $$rc = 0 ]
