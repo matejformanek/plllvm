@@ -39,6 +39,7 @@ CoerceToDomain
 CoerceViaIO
 CoercionForm
 ColumnRef
+CommandDest
 CommandId
 CommandTag
 CommonTableExpr
@@ -50,6 +51,7 @@ ConstrCheck
 Cost
 Datum
 DatumTupleFields
+DestReceiver
 Dl_info
 DomainConstraintCache
 EOM_flatten_into_method
@@ -236,6 +238,7 @@ PLpgSQL_stmt_case
 PLpgSQL_stmt_execsql
 PLpgSQL_stmt_exit
 PLpgSQL_stmt_fori
+PLpgSQL_stmt_fors
 PLpgSQL_stmt_if
 PLpgSQL_stmt_loop
 PLpgSQL_stmt_perform
@@ -270,6 +273,10 @@ PartitionKey
 PgStat_Counter
 PgStat_FunctionCallUsage
 PgStat_FunctionCounts
+PgStat_IndexCounts
+PgStat_RelationStatus
+PgStat_TableCounts
+PgStat_TableCountsXact
 Pg_abi_values
 Pg_finfo_record
 Pg_magic_struct
@@ -294,6 +301,7 @@ PjLevel
 PjMay
 PjParams
 PjPath
+PjPortalState
 PjPos
 PjRoute
 PjRouteKey
@@ -301,6 +309,7 @@ PjSaved
 PjScope
 PjScopeWalk
 PjShadow
+PjShadowSave
 PjSite
 PjSiteDesc
 PjSiteKind
@@ -316,6 +325,9 @@ PlanState
 PlannedStmt
 PlannedStmtOrigin
 Pointer
+Portal
+PortalStatus
+PortalStrategy
 PostParseColumnRefHook
 PostRewriteHook
 PreParseColumnRefHook
@@ -324,6 +336,8 @@ ProjectionInfo
 PublicationActions
 PublicationDesc
 Query
+QueryCompletion
+QueryDesc
 QueryEnvironment
 QuerySource
 RTEKind
@@ -385,6 +399,7 @@ TU_UpdateIndexes
 TableFunc
 TableFuncType
 TableScanDesc
+TimestampTz
 TransactionId
 Trigger
 TriggerData

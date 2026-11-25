@@ -14,6 +14,7 @@
 
 #include "access/xact.h"
 #include "executor/executor.h"
+#include "executor/spi.h"
 #include "fmgr.h"
 #include "lib/ilist.h"
 #include "lib/stringinfo.h"
@@ -21,6 +22,7 @@
 #include "nodes/pg_list.h"
 #include "nodes/primnodes.h"
 #include "utils/plancache.h"
+#include "utils/portal.h"
 
 struct plllvm_path;
 
@@ -104,6 +106,8 @@ typedef struct PjCtx
 	struct PjHarvest *harvest;
 	struct PjLevel *lv;
 	struct PjCtx *outer;		/* the frame of the same entry below */
+	int32		fors_open;		/* portals of a FOR over a query not closed
+								 * yet */
 } PjCtx;
 
 typedef Datum (*PjCode) (FunctionCallInfo fcinfo, PjCtx *ctx);
@@ -137,7 +141,8 @@ typedef enum PjSqlKind
 {
 	PJ_SQL_NONE,
 	PJ_SQL_PERFORM,
-	PJ_SQL_EXECSQL
+	PJ_SQL_EXECSQL,
+	PJ_SQL_FORS
 } PjSqlKind;
 
 /*
@@ -205,6 +210,7 @@ typedef struct PjExpr
 								 * composite result */
 	PjSqlKind	sql_kind;		/* not PJ_SQL_NONE: a statement for SPI */
 	struct PLpgSQL_stmt_execsql *stmt;	/* its statement, if it has an INTO */
+	struct PLpgSQL_stmt_fors *fors_stmt;	/* the FOR whose query it is */
 	PjSql	   *sql;			/* PJ_H1_SQL only, in the harvest context */
 	/* READY only, copies in the harvest context */
 	Expr	   *tree;
@@ -284,6 +290,19 @@ typedef struct PjVariant
 	int			nsites;
 } PjVariant;
 
+/*
+ * The rows of a FOR over a query, in batches fetched from its portal.  The
+ * batch is the helper's own, never SPI_tuptable, which a statement of the loop
+ * body replaces.
+ */
+typedef struct PjPortalState
+{
+	Portal		portal;
+	SPITupleTable *tuptab;		/* the batch that is moved from */
+	uint64		n;				/* its rows ... */
+	uint64		i;				/* ... and the one moved last */
+} PjPortalState;
+
 /* a boxed expression's executor state, per level of one frame's activation */
 typedef struct PjSlot
 {
@@ -293,6 +312,7 @@ typedef struct PjSlot
 	uint64		epoch;			/* ... at this state of the catalogs */
 	ParamListInfo sql_params;	/* of an SQL statement: its members only */
 	struct PjSqlOut *sql_out;	/* the values for its INTO targets */
+	PjPortalState *portal;		/* of a FOR over a query, while it runs */
 	bool		sql_converted;	/* a value was converted: per-tuple memory */
 } PjSlot;
 
@@ -373,6 +393,9 @@ extern const char *plllvm_pj_sql_harvest(struct PLpgSQL_function *func,
 										 PjHarvest *h, PjExpr *pe);
 extern bool plllvm_pj_sql_guard(PjSql *sql, const char **soft);
 extern void plllvm_pj_sql_finish(PjCtx *ctx);
+extern int32 plllvm_pj_fors_open(PjCtx *ctx, int32 idx);
+extern int32 plllvm_pj_fors_next(PjCtx *ctx, int32 idx);
+extern void plllvm_pj_fors_close(PjCtx *ctx, int32 idx);
 extern Datum plllvm_pj_convert(PjCtx *ctx, Datum value, bool *isnull,
 							   Oid srctype, int32 srctypmod,
 							   Oid dsttype, int32 dsttypmod);

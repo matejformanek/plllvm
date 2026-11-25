@@ -165,6 +165,9 @@ extern void *plllvm_pj_sql_params(struct PjCtx *ctx, int32 idx);
 extern int32 plllvm_pj_sql(struct PjCtx *ctx, int32 idx);
 extern void *plllvm_pj_sql_out(struct PjCtx *ctx, int32 idx);
 extern void plllvm_pj_sql_end(struct PjCtx *ctx, int32 idx);
+extern int32 plllvm_pj_fors_open(struct PjCtx *ctx, int32 idx);
+extern int32 plllvm_pj_fors_next(struct PjCtx *ctx, int32 idx);
+extern void plllvm_pj_fors_close(struct PjCtx *ctx, int32 idx);
 
 /* a value for an INTO target, as plllvm_pj_sql_out() has them */
 typedef struct PjSqlOut
